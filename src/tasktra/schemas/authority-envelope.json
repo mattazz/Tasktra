@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tasktra authority envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "version", "goal_id", "outcome", "motivation", "author_id", "acceptance_criteria", "scope", "allowed_actions", "allowed_effects", "prohibited_actions", "quality_requirements", "budgets", "dependencies", "checkpoints", "stop_conditions", "escalation_conditions"],
+  "properties": {
+    "kind": {"const": "tasktra.authority-envelope"},
+    "version": {"const": 1},
+    "goal_id": {"$ref": "#/$defs/id"},
+    "outcome": {"$ref": "#/$defs/text"},
+    "motivation": {"$ref": "#/$defs/longText"},
+    "author_id": {"$ref": "#/$defs/id"},
+    "acceptance_criteria": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/$defs/criterion"}},
+    "scope": {"$ref": "#/$defs/scope"},
+    "allowed_actions": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"$ref": "#/$defs/id"}},
+    "allowed_effects": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"enum": ["read-only", "local-reversible-write"]}},
+    "prohibited_actions": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/id"}},
+    "quality_requirements": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/text"}},
+    "budgets": {"$ref": "#/$defs/budgets"},
+    "dependencies": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/id"}},
+    "checkpoints": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/id"}},
+    "stop_conditions": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/text"}},
+    "escalation_conditions": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/text"}}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"},
+    "text": {"type": "string", "minLength": 1, "maxLength": 500},
+    "longText": {"type": "string", "minLength": 1, "maxLength": 2000},
+    "path": {"type": "string", "minLength": 1, "maxLength": 240},
+    "criterion": {"type": "object", "additionalProperties": false, "required": ["id", "statement"], "properties": {"id": {"$ref": "#/$defs/id"}, "statement": {"$ref": "#/$defs/text"}}},
+    "scope": {"type": "object", "additionalProperties": false, "required": ["paths", "exclusions"], "properties": {"paths": {"type": "array", "minItems": 1, "maxItems": 128, "items": {"$ref": "#/$defs/path"}}, "exclusions": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/path"}}}},
+    "budgets": {"type": "object", "additionalProperties": false, "required": ["tokens", "attempts", "elapsed_seconds", "concurrency"], "properties": {"tokens": {"type": ["integer", "null"], "minimum": 0, "maximum": 2147483647}, "attempts": {"type": "integer", "minimum": 1, "maximum": 2147483647}, "elapsed_seconds": {"type": "integer", "minimum": 1, "maximum": 2147483647}, "concurrency": {"type": "integer", "minimum": 1, "maximum": 2147483647}}}
+  }
+}

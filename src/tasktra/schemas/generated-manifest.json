@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tasktra generated output manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "tasktra_version", "catalog_version", "packs", "files"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "tasktra_version": {"type": "string", "minLength": 1},
+    "catalog_version": {"type": "string", "minLength": 1},
+    "packs": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "files": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["path", "sha256", "size"], "properties": {"path": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "size": {"type": "integer", "minimum": 0}}}}
+  }
+}

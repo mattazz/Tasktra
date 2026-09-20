@@ -1,0 +1,17 @@
+# Profile: customized service/API workflow.
+[project]
+name = "Sample service API"
+config_version = 1
+
+[runtime]
+database = ".tasktra/runtime/tasktra.sqlite"
+concurrency_limit = 2
+
+[packs]
+enabled = ["python"]
+
+[catalog]
+trust_builtin = false
+
+[validation]
+commands = [["python", "-c", "from pathlib import Path; assert Path('src/api.py').is_file()"]]

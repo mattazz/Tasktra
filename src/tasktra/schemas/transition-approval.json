@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tasktra transition approval",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "version", "approval_id", "goal_id", "work_unit_id", "action", "effect", "scope", "envelope_sha256", "decision", "approver", "performer_id", "authority_clause", "evidence", "valid_until", "revoked_at"],
+  "properties": {
+    "kind": {"const": "tasktra.transition-approval"},
+    "version": {"const": 1},
+    "approval_id": {"$ref": "#/$defs/id"},
+    "goal_id": {"$ref": "#/$defs/id"},
+    "work_unit_id": {"type": ["string", "null"], "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"},
+    "action": {"$ref": "#/$defs/id"},
+    "effect": {"enum": ["read-only", "local-reversible-write"]},
+    "scope": {"$ref": "#/$defs/scope"},
+    "envelope_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "decision": {"enum": ["approved", "rejected", "needs_human_review"]},
+    "approver": {"type": "object", "additionalProperties": false, "required": ["kind", "id"], "properties": {"kind": {"enum": ["human", "steward"]}, "id": {"$ref": "#/$defs/id"}}},
+    "performer_id": {"$ref": "#/$defs/id"},
+    "authority_clause": {"$ref": "#/$defs/text"},
+    "evidence": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/id"}},
+    "valid_until": {"type": ["string", "null"], "maxLength": 64},
+    "revoked_at": {"type": ["string", "null"], "maxLength": 64}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"},
+    "text": {"type": "string", "minLength": 1, "maxLength": 500},
+    "path": {"type": "string", "minLength": 1, "maxLength": 240},
+    "scope": {"type": "object", "additionalProperties": false, "required": ["paths", "exclusions"], "properties": {"paths": {"type": "array", "minItems": 1, "maxItems": 128, "items": {"$ref": "#/$defs/path"}}, "exclusions": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/path"}}}}
+  }
+}

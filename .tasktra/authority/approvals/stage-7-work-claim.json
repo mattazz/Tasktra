@@ -1,0 +1,18 @@
+{
+  "kind": "tasktra.transition-approval",
+  "version": 1,
+  "approval_id": "stage-7-work-claim",
+  "goal_id": "tasktra-1-0",
+  "work_unit_id": "stage-7-operations-release",
+  "action": "work-claim",
+  "effect": "local-reversible-write",
+  "scope": {"paths": ["."], "exclusions": []},
+  "envelope_sha256": "5da4d6f1677787c638a2934ae08fa1d8caff8beab785499d0b31a5539f8163cd",
+  "decision": "approved",
+  "approver": {"kind": "steward", "id": "goal-steward"},
+  "performer_id": "tasktra-coordinator",
+  "authority_clause": "Stage 7 scheduling, CI, examples, operations guidance, packaging, self-hosting evidence, and local 1.0 release validation are inside the confirmed roadmap and repository-local reversible scope.",
+  "evidence": ["stage-seven-checklist", "stage-six-completion"],
+  "valid_until": "2027-09-19T23:59:59Z",
+  "revoked_at": null
+}

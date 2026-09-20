@@ -1,0 +1,26 @@
+{
+  "kind": "tasktra.transition-approval",
+  "version": 1,
+  "approval_id": "tasktra-1-0-activate",
+  "goal_id": "tasktra-1-0",
+  "work_unit_id": null,
+  "action": "goal-activate",
+  "effect": "local-reversible-write",
+  "scope": {
+    "paths": ["."],
+    "exclusions": []
+  },
+  "envelope_sha256": "5da4d6f1677787c638a2934ae08fa1d8caff8beab785499d0b31a5539f8163cd",
+  "decision": "approved",
+  "approver": {
+    "kind": "human",
+    "id": "matt"
+  },
+  "performer_id": "tasktra-coordinator",
+  "authority_clause": "User confirmed the complete locally scoped Tasktra implementation plan and continuous staged delivery.",
+  "evidence": [
+    "user-confirmation"
+  ],
+  "valid_until": "2027-09-19T23:59:59Z",
+  "revoked_at": null
+}

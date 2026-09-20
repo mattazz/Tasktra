@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tasktra"
+version = "1.0.0"
+description = "A Codex-first, local-first workflow orchestration foundation."
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Tasktra contributors" }]
+readme = "README.md"
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+
+[project.scripts]
+tasktra = "tasktra.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+tasktra = ["schemas/*.json", "catalog/*.toml", "catalog/**/*.toml", "catalog/**/*.md"]
+
+[tool.unittest]
+start-directory = "tests"

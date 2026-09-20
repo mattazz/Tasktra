@@ -1,0 +1,4 @@
+---
+{"created_at":"2026-09-20T09:20:04Z","goal_id":"tasktra-1-0","id":"stage-5-specialist-ecosystem-packs","labels":["packs","stage"],"metadata":{"workflow_completion":{"kind":"tasktra.workflow-completion-token","source":{"goal_id":"tasktra-1-0","work_unit_id":"stage-5-specialist-ecosystem-packs"},"terminal_handoff_id":"stage-five-review","version":1,"workflow_sha256":"6ace3853fd227b03406b95fedcb4ddc7f5359c147214c264ff49225904836f5b"}},"schema_version":1,"status":"done","title":"Complete Stage 5 specialist and ecosystem packs","updated_at":"2026-09-20T12:21:55Z","version":2}
+---
+Deliver and independently verify docs/stages/stage-5.md. Add complete specialist contracts, generic/Python/TypeScript-web/monorepo packs, bounded preview-only detection, deterministic composition and migrations, project extension preservation, capability/trust preflight, and measured efficiency observations.

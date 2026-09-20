@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tasktra routing decision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "version", "task_id", "role", "primary_signal", "rationale"],
+  "properties": {
+    "kind": {"const": "tasktra.routing-decision"},
+    "version": {"const": 1},
+    "task_id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"},
+    "role": {"enum": ["scout", "writer", "implementer", "tester", "reviewer", "goal-steward", "escalation"]},
+    "primary_signal": {"enum": ["inspect", "write", "change", "validate", "review", "authority", "escalate"]},
+    "rationale": {"type": "string", "minLength": 1, "maxLength": 500}
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tasktra sanitized provider result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "version", "state", "summary", "items"],
+  "properties": {
+    "kind": {"const": "tasktra.provider-result"},
+    "version": {"const": 1},
+        "state": {"enum": ["pending", "succeeded", "failed", "indeterminate", "unavailable", "reconciled", "absent", "conflict"]},
+    "summary": {"type": "string", "minLength": 1, "maxLength": 500},
+    "items": {"type": "array", "maxItems": 64}
+  }
+}

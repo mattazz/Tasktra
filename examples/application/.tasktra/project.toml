@@ -1,0 +1,17 @@
+# Profile: ready-to-use generic application.
+[project]
+name = "Sample application"
+config_version = 1
+
+[runtime]
+database = ".tasktra/runtime/tasktra.sqlite"
+concurrency_limit = 1
+
+[packs]
+enabled = ["generic"]
+
+[catalog]
+trust_builtin = false
+
+[validation]
+commands = [["python", "-c", "from pathlib import Path; assert Path('src/main.py').is_file()"]]

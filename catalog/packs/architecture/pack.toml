@@ -1,0 +1,15 @@
+[pack]
+id = "architecture"
+version = "1.0.0"
+contract_version = 1
+trust = "builtin-data-only"
+dependencies = ["core"]
+conflicts = []
+roles = ["architecture-reviewer", "domain-modeler", "system-designer"]
+skills = []
+owns = ["role-family:architecture"]
+required_capabilities = []
+optional_capabilities = []
+validation_commands = []
+detection_markers = []
+detection_globs = []

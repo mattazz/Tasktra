@@ -1,0 +1,18 @@
+{
+  "kind": "tasktra.transition-approval",
+  "version": 1,
+  "approval_id": "stage-7-work-complete",
+  "goal_id": "tasktra-1-0",
+  "work_unit_id": "stage-7-operations-release",
+  "action": "work-complete",
+  "effect": "local-reversible-write",
+  "scope": {"paths": ["."], "exclusions": []},
+  "envelope_sha256": "5da4d6f1677787c638a2934ae08fa1d8caff8beab785499d0b31a5539f8163cd",
+  "decision": "approved",
+  "approver": {"kind": "steward", "id": "goal-steward"},
+  "performer_id": "tasktra-coordinator",
+  "authority_clause": "Stage 7 completion is allowed only after every release checklist criterion has durable evidence, cross-platform and packaging checks pass, self-hosting is proven, and independent reviewers find no blocker.",
+  "evidence": ["stage-seven-checklist"],
+  "valid_until": "2027-09-19T23:59:59Z",
+  "revoked_at": "2026-09-20T17:10:50Z"
+}

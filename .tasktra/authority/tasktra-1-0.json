@@ -1,0 +1,82 @@
+{
+  "kind": "tasktra.authority-envelope",
+  "version": 1,
+  "goal_id": "tasktra-1-0",
+  "outcome": "Deliver the complete Tasktra 1.0 generic software-development orchestration baseline.",
+  "motivation": "Provide a Codex-first, local-first, reusable orchestration system that preserves specialist depth, enables approved long-running work, remains usable without online integrations, and optimizes token use without sacrificing required quality or validation.",
+  "author_id": "matt",
+  "acceptance_criteria": [
+    {
+      "id": "stage-gates",
+      "statement": "All roadmap stage gates have completion evidence"
+    },
+    {
+      "id": "definition-1-0",
+      "statement": "The 1.0 definition in docs/SPECIFICATION.md is satisfied"
+    },
+    {
+      "id": "independent-review",
+      "statement": "Independent acceptance and semantic reviews have no unresolved blockers"
+    }
+  ],
+  "scope": {
+    "paths": [
+      "."
+    ],
+    "exclusions": []
+  },
+  "allowed_actions": [
+    "acceptance-record",
+    "goal-activate",
+    "goal-complete",
+    "goal-resume",
+    "local-effect",
+    "work-claim",
+    "work-complete"
+  ],
+  "allowed_effects": [
+    "read-only",
+    "local-reversible-write"
+  ],
+  "prohibited_actions": [
+    "deploy",
+    "destructive-delete",
+    "external-communication",
+    "merge",
+    "remote-mutation",
+    "repository-history"
+  ],
+  "quality_requirements": [
+    "Meet every documented stage acceptance criterion before closing that stage.",
+    "Use focused deterministic checks before model review and preserve evidence once.",
+    "Keep default agent context bounded while retaining specialist roles for material work.",
+    "Require independent semantic and acceptance review for each stage boundary.",
+    "Keep optional online capabilities from blocking local work."
+  ],
+  "budgets": {
+    "tokens": null,
+    "attempts": 100,
+    "elapsed_seconds": 604800,
+    "concurrency": 3
+  },
+  "dependencies": [],
+  "checkpoints": [
+    "stage-three",
+    "stage-four",
+    "stage-five",
+    "stage-six",
+    "stage-seven"
+  ],
+  "stop_conditions": [
+    "Required work would modify data outside the Tasktra repository.",
+    "Required work would create a remote, deployment, merge, destructive, or repository-history effect.",
+    "Audit integrity cannot be established.",
+    "An explicit user stop or emergency stop is active."
+  ],
+  "escalation_conditions": [
+    "A material product choice is not covered by the confirmed specification.",
+    "A required action exceeds the recorded authority or effect classes.",
+    "Independent reviewers find a blocker that cannot be resolved locally.",
+    "A stage requires credentials, external coordination, or a consequential remote action."
+  ]
+}

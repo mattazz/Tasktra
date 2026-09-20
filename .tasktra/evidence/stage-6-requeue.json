@@ -1,0 +1,11 @@
+{
+  "reason": "The coordinator lease expired during a long Windows projection, full-suite validation, and independent review cycle.",
+  "recovery": "Tasktra recovered the expired attempt without preserving any active lease.",
+  "work_preserved": true,
+  "duplicate_external_effects": false,
+  "validation": {
+    "command": "python -m unittest discover -s tests -q",
+    "passed": 296,
+    "skipped": 5
+  }
+}

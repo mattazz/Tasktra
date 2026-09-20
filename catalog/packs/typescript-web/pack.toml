@@ -1,0 +1,21 @@
+[pack]
+id = "typescript-web"
+version = "1.0.0"
+contract_version = 1
+trust = "builtin-data-only"
+dependencies = ["generic"]
+conflicts = []
+roles = []
+skills = []
+owns = ["detection:typescript-web", "validation-defaults:typescript-web"]
+required_capabilities = []
+optional_capabilities = ["node"]
+validation_commands = [["npm", "test"]]
+detection_markers = ["package.json", "tsconfig.json"]
+detection_globs = ["*.ts", "*.tsx", "src/*.ts", "src/*.tsx"]
+activation_conditions = ["explicit-selection", "bounded-marker-match"]
+workflows = []
+schemas = []
+policies = ["typescript-framework-neutral-defaults"]
+adapters = []
+tests = ["typescript-web-pack-fixture"]

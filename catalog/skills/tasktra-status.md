@@ -1,0 +1,15 @@
+---
+id = "tasktra-status"
+title = "Explain durable goal status"
+family = "core"
+---
+# Explain durable goal status
+
+Use when a human asks about progress, budgets, authority, evidence, or blockers. This is read-only.
+
+1. Run `tasktra status --root <root>` for the concise project and runtime summary.
+2. For a named goal, run `tasktra goal --root <root> show <goal>` and report its lifecycle state, acceptance criteria, consumed and remaining budgets, and current checkpoint.
+3. Run `tasktra audit --root <root> verify` and disclose integrity failures before interpreting progress.
+4. Read the relevant durable work item and workflow only when detail is requested. Quote evidence identifiers and paths instead of copying long payloads.
+
+Do not infer completion from chat history or worker claims. Return verified progress, the next eligible action, approvals or capabilities required, and blockers in a concise default summary.

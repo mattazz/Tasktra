@@ -1,0 +1,21 @@
+[pack]
+id = "generic"
+version = "1.0.0"
+contract_version = 1
+trust = "builtin-data-only"
+dependencies = ["architecture", "delivery", "knowledge", "operations", "product", "quality", "software-development"]
+conflicts = []
+roles = []
+skills = []
+owns = ["ecosystem:generic-software"]
+required_capabilities = []
+optional_capabilities = ["git"]
+validation_commands = []
+detection_markers = []
+detection_globs = []
+activation_conditions = ["explicit-selection", "fallback-recommendation"]
+workflows = ["implementation-test-review"]
+schemas = []
+policies = ["generic-local-first"]
+adapters = []
+tests = ["generic-pack-fixture"]

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tasktra non-authoritative scheduler health report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "version", "schedulers"],
+  "properties": {
+    "kind": {"const": "tasktra.scheduler-health-report"},
+    "version": {"const": 1},
+    "schedulers": {"type": "array", "maxItems": 4, "items": {"$ref": "#/$defs/scheduler"}}
+  },
+  "$defs": {
+    "scheduler": {
+      "type": "object", "additionalProperties": false,
+      "required": ["scheduler", "state", "summary", "preferred_environment"],
+      "properties": {
+        "scheduler": {"enum": ["codex-scheduled-tasks", "ci", "local-runner", "manual"]},
+        "state": {"enum": ["available", "unavailable", "misconfigured", "degraded"]},
+        "summary": {"type": "string", "minLength": 1, "maxLength": 500},
+        "preferred_environment": {"enum": ["local-project", "isolated-worktree", "local-project-or-isolated-worktree", "isolated-runner"]}
+      }
+    }
+  }
+}

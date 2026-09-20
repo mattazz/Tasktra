@@ -1,0 +1,15 @@
+[pack]
+id = "operations"
+version = "1.0.0"
+contract_version = 1
+trust = "builtin-data-only"
+dependencies = ["core"]
+conflicts = []
+roles = ["deployment-reviewer", "incident-responder"]
+skills = []
+owns = ["role-family:operations"]
+required_capabilities = []
+optional_capabilities = []
+validation_commands = []
+detection_markers = []
+detection_globs = []

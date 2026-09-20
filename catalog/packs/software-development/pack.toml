@@ -1,0 +1,15 @@
+[pack]
+id = "software-development"
+version = "1.0.0"
+contract_version = 1
+trust = "builtin-data-only"
+dependencies = ["core"]
+conflicts = []
+roles = ["application-implementer", "backend-api-specialist", "data-migration-specialist", "developer-experience-specialist", "end-to-end-evaluator", "frontend-specialist", "integration-specialist", "refactoring-specialist", "reliability-observability-specialist", "test-automation-specialist"]
+skills = []
+owns = ["role-family:software-development"]
+required_capabilities = []
+optional_capabilities = ["git"]
+validation_commands = []
+detection_markers = []
+detection_globs = []

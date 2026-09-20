@@ -1,0 +1,49 @@
+{
+  "kind": "tasktra.stage-local-readiness",
+  "version": 1,
+  "stage": 7,
+  "decision": "local-ready-release-blocked",
+  "runtime": {
+    "schema": 10,
+    "tasktra_version": "1.0.0",
+    "catalog_version": "1.0.0",
+    "audit_events_checked": 66,
+    "audit_issues": []
+  },
+  "self_host_upgrade": {
+    "upgrade_plan_sha256": "2da1f95e532f68dc54e8a11ca206f8785847541d195ae048016b55e433de423c",
+    "migration_plan_sha256": "b40970bea78ac1fa6e4c6401c371b007d15d5f925cf92421b176716f9d20a776",
+    "before_schema": 8,
+    "after_schema": 10,
+    "runtime_backup": ".tasktra/runtime/tasktra.sqlite.v8.bak",
+    "runtime_backup_sha256": "a07cfd635a1a7bd3d500c353af7eef4e46fbf5a824b57640a48bb0f86877a98e",
+    "effect_intent": "stage-7-upgrade-1-0-final",
+    "effect_outcome": "success",
+    "interrupted_intents": {
+      "count": 4,
+      "outcome": "failed-before-mutation",
+      "status": "received",
+      "evidence_pattern": ".tasktra/evidence/upgrade-interruption-*.json"
+    },
+    "rollback_boundary": "Automatic projection rollback is disabled after a runtime schema migration; restore the exact verified database backup under explicit human recovery authority."
+  },
+  "validation": {
+    "total_test_cases": 341,
+    "passed": 335,
+    "skipped": 6,
+    "failed": 0,
+    "groups": 6,
+    "measured_command_elapsed_ms": 78133,
+    "supplemental_packaging": "wheel reproducibility passed with the cached wheel tooling",
+    "compile_check": "passed"
+  },
+  "release_gate": {
+    "open": true,
+    "local_version_consistency": "passed",
+    "remaining": [
+      "authoritative Windows, macOS, and Linux GitHub Actions evidence bound to one committed source revision, workflow, and artifact",
+      "independent final release review with no unresolved release blocker",
+      "RSA/SHA-256 signed 1.0 release decision bound to a committed trust key, CI, review, source, and artifact hashes"
+    ]
+  }
+}

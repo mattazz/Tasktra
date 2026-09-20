@@ -1,0 +1,34 @@
+[[skill]]
+id = "tasktra-doctor"
+title = "Diagnose Tasktra"
+purpose = "Use for configuration, capability, state, or projection problems. Inspect non-destructively first, classify the failure, and propose the smallest safe repair with evidence."
+
+[[skill]]
+id = "tasktra-upgrade"
+title = "Preview an upgrade"
+purpose = """Use when changing Tasktra versions or packs. Upgrades are preview-first and require one exact, unblocked, checksum-bound plan; do not reconstruct a plan from partial command output.
+
+## Procedure
+
+1. Produce a read-only upgrade preview from the installed lock and target catalog. Review current and target semantic versions, the on-disk runtime schema, pack checksums and contracts, runtime and pack migration steps, every managed create, update, and deletion, project-owned conflict, capability gap, and validation command.
+2. Stop if any compatibility edge, contract checksum, migration declaration, ownership conflict, or capability is blocked. A preview executes no migration and does not grant authority.
+3. Bind approval to the exact plan digest and its declared effects. Applying or rolling back needs explicit `local-effect` authority for `local-reversible-write`, with the request action recorded as `upgrade-apply` or `upgrade-rollback`; a changed digest requires a new preview and approval.
+4. Before mutation, preview the bounded pre-mutation snapshot. Apply only the approved exact plan through the recoverable migration workflow, retain its snapshot and receipt, and verify the lock, generated manifest, project-owned content, configured checks, and exact runtime transition. A trusted executable migration is full-host code execution: environment scrubbing and declared network/file effects improve reviewability but are not an operating-system sandbox.
+5. On a failed migration or verification, use the recorded snapshot and expected pre-mutation digest to roll back. If the runtime schema changed, automatic file rollback is unavailable: report the exact retained database-backup path and checksum for explicit human recovery. Do not report partial success as complete or manually reproduce migration effects outside the approved plan.
+
+Return the plan digest, authority scope, snapshot and rollback evidence, verification results, and every unresolved blocker."""
+
+[[skill]]
+id = "tasktra-propose"
+title = "Propose a reusable lesson"
+purpose = """Use when a project discovery may improve Tasktra. A lesson remains a reviewed proposal until an independent reviewer approves it; proposal content never grants authority to alter canonical sources.
+
+## Procedure
+
+1. Record a bounded draft with the observed problem, a general principle, durable evidence references and hashes, affected canonical contracts and intended changes, applicability constraints, risks, and direct-argv regression checks.
+2. Preserve the draft as a proposal. Its author cannot review, approve, or reject it, and it must not be used as authority for source edits, projection generation, validation execution, or provider effects.
+3. Have an independent reviewer move the proposal to `reviewed`, then approve or reject it with a recorded decision reason. Treat version conflicts, missing evidence, or unclear applicability as review blockers.
+4. For an approved proposal, generate and review its deterministic promotion plan. The plan identifies canonical-source changes, evidence, and regression checks but applies no changes.
+5. Obtain separate authority for the proposed canonical edits. Then update canonical sources, regenerate projections through the normal compiler and drift gates, and run the approved regression checks.
+
+Return the proposal ID and version, review decision and reviewer, promotion-plan digest or contents, canonical sources affected, regression evidence, and any authority still required."""

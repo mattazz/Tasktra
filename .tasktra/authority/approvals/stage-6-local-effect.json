@@ -1,0 +1,27 @@
+{
+  "kind": "tasktra.transition-approval",
+  "version": 1,
+  "approval_id": "stage-6-local-effect",
+  "goal_id": "tasktra-1-0",
+  "work_unit_id": "stage-6-lifecycle-optimization",
+  "action": "local-effect",
+  "effect": "local-reversible-write",
+  "scope": {
+    "paths": ["."],
+    "exclusions": []
+  },
+  "envelope_sha256": "5da4d6f1677787c638a2934ae08fa1d8caff8beab785499d0b31a5539f8163cd",
+  "decision": "approved",
+  "approver": {
+    "kind": "steward",
+    "id": "goal-steward"
+  },
+  "performer_id": "tasktra-coordinator",
+  "authority_clause": "Stage 6 may apply only checksum-confirmed, previewed local migrations and local telemetry or lesson records inside the repository, with recoverable snapshots and verification; no remote, deployment, history, or destructive effect is authorized.",
+  "evidence": [
+    "stage-six-checklist",
+    "stage-six-read-only-preview"
+  ],
+  "valid_until": "2027-09-19T23:59:59Z",
+  "revoked_at": null
+}

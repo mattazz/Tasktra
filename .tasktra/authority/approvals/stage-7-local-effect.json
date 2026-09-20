@@ -1,0 +1,27 @@
+{
+  "kind": "tasktra.transition-approval",
+  "version": 1,
+  "approval_id": "stage-7-local-effect",
+  "goal_id": "tasktra-1-0",
+  "work_unit_id": "stage-7-operations-release",
+  "action": "local-effect",
+  "effect": "local-reversible-write",
+  "scope": {
+    "paths": ["."],
+    "exclusions": []
+  },
+  "envelope_sha256": "5da4d6f1677787c638a2934ae08fa1d8caff8beab785499d0b31a5539f8163cd",
+  "decision": "approved",
+  "approver": {
+    "kind": "steward",
+    "id": "goal-steward"
+  },
+  "performer_id": "tasktra-coordinator",
+  "authority_clause": "Stage 7 may apply only the local, network-free upgrade plan with SHA-256 4f5d6bafba99fd140b75b297fd4d4b3c62e932084df00e089c2ea5fd68f0af8a, using its exact preview, runtime backup, validation, and effect receipt. No remote, deployment, history, communication, or destructive effect is authorized.",
+  "evidence": [
+    "stage-seven-upgrade-preview",
+    "stage-seven-upgrade-regression"
+  ],
+  "valid_until": "2027-09-19T23:59:59Z",
+  "revoked_at": null
+}

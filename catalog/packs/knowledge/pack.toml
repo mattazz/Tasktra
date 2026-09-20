@@ -1,0 +1,15 @@
+[pack]
+id = "knowledge"
+version = "1.0.0"
+contract_version = 1
+trust = "builtin-data-only"
+dependencies = ["core"]
+conflicts = []
+roles = ["documentation-curator", "lesson-curator"]
+skills = []
+owns = ["role-family:knowledge"]
+required_capabilities = []
+optional_capabilities = []
+validation_commands = []
+detection_markers = []
+detection_globs = []

@@ -1,0 +1,15 @@
+[pack]
+id = "product"
+version = "1.0.0"
+contract_version = 1
+trust = "builtin-data-only"
+dependencies = ["core"]
+conflicts = []
+roles = ["product-analyst", "research-analyst", "ux-accessibility-reviewer"]
+skills = []
+owns = ["role-family:product"]
+required_capabilities = []
+optional_capabilities = ["web-research"]
+validation_commands = []
+detection_markers = []
+detection_globs = []

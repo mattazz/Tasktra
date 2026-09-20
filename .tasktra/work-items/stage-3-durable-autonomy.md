@@ -1,0 +1,4 @@
+---
+{"created_at":"2026-09-19T22:53:34Z","goal_id":"tasktra-1-0","id":"stage-3-durable-autonomy","labels":["autonomy","stage"],"metadata":{"workflow_completion":{"kind":"tasktra.workflow-completion-token","source":{"goal_id":"tasktra-1-0","work_unit_id":"stage-3-durable-autonomy"},"terminal_handoff_id":"stage-three-review","version":1,"workflow_sha256":"df0a77785f6669bca78fb78e7d6dc86ad02cd07e306ef9ff0d13bcd34de1a198"}},"schema_version":1,"status":"done","title":"Complete Stage 3 durable autonomy","updated_at":"2026-09-20T03:45:51Z","version":2}
+---
+Deliver and independently verify docs/stages/stage-3.md. Make the local ledger authoritative for approved lifecycle, leases, budgets, recovery, audit history, and deterministic human control without adding remote effects.

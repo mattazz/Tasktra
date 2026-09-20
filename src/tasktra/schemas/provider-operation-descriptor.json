@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tasktra trusted provider operation descriptor",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["provider", "capability", "action", "effect_class", "resource_scope", "protocol_version"],
+  "properties": {
+    "provider": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"},
+    "capability": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"},
+    "action": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"},
+    "effect_class": {"enum": ["read-only", "local-reversible-write", "repository-history", "remote-mutation", "external-communication", "deployment", "merge", "destructive"]},
+    "resource_scope": {"$ref": "#/$defs/resource_scope"},
+    "protocol_version": {"const": 2}
+  },
+  "$defs": {
+    "resource_scope": {"type": "object", "additionalProperties": false, "required": ["provider", "host", "container", "resource_kind", "resource", "ref"], "properties": {"provider": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"}, "host": {"type": "string", "minLength": 1, "maxLength": 253}, "container": {"type": "string", "minLength": 1, "maxLength": 240}, "resource_kind": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"}, "resource": {"type": ["string", "null"], "minLength": 1, "maxLength": 240}, "ref": {"type": ["string", "null"], "minLength": 1, "maxLength": 240}}}
+  }
+}

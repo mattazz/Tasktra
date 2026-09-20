@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tasktra workflow completion token",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "version", "source", "terminal_handoff_id", "workflow_sha256"],
+  "properties": {
+    "kind": {"const": "tasktra.workflow-completion-token"},
+    "version": {"const": 1},
+    "source": {"$ref": "#/$defs/source"},
+    "terminal_handoff_id": {"$ref": "#/$defs/id"},
+    "workflow_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"},
+    "source": {"type": "object", "additionalProperties": false, "required": ["goal_id", "work_unit_id"], "properties": {"goal_id": {"$ref": "#/$defs/id"}, "work_unit_id": {"type": ["string", "null"], "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"}}}
+  }
+}

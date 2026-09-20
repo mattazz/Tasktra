@@ -1,0 +1,26 @@
+{
+  "kind": "tasktra.transition-approval",
+  "version": 1,
+  "approval_id": "stage-6-work-claim",
+  "goal_id": "tasktra-1-0",
+  "work_unit_id": "stage-6-lifecycle-optimization",
+  "action": "work-claim",
+  "effect": "local-reversible-write",
+  "scope": {
+    "paths": ["."],
+    "exclusions": []
+  },
+  "envelope_sha256": "5da4d6f1677787c638a2934ae08fa1d8caff8beab785499d0b31a5539f8163cd",
+  "decision": "approved",
+  "approver": {
+    "kind": "steward",
+    "id": "goal-steward"
+  },
+  "performer_id": "tasktra-coordinator",
+  "authority_clause": "Stage 6 adoption previews, version and migration planning, authority-scoped local migrations, rollback evidence, local sanitized telemetry, benchmarks, and reviewed lesson promotion are inside the approved repository scope and local reversible effect boundary.",
+  "evidence": [
+    "stage-six-checklist"
+  ],
+  "valid_until": "2027-09-19T23:59:59Z",
+  "revoked_at": null
+}

@@ -1,0 +1,15 @@
+[pack]
+id = "quality"
+version = "1.0.0"
+contract_version = 1
+trust = "builtin-data-only"
+dependencies = ["core"]
+conflicts = []
+roles = ["code-reviewer", "performance-reviewer", "security-reviewer", "test-strategist"]
+skills = []
+owns = ["role-family:quality"]
+required_capabilities = []
+optional_capabilities = []
+validation_commands = []
+detection_markers = []
+detection_globs = []

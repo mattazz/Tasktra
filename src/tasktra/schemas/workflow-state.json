@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tasktra implementation workflow state",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "version", "source", "current_role", "status", "transitions", "accepted_handoffs"],
+  "properties": {
+    "kind": {"const": "tasktra.implementation-workflow"},
+    "version": {"const": 1},
+    "source": {"$ref": "#/$defs/source"},
+    "current_role": {"type": ["string", "null"], "enum": ["implementer", "tester", "reviewer", null]},
+    "status": {"enum": ["ready", "completed", "partial", "blocked", "paused", "failed"]},
+    "transitions": {"type": "array", "maxItems": 3, "items": {"$ref": "#/$defs/transition"}},
+    "accepted_handoffs": {"type": "array", "maxItems": 3, "items": {"type": "object"}}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["goal_id", "work_unit_id"],
+      "properties": {"goal_id": {"$ref": "#/$defs/id"}, "work_unit_id": {"type": ["string", "null"], "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"}}
+    },
+    "transition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from_role", "to_role", "handoff_id", "handoff_status"],
+      "properties": {
+        "from_role": {"enum": ["implementer", "tester", "reviewer"]},
+        "to_role": {"type": ["string", "null"], "enum": ["tester", "reviewer", null]},
+        "handoff_id": {"$ref": "#/$defs/id"},
+        "handoff_status": {"enum": ["completed", "partial", "blocked", "paused", "failed"]}
+      }
+    }
+  }
+}

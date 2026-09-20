@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tasktra lesson proposal",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind", "schema_version", "id", "version", "status", "author", "reviewer",
+    "problem", "general_principle", "evidence", "affected_contracts", "applicability",
+    "risks", "regression_checks", "decision_reason", "created_at", "updated_at",
+    "reviewed_at", "decided_at"
+  ],
+  "properties": {
+    "kind": {"const": "tasktra.lesson-proposal"},
+    "schema_version": {"const": 1},
+    "id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"},
+    "version": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+    "status": {"enum": ["draft", "reviewed", "approved", "rejected"]},
+    "author": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"},
+    "reviewer": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"}
+      ]
+    },
+    "problem": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "general_principle": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "ref", "sha256"],
+        "properties": {
+          "kind": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"},
+          "ref": {"type": "string", "minLength": 1, "maxLength": 512, "pattern": "^[^\\x00-\\x1f]+$"},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      }
+    },
+    "affected_contracts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["contract_id", "canonical_source", "change"],
+        "properties": {
+          "contract_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-z][a-z0-9]*(?:[._/-][a-z0-9]+)*$"},
+          "canonical_source": {"type": "string", "minLength": 1, "maxLength": 240, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,238}[A-Za-z0-9._-])?$"},
+          "change": {"type": "string", "minLength": 1, "maxLength": 4096}
+        }
+      }
+    },
+    "applicability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contexts", "constraints"],
+      "properties": {
+        "contexts": {"type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 256}},
+        "constraints": {"type": "array", "maxItems": 32, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 256}}
+      }
+    },
+    "risks": {"type": "array", "maxItems": 32, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 1024}},
+    "regression_checks": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "description", "argv"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"},
+          "description": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "argv": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "string", "minLength": 1, "maxLength": 512}}
+        }
+      }
+    },
+    "decision_reason": {"type": ["string", "null"], "minLength": 1, "maxLength": 2048},
+    "created_at": {"type": "string", "minLength": 20, "maxLength": 64, "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T.*Z$"},
+    "updated_at": {"type": "string", "minLength": 20, "maxLength": 64, "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T.*Z$"},
+    "reviewed_at": {"type": ["string", "null"], "minLength": 20, "maxLength": 64, "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T.*Z$"},
+    "decided_at": {"type": ["string", "null"], "minLength": 20, "maxLength": 64, "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T.*Z$"}
+  }
+}

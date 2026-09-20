@@ -1,0 +1,17 @@
+---
+id = "tasktra-run"
+title = "Run or resume an authorized goal"
+family = "core"
+---
+# Run or resume an authorized goal
+
+Use for eligible local work under an active goal. Reuse recorded evidence and keep each worker's brief bounded.
+
+1. Read `tasktra goal --root <root> show <goal>`, `tasktra status --root <root>`, and the relevant work item. Stop if the goal is not active, the runtime is stopped, or authority is missing.
+2. Create a scoped work unit with `tasktra work --root <root> create <goal> <title> --id <unit> --scope <scope.json> --checkpoint <current-checkpoint>` if none exists. Use the next pending checkpoint reported by goal/status output; omit `--checkpoint` only when the authority envelope has no checkpoints. A steward distinct from the performer records exact `work-claim` and `work-complete` approvals.
+3. Generate a high-entropy token in the environment variable named by `--lease-token-env` (default `TASKTRA_LEASE_TOKEN`) without printing it. Claim with `tasktra work --root <root> claim <goal> --actor <performer> --envelope-sha256 <sha256> --repository <repo> --revision <rev> --branch <branch> --workspace <path>`. Claim stores only its hash and never emits the caller-supplied token; never put the token in prompts, files, logs, or command arguments.
+4. Give the worker only its objective, verified facts, evidence references, constraints, owned paths, budgets, and acceptance checks. Use `tasktra work ... heartbeat` before lease expiry when work is still valid.
+5. Validate through the Stage 2 workflow. Finish with `tasktra work --root <root> finish <attempt> --actor <performer> --outcome <class> --workflow <workflow.json> --evidence-json <evidence.json>` for success, or omit `--workflow` for a non-success outcome. Outcome classes are `transient`, `permanent`, `blocked`, `approval-required`, and `exhausted` as well as `success`.
+6. Run `tasktra audit --root <root> verify`. On interruption use `tasktra work --root <root> recover --goal-id <goal>`; do not create a duplicate attempt or renew authority. Resume `blocked` or `approval-required` work only after a distinct approval for `work-requeue`, using `tasktra work --root <root> requeue <unit> --actor <performer> --envelope-sha256 <sha256> --evidence-json <evidence.json>`.
+
+Pause at checkpoints, exhausted budgets, missing approvals, scope changes, or consequential effects. Return the work-unit and attempt IDs, measured usage, validation evidence, and next eligible action without exposing the lease token.

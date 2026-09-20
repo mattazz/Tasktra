@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tasktra lockfile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "tasktra_version", "catalog_version", "catalog_source_sha256", "packs", "pack_versions", "pack_contracts", "generated_manifest_sha256", "schema_versions"],
+  "properties": {
+    "schema_version": {"const": 3},
+    "tasktra_version": {"type": "string", "minLength": 1},
+    "catalog_version": {"type": "string", "minLength": 1},
+    "catalog_source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "packs": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "pack_versions": {"type": "object", "additionalProperties": {"type": "string", "minLength": 1}},
+    "pack_contracts": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["version", "contract_version", "trust", "sha256"],
+        "properties": {
+          "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+          "contract_version": {"type": "integer", "minimum": 1},
+          "trust": {"enum": ["builtin-data-only", "third-party-data-only", "third-party-executable"]},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      }
+    },
+    "generated_manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "schema_versions": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 1}}
+  }
+}

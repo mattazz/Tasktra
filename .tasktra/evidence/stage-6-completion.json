@@ -1,0 +1,40 @@
+{
+  "decision": "Stage 6 complete; Stage 7 eligible",
+  "independent_review": "GO with no unresolved source, security, privacy, migration, rollback, or acceptance blocker",
+  "full_suite": {
+    "command": "python -m unittest discover -s tests -q",
+    "passed": 308,
+    "skipped": 6
+  },
+  "focused_stage6_suite": {
+    "command": "python -m unittest discover -s tests -p 'test_stage6*.py' -v",
+    "passed": 51,
+    "skipped": 2
+  },
+  "security_containment_suite": {
+    "command": "python -m unittest tests.test_config tests.test_stage6_lifecycle tests.test_stage6_upgrade_application -v",
+    "passed": 25,
+    "skipped": 1
+  },
+  "benchmark_fixture": {
+    "baseline_context_tokens": 100,
+    "candidate_context_tokens": 140,
+    "candidate_duplicate_retrievals": 1,
+    "candidate_escalations": 1,
+    "candidate_retries": 2,
+    "detected_findings": [
+      "duplicate-retrieval",
+      "avoidable-context-growth",
+      "unnecessary-escalation",
+      "retry-regression"
+    ],
+    "estimated_savings": null
+  },
+  "artifacts": [
+    "docs/stages/stage-6-completion.md",
+    "docs/stages/stage-7.md",
+    ".tasktra/workflows/stage-6-lifecycle-optimization.json",
+    ".agents/skills/tasktra-upgrade/SKILL.md",
+    ".agents/skills/tasktra-propose/SKILL.md"
+  ]
+}

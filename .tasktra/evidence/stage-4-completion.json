@@ -1,0 +1,25 @@
+{
+  "decision": "Stage 4 complete; Stage 5 eligible",
+  "independent_review": "GO with no unresolved source or security blocker",
+  "full_suite": {
+    "command": "python -m unittest discover -s tests -q",
+    "passed": 238,
+    "skipped": 3
+  },
+  "focused_adapter_suite": {
+    "passed": 21,
+    "windows_descendant_cleanup": "passed",
+    "windows_fail_closed_launch": "passed"
+  },
+  "runtime": {
+    "schema_version": 8,
+    "backup": ".tasktra/runtime/tasktra.sqlite.v7.bak",
+    "attested_rows": 18,
+    "audit_checked_before_completion": 20
+  },
+  "artifacts": [
+    "docs/stages/stage-4-completion.md",
+    "docs/stages/stage-5.md",
+    ".tasktra/workflows/stage-4-remote-capabilities.json"
+  ]
+}

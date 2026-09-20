@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tasktra work unit",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "goal_id", "title", "status", "scope", "checkpoint_id"],
+  "properties": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"},
+    "goal_id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"},
+    "title": {"type": "string", "minLength": 1},
+    "status": {"enum": ["planned", "eligible", "leased", "retry-wait", "blocked", "approval-required", "failed", "exhausted", "complete", "paused", "stopped"]},
+    "scope": {"type": "object"},
+    "checkpoint_id": {"type": ["string", "null"], "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"},
+    "lease_holder": {"type": ["string", "null"]},
+    "lease_expires_at": {"type": ["string", "null"]},
+    "current_attempt_id": {"type": ["string", "null"]},
+    "attempt_count": {"type": "integer", "minimum": 0},
+    "retry_at": {"type": ["string", "null"]},
+    "last_outcome_class": {"type": ["string", "null"]},
+    "created_at": {"type": "string", "minLength": 1},
+    "updated_at": {"type": "string", "minLength": 1}
+  }
+}

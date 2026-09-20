@@ -1,0 +1,98 @@
+{
+  "accepted_handoffs": [
+    {
+      "blockers": [],
+      "changed_paths": [
+        {"operation": "added", "path": "src/tasktra/scheduling.py", "summary": "Added capability-based, authority-neutral schedule previews and exact durable resume invocations."},
+        {"operation": "modified", "path": "src/tasktra/state.py", "summary": "Added sealed schema-10 scheduling state and a narrow authority-preserving self-host upgrade bridge."},
+        {"operation": "modified", "path": "src/tasktra/release.py", "summary": "Bound release readiness to exact version surfaces, a committed GitHub workflow and trust key, exact CI jobs, one artifact, parsed independent review evidence, and an RSA/SHA-256 decision signature."},
+        {"operation": "modified", "path": "src/tasktra/migrations.py", "summary": "Skipped identical restore writes so declarative upgrades scale with changed files."}
+      ],
+      "downstream_brief": {
+        "constraints": ["Keep release authority external to generated output and require real cross-platform evidence."],
+        "context": ["Scheduling, examples, operations, packaging, release auditing, and self-host upgrade paths are implemented."],
+        "objective": "Verify every local Stage 7 requirement and preserve external release blockers.",
+        "recommended_next_steps": ["Run bounded complete validation and independent review."]
+      },
+      "evidence_refs": [
+        {"id": "stage-seven-source", "kind": "file", "locator": "docs/stages/stage-7.md", "summary": "Stage 7 scope and acceptance criteria."}
+      ],
+      "handoff_id": "stage-seven-implementation",
+      "human_summary": "Implemented the local Stage 7 orchestration, operations, packaging, examples, upgrade, and release-gate surface.",
+      "inferences": [],
+      "kind": "tasktra.handoff",
+      "producer": {"actor_id": "stage-seven-implementer", "role": "implementer"},
+      "requested_actions": [],
+      "source": {"goal_id": "tasktra-1-0", "work_unit_id": "stage-7-operations-release"},
+      "status": {"state": "completed", "summary": "Local implementation is ready for complete testing."},
+      "validation_results": [],
+      "verified_facts": [{"evidence_ids": ["stage-seven-source"], "statement": "The local Stage 7 implementation surface is present."}],
+      "version": 1
+    },
+    {
+      "blockers": [],
+      "changed_paths": [],
+      "downstream_brief": {
+        "constraints": ["Six environment-dependent skips remain visible; none is called a pass."],
+        "context": ["Six disjoint validation groups and the trusted compile check passed during the live self-host upgrade."],
+        "objective": "Independently review authority, scheduling, migration, release evidence, and remaining gates.",
+        "recommended_next_steps": ["Inspect the live ledger and reproduce critical local blockers."]
+      },
+      "evidence_refs": [
+        {"id": "stage-seven-validation", "kind": "file", "locator": ".tasktra/evidence/stage-7-local-readiness.json", "summary": "341 test cases: 335 passed and six visible environment skips, with clean compile, schema-10 upgrade, and audit evidence."}
+      ],
+      "handoff_id": "stage-seven-testing",
+      "human_summary": "Verified the complete local suite, compile projection, self-host upgrade, recovery, and live audit chain.",
+      "inferences": [],
+      "kind": "tasktra.handoff",
+      "producer": {"actor_id": "stage-seven-tester", "role": "tester"},
+      "requested_actions": [],
+      "source": {"goal_id": "tasktra-1-0", "work_unit_id": "stage-7-operations-release"},
+      "status": {"state": "completed", "summary": "All currently executable local acceptance checks passed."},
+      "validation_results": [{"detail": "All 341 test cases were accounted for across six groups and a tooling-enabled packaging rerun: 335 passed and six environment-specific skips remained explicit; compile and live audit passed.", "evidence_ids": ["stage-seven-validation"], "name": "complete local validation", "outcome": "passed"}],
+      "verified_facts": [{"evidence_ids": ["stage-seven-validation"], "statement": "The bounded complete local validation surface passed."}],
+      "version": 1
+    },
+    {
+      "blockers": [
+        {"id": "cross-platform-ci", "severity": "blocking", "summary": "No authoritative Windows, macOS, and Linux CI runs are bound to one committed source revision.", "next_action": "Create repository history and a remote only under new authority, then record exact CI run and artifact hashes."},
+        {"id": "release-decision", "severity": "blocking", "summary": "The final independent release review and signed 1.0 decision do not exist.", "next_action": "Complete external CI, obtain final independent GO, then record the hash-bound release decision."}
+      ],
+      "changed_paths": [],
+      "downstream_brief": {
+        "constraints": ["Do not infer permission for repository history, remote mutation, merge, deployment, or external communication."],
+        "context": ["The independent local-readiness re-review returned GO after confirming interrupted effects are terminal, synthetic release evidence is rejected, required decision policy statements are signed, and RSA keys are at least 2048 bits. External release evidence remains unavailable."],
+        "objective": "Keep Stage 7 open until authoritative external evidence and the release decision exist.",
+        "recommended_next_steps": ["Request explicit authority before creating history or remote CI work."]
+      },
+      "evidence_refs": [
+        {"id": "stage-seven-release-audit", "kind": "command", "locator": "python -m tasktra release --root . audit", "summary": "Release audit remains nonzero without the Stage 7 checklist closure and signed decision."},
+        {"id": "stage-seven-independent-local-review", "kind": "file", "locator": ".tasktra/evidence/stage-7-independent-local-review.json", "summary": "Independent local readiness GO and release NO-GO with no unresolved local blocker."}
+      ],
+      "handoff_id": "stage-seven-review",
+      "human_summary": "Independent review found the local baseline ready, while the 1.0 release remains blocked on authoritative cross-platform and final decision evidence.",
+      "inferences": [],
+      "kind": "tasktra.handoff",
+      "producer": {"actor_id": "stage-seven-reviewer", "role": "reviewer"},
+      "requested_actions": [{"id": "authorize-remote-release", "action": "Authorize repository history and remote CI work if a 1.0 release is desired.", "rationale": "The current authority envelope explicitly prohibits those effects.", "requires_human_approval": true}],
+      "source": {"goal_id": "tasktra-1-0", "work_unit_id": "stage-7-operations-release"},
+      "status": {"state": "blocked", "summary": "The local baseline is implemented; consequential external release proof is unavailable under current authority."},
+      "validation_results": [{"detail": "The release audit correctly remains nonzero without cross-platform run evidence and a signed decision.", "evidence_ids": ["stage-seven-release-audit"], "name": "release fail-closed gate", "outcome": "passed"}],
+      "verified_facts": [
+        {"evidence_ids": ["stage-seven-independent-local-review"], "statement": "Independent review found no remaining local source or ledger blocker."},
+        {"evidence_ids": ["stage-seven-release-audit"], "statement": "Tasktra does not claim a completed 1.0 release."}
+      ],
+      "version": 1
+    }
+  ],
+  "current_role": null,
+  "kind": "tasktra.implementation-workflow",
+  "source": {"goal_id": "tasktra-1-0", "work_unit_id": "stage-7-operations-release"},
+  "status": "blocked",
+  "transitions": [
+    {"from_role": "implementer", "handoff_id": "stage-seven-implementation", "handoff_status": "completed", "to_role": "tester"},
+    {"from_role": "tester", "handoff_id": "stage-seven-testing", "handoff_status": "completed", "to_role": "reviewer"},
+    {"from_role": "reviewer", "handoff_id": "stage-seven-review", "handoff_status": "blocked", "to_role": null}
+  ],
+  "version": 1
+}

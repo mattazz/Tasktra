@@ -1,0 +1,100 @@
+{
+  "accepted_handoffs": [
+    {
+      "blockers": [],
+      "changed_paths": [
+        {"operation": "added", "path": "src/tasktra/provider_execution.py", "summary": "Added the authority-bound protected provider executor."},
+        {"operation": "modified", "path": "src/tasktra/provider_adapters.py", "summary": "Added contained Git, GitHub, and Jira adapters with conservative uncertainty."},
+        {"operation": "modified", "path": "src/tasktra/autonomy.py", "summary": "Added atomic per-attempt provider-effect receipts and reconciliation."}
+      ],
+      "downstream_brief": {
+        "constraints": ["Preserve local-first behavior and exact authority boundaries."],
+        "context": ["Stage 4 implementation and adversarial regressions are integrated."],
+        "objective": "Independently test the complete remote-capability surface.",
+        "recommended_next_steps": ["Run focused provider tests and the complete repository suite."]
+      },
+      "evidence_refs": [
+        {"id": "stage-four-implementation", "kind": "file", "locator": "docs/stages/stage-4-completion.md", "summary": "The completion report inventories the implemented provider and authority boundaries."}
+      ],
+      "handoff_id": "stage-four-implementation",
+      "human_summary": "Implemented optional, authority-bound Git, GitHub, and Jira capabilities with durable safe recovery.",
+      "inferences": [],
+      "kind": "tasktra.handoff",
+      "producer": {"actor_id": "stage-four-implementer", "role": "implementer"},
+      "requested_actions": [],
+      "source": {"goal_id": "tasktra-1-0", "work_unit_id": "stage-4-remote-capabilities"},
+      "status": {"state": "completed", "summary": "Implementation is ready for independent testing."},
+      "validation_results": [],
+      "verified_facts": [
+        {"evidence_ids": ["stage-four-implementation"], "statement": "The Stage 4 provider implementation and its authority boundaries are present."}
+      ],
+      "version": 1
+    },
+    {
+      "blockers": [],
+      "changed_paths": [],
+      "downstream_brief": {
+        "constraints": ["Treat the three privilege-limited symbolic-link skips as explicit environment limitations."],
+        "context": ["The focused adapter suite and complete repository suite pass."],
+        "objective": "Perform independent semantic and security review of the passing implementation.",
+        "recommended_next_steps": ["Reproduce authority, retry, migration, transport, and process-containment edge cases."]
+      },
+      "evidence_refs": [
+        {"id": "stage-four-tests", "kind": "command", "locator": "python -m unittest discover -s tests -q", "summary": "The final complete suite passed 238 tests with three environment-dependent symlink skips."}
+      ],
+      "handoff_id": "stage-four-testing",
+      "human_summary": "Verified the Stage 4 focused surfaces and complete repository suite.",
+      "inferences": [],
+      "kind": "tasktra.handoff",
+      "producer": {"actor_id": "stage-four-tester", "role": "tester"},
+      "requested_actions": [],
+      "source": {"goal_id": "tasktra-1-0", "work_unit_id": "stage-4-remote-capabilities"},
+      "status": {"state": "completed", "summary": "All Stage 4 checks passed."},
+      "validation_results": [
+        {"detail": "238 tests passed; three symbolic-link tests skipped for unavailable Windows privilege.", "evidence_ids": ["stage-four-tests"], "name": "complete Stage 4 validation", "outcome": "passed"}
+      ],
+      "verified_facts": [
+        {"evidence_ids": ["stage-four-tests"], "statement": "The final complete repository suite passed."}
+      ],
+      "version": 1
+    },
+    {
+      "blockers": [],
+      "changed_paths": [],
+      "downstream_brief": {
+        "constraints": ["Do not reopen the provider authority boundary while composing ecosystem packs."],
+        "context": ["Independent adversarial review returned GO with no unresolved source or security blocker."],
+        "objective": "Begin Stage 5 specialist and ecosystem pack delivery from the reviewed boundary.",
+        "recommended_next_steps": ["Use docs/stages/stage-5.md as the active acceptance gate."]
+      },
+      "evidence_refs": [
+        {"id": "stage-four-review", "kind": "note", "locator": "stage-4-final-independent-review", "summary": "Independent semantic and security review returned GO after all adversarial findings were remediated."}
+      ],
+      "handoff_id": "stage-four-review",
+      "human_summary": "Independent review found no unresolved Stage 4 source or security blocker.",
+      "inferences": [],
+      "kind": "tasktra.handoff",
+      "producer": {"actor_id": "stage-four-reviewer", "role": "reviewer"},
+      "requested_actions": [],
+      "source": {"goal_id": "tasktra-1-0", "work_unit_id": "stage-4-remote-capabilities"},
+      "status": {"state": "completed", "summary": "Stage 4 is eligible for closure."},
+      "validation_results": [
+        {"detail": "Reviewed authority, exact scopes, atomic receipts, retries, migrations, Git transports, provider uncertainty, CLI boundaries, and Windows process containment.", "evidence_ids": ["stage-four-review"], "name": "independent Stage 4 review", "outcome": "passed"}
+      ],
+      "verified_facts": [
+        {"evidence_ids": ["stage-four-review"], "statement": "The final independent review returned GO with no unresolved blocker."}
+      ],
+      "version": 1
+    }
+  ],
+  "current_role": null,
+  "kind": "tasktra.implementation-workflow",
+  "source": {"goal_id": "tasktra-1-0", "work_unit_id": "stage-4-remote-capabilities"},
+  "status": "completed",
+  "transitions": [
+    {"from_role": "implementer", "handoff_id": "stage-four-implementation", "handoff_status": "completed", "to_role": "tester"},
+    {"from_role": "tester", "handoff_id": "stage-four-testing", "handoff_status": "completed", "to_role": "reviewer"},
+    {"from_role": "reviewer", "handoff_id": "stage-four-review", "handoff_status": "completed", "to_role": null}
+  ],
+  "version": 1
+}

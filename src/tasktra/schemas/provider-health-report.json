@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tasktra deterministic provider health report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "version", "providers"],
+  "properties": {
+    "kind": {"const": "tasktra.provider-health-report"},
+    "version": {"const": 1},
+    "providers": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/provider"}}
+  },
+  "$defs": {
+    "provider": {"type": "object", "additionalProperties": false, "required": ["provider", "state", "summary", "operations"], "properties": {"provider": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"}, "state": {"enum": ["available", "unavailable", "misconfigured", "degraded"]}, "summary": {"type": "string", "minLength": 1, "maxLength": 500}, "operations": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/operation"}}}},
+    "operation": {"type": "object", "additionalProperties": false, "required": ["effect_class", "request_kind"], "properties": {"effect_class": {"enum": ["read-only", "local-reversible-write", "repository-history", "remote-mutation", "external-communication", "deployment", "merge", "destructive"]}, "request_kind": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"}}}
+  }
+}

@@ -1,0 +1,21 @@
+[pack]
+id = "monorepo"
+version = "1.0.0"
+contract_version = 1
+trust = "builtin-data-only"
+dependencies = ["generic"]
+conflicts = []
+roles = []
+skills = []
+owns = ["detection:monorepo", "workflow:affected-scope-fanout"]
+required_capabilities = []
+optional_capabilities = []
+validation_commands = []
+detection_markers = ["pnpm-workspace.yaml", "lerna.json", "nx.json", "turbo.json"]
+detection_globs = ["packages/*/package.json", "apps/*/package.json", "packages/*/pyproject.toml"]
+activation_conditions = ["explicit-selection", "bounded-workspace-marker-match"]
+workflows = ["affected-scope-fanout"]
+schemas = []
+policies = ["bounded-package-isolation"]
+adapters = []
+tests = ["monorepo-pack-fixture"]

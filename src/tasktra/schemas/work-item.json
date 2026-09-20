@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tasktra local Markdown work item",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id", "title", "status", "body", "goal_id", "labels", "metadata",
+    "created_at", "updated_at", "version", "schema_version"
+  ],
+  "properties": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"},
+    "title": {"type": "string", "minLength": 1, "maxLength": 240},
+    "status": {
+      "enum": ["planned", "ready", "in-progress", "blocked", "in-review", "done", "cancelled"]
+    },
+    "body": {"type": "string", "maxLength": 524288},
+    "goal_id": {"type": ["string", "null"], "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"},
+    "labels": {"type": "array", "maxItems": 32, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 64}},
+    "metadata": {"type": "object"},
+    "created_at": {"type": "string", "minLength": 1, "maxLength": 64},
+    "updated_at": {"type": "string", "minLength": 1, "maxLength": 64},
+    "version": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+    "schema_version": {"const": 1}
+  }
+}

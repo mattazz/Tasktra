@@ -1,0 +1,4 @@
+---
+{"created_at":"2026-09-20T12:23:13Z","goal_id":"tasktra-1-0","id":"stage-6-lifecycle-optimization","labels":["lifecycle","stage"],"metadata":{"workflow_completion":{"kind":"tasktra.workflow-completion-token","source":{"goal_id":"tasktra-1-0","work_unit_id":"stage-6-lifecycle-optimization"},"terminal_handoff_id":"stage-six-review","version":1,"workflow_sha256":"3b13cbcf05bb230e7decb4a46329476105cb1849f3bd495d78dfb34687d43348"}},"schema_version":1,"status":"done","title":"Complete Stage 6 lifecycle and optimization","updated_at":"2026-09-20T15:41:41Z","version":2}
+---
+Deliver and independently verify docs/stages/stage-6.md. Extend preview-first adoption, semantic compatibility and upgrade planning, authority-scoped migrations with rollback evidence, local sanitized telemetry and export, representative efficiency benchmarks, and reviewed lesson promotion without weakening project ownership or local-first operation.

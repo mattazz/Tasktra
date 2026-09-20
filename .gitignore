@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+build/
+dist/
+
+# Tasktra execution state is local and may contain transient evidence.
+.tasktra/runtime/
+
+# Generated previews are disposable until explicitly applied.
+.tasktra/preview/
+
+# Editor and operating-system noise.
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

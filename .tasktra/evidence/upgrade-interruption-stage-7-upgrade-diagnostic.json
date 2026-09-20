@@ -1,0 +1,9 @@
+{
+  "action": "upgrade-apply",
+  "external_effect": false,
+  "intent_key": "stage-7-upgrade-diagnostic",
+  "observed_result": "no upgrade receipt or state mutation was recorded for this diagnostic invocation",
+  "plan_sha256": "2da1f95e532f68dc54e8a11ca206f8785847541d195ae048016b55e433de423c",
+  "replacement_intent": "stage-7-upgrade-1-0-final",
+  "resolution": "interrupted-before-mutation"
+}

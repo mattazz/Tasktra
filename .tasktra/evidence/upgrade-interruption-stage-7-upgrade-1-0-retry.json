@@ -1,0 +1,9 @@
+{
+  "action": "upgrade-apply",
+  "external_effect": false,
+  "intent_key": "stage-7-upgrade-1-0-retry",
+  "observed_result": "no upgrade receipt or state mutation was recorded for this interrupted invocation",
+  "plan_sha256": "4f5d6bafba99fd140b75b297fd4d4b3c62e932084df00e089c2ea5fd68f0af8a",
+  "replacement_intent": "stage-7-upgrade-1-0-final",
+  "resolution": "interrupted-before-mutation"
+}

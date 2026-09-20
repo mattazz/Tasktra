@@ -1,0 +1,15 @@
+[pack]
+id = "delivery"
+version = "1.0.0"
+contract_version = 1
+trust = "builtin-data-only"
+dependencies = ["core"]
+conflicts = []
+roles = ["issue-triager", "pr-reviewer", "pr-scanner", "release-writer", "work-selector"]
+skills = []
+owns = ["role-family:delivery"]
+required_capabilities = []
+optional_capabilities = ["github"]
+validation_commands = []
+detection_markers = []
+detection_globs = []

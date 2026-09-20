@@ -1,0 +1,17 @@
+# Profile: customized multi-package workflow.
+[project]
+name = "Sample workspace"
+config_version = 1
+
+[runtime]
+database = ".tasktra/runtime/tasktra.sqlite"
+concurrency_limit = 2
+
+[packs]
+enabled = ["python", "typescript-web", "monorepo"]
+
+[catalog]
+trust_builtin = false
+
+[validation]
+commands = [["python", "-c", "from pathlib import Path; assert Path('apps/site/package.json').is_file() and Path('packages/core/pyproject.toml').is_file()"]]

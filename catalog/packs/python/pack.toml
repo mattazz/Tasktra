@@ -1,0 +1,21 @@
+[pack]
+id = "python"
+version = "1.0.0"
+contract_version = 1
+trust = "builtin-data-only"
+dependencies = ["generic"]
+conflicts = []
+roles = []
+skills = []
+owns = ["detection:python", "validation-defaults:python"]
+required_capabilities = []
+optional_capabilities = ["python"]
+validation_commands = [["python", "-m", "unittest", "discover"]]
+detection_markers = ["pyproject.toml", "requirements.txt", "setup.cfg", "setup.py"]
+detection_globs = ["*.py", "src/*.py", "tests/*.py"]
+activation_conditions = ["explicit-selection", "bounded-marker-match"]
+workflows = []
+schemas = []
+policies = ["python-nonmutating-defaults"]
+adapters = []
+tests = ["python-pack-fixture"]

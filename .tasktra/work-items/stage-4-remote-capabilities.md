@@ -1,0 +1,4 @@
+---
+{"created_at":"2026-09-20T03:52:47Z","goal_id":"tasktra-1-0","id":"stage-4-remote-capabilities","labels":["remote","stage"],"metadata":{"workflow_completion":{"kind":"tasktra.workflow-completion-token","source":{"goal_id":"tasktra-1-0","work_unit_id":"stage-4-remote-capabilities"},"terminal_handoff_id":"stage-four-review","version":1,"workflow_sha256":"c396e4418bf43d8522030209e18614cae94960547945b3e4e75642658266ce94"}},"schema_version":1,"status":"done","title":"Complete Stage 4 remote capabilities","updated_at":"2026-09-20T09:11:43Z","version":2}
+---
+Deliver and independently verify docs/stages/stage-4.md. Add optional provider-neutral Git, GitHub, and Jira capabilities with credential isolation, durable idempotent remote-effect receipts, deterministic offline fixtures, and non-blocking local degradation.

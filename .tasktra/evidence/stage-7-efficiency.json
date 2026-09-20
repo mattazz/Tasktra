@@ -1,0 +1,36 @@
+{
+  "kind": "tasktra.efficiency-evidence",
+  "version": 1,
+  "stage": 7,
+  "successful_outcomes": {
+    "test_cases": 341,
+    "tests_passed": 335,
+    "compile_check": "passed",
+    "live_upgrade": "schema-8-to-10-complete",
+    "audit": "clean"
+  },
+  "measured_validation": {
+    "groups": 6,
+    "command_elapsed_ms": 78133,
+    "environment_specific_skips": 6
+  },
+  "retries": {
+    "expired_work_attempts_recovered": 1,
+    "interrupted_upgrade_intents_terminalized": 4,
+    "successful_upgrade_intents": 1,
+    "external_effects_retried": 0,
+    "explanation": "Early upgrade attempts exposed sealed-migration, validation-fixture, validation-composition, and no-op restore costs. Each remained local, retained its durable intent, produced no provider or remote effect, and now has a failed-before-mutation terminal receipt bound to distinct evidence."
+  },
+  "context_and_evidence": {
+    "validation_groups": 6,
+    "release_audit_checks": 6,
+    "durable_upgrade_backup_hashes": 1,
+    "measured_token_usage": {
+      "available": false,
+      "value": null,
+      "reason": "The runtime did not expose measured model-token usage for this work."
+    }
+  },
+  "estimated_token_savings": null,
+  "required_validation_skipped_for_efficiency": false
+}

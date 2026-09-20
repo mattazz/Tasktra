@@ -1,0 +1,26 @@
+{
+  "kind": "tasktra.transition-approval",
+  "version": 1,
+  "approval_id": "stage-5-work-complete",
+  "goal_id": "tasktra-1-0",
+  "work_unit_id": "stage-5-specialist-ecosystem-packs",
+  "action": "work-complete",
+  "effect": "local-reversible-write",
+  "scope": {
+    "paths": ["."],
+    "exclusions": []
+  },
+  "envelope_sha256": "5da4d6f1677787c638a2934ae08fa1d8caff8beab785499d0b31a5539f8163cd",
+  "decision": "approved",
+  "approver": {
+    "kind": "steward",
+    "id": "goal-steward"
+  },
+  "performer_id": "tasktra-coordinator",
+  "authority_clause": "Stage 5 completion is allowed only after deterministic fixtures, no-mutation proofs, extension preservation, migration validation, measured efficiency observations, and independent semantic, security, and acceptance reviews pass.",
+  "evidence": [
+    "stage-five-checklist"
+  ],
+  "valid_until": "2027-09-19T23:59:59Z",
+  "revoked_at": null
+}
