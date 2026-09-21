@@ -1,0 +1,11 @@
+{
+  "kind": "tasktra.transition-approval", "version": 3,
+  "goal_id": "tasktra-publication", "scope": {"paths": ["."], "exclusions": [".tasktra/runtime", ".tasktra/preview"]},
+  "envelope_sha256": "d83e9cb7e604b02c4c53208258ea0ab05ad2bca98389c86bc621458c68f6c4d6",
+  "decision": "approved", "approver": {"kind": "human", "id": "matt"}, "performer_id": "codex-coordinator",
+  "authority_clause": "The human explicitly authorized making mattazz/Tasktra public after a security review and approved the bounded sanitation, guarded push, and visibility change.",
+  "evidence": [], "valid_until": "2026-09-21T08:00:00Z", "revoked_at": null,
+  "approval_id": "tasktra-publication-commit", "work_unit_id": "publish-tasktra", "action": "git-commit", "effect": "repository-history",
+  "resource_scope": {"provider": "git", "host": "github.com", "container": "mattazz/Tasktra", "resource_kind": "repository", "resource": "b37b8a4cfe657f8479479a0cee5023a403f140fcd213b9b75a215f1fcb543344", "ref": "refs/heads/main"},
+  "provenance": {"kind": "local-human-ceremony", "attester_id": "matt", "subject_sha256": "3585008a3a24fb18519c464f994d3151a4dbec475bcd8ca2b5ae3d6a03586447", "attested_at": "2026-09-21T05:26:31Z"}
+}

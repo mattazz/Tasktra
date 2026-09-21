@@ -1,0 +1,95 @@
+{
+  "kind": "tasktra.authority-envelope",
+  "version": 2,
+  "goal_id": "tasktra-publication",
+  "outcome": "Publish Tasktra as a security-reviewed public GitHub repository after removing workstation-specific data from the full reachable history.",
+  "motivation": "The human explicitly authorized making mattazz/Tasktra public and requested a security review first. This envelope permits only the bounded history sanitation, reviewed commit, guarded push, and visibility change needed for that outcome, without paid services.",
+  "author_id": "matt",
+  "acceptance_criteria": [
+    {
+      "id": "sanitized-history",
+      "statement": "The tracked tree and public main history contain no live credentials or local workstation paths."
+    },
+    {
+      "id": "public-repository",
+      "statement": "GitHub reports mattazz/Tasktra as public and origin/main equals the locally verified publication commit."
+    }
+  ],
+  "scope": {
+    "paths": ["."],
+    "exclusions": [".tasktra/runtime", ".tasktra/preview"]
+  },
+  "resource_scopes": [
+    {
+      "provider": "git",
+      "host": "github.com",
+      "container": "mattazz/Tasktra",
+      "resource_kind": "repository",
+      "resource": "b37b8a4cfe657f8479479a0cee5023a403f140fcd213b9b75a215f1fcb543344",
+      "ref": "refs/heads/main"
+    },
+    {
+      "provider": "github",
+      "host": "github.com",
+      "container": "mattazz/Tasktra",
+      "resource_kind": "repository",
+      "resource": null,
+      "ref": null
+    }
+  ],
+  "allowed_actions": [
+    "goal-activate",
+    "work-claim",
+    "git-history-rewrite",
+    "git-commit",
+    "git-push",
+    "github-repo-visibility",
+    "acceptance-record",
+    "work-complete",
+    "goal-complete"
+  ],
+  "allowed_effects": [
+    "read-only",
+    "local-reversible-write",
+    "repository-history",
+    "remote-mutation"
+  ],
+  "prohibited_actions": [
+    "change-billing",
+    "change-actions-settings",
+    "create-pull-request",
+    "create-release",
+    "create-tag",
+    "deploy",
+    "destructive-delete",
+    "merge",
+    "modify-repository-settings-other-than-visibility"
+  ],
+  "quality_requirements": [
+    "Keep the repository private until the sanitized history is pushed and verified.",
+    "Preserve the two existing commit messages and authorship while replacing only the sensitive receipt blob in their reachable history.",
+    "Use an exact force-with-lease bound to origin main at 8dd11a85f4fe958042fb9c42336f400cced3dc98.",
+    "Do not print or persist GitHub credentials or lease tokens.",
+    "Pin third-party workflow actions to reviewed commit SHAs and retain least-privilege workflow permissions.",
+    "Verify the final public visibility and exact main object independently after mutation."
+  ],
+  "budgets": {
+    "tokens": null,
+    "attempts": 3,
+    "elapsed_seconds": 3600,
+    "concurrency": 1
+  },
+  "dependencies": [],
+  "checkpoints": ["security-review", "full-validation", "remote-verification"],
+  "stop_conditions": [
+    "Origin main is not exactly 8dd11a85f4fe958042fb9c42336f400cced3dc98 before the guarded push.",
+    "A live credential or additional private path is detected.",
+    "The push or visibility result is indeterminate and cannot be reconciled through the configured adapter.",
+    "Any requested action would spend money or modify a repository setting other than visibility."
+  ],
+  "escalation_conditions": [
+    "GitHub authentication is unavailable.",
+    "The provider adapter cannot prove the exact remote ref or repository visibility.",
+    "The security-reviewed working tree changes before publication."
+  ]
+}

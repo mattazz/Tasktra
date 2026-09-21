@@ -62,7 +62,7 @@ class TelemetryTests(unittest.TestCase):
         with self.assertRaisesRegex(TelemetryError, "registered non-credential"):
             TelemetryRecord.create(
                 event_id="event-002", recorded_at="2026-09-20T12:00:00Z", role="implementer",
-                model_tier="balanced", tools=("xoxb-123456789012-abcdefghijklmnop",),
+                model_tier="balanced", tools=("unregistered-tool-fixture",),
                 final_outcome="succeeded",
             )
 

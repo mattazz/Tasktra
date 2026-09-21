@@ -1,0 +1,4 @@
+{
+  "paths": ["."],
+  "exclusions": [".tasktra/runtime", ".tasktra/preview"]
+}

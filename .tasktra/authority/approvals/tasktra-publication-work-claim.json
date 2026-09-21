@@ -1,0 +1,10 @@
+{
+  "kind": "tasktra.transition-approval", "version": 3,
+  "goal_id": "tasktra-publication", "scope": {"paths": ["."], "exclusions": [".tasktra/runtime", ".tasktra/preview"]},
+  "envelope_sha256": "d83e9cb7e604b02c4c53208258ea0ab05ad2bca98389c86bc621458c68f6c4d6",
+  "decision": "approved", "approver": {"kind": "human", "id": "matt"}, "performer_id": "codex-coordinator",
+  "authority_clause": "The human explicitly authorized making mattazz/Tasktra public after a security review and approved the bounded sanitation, guarded push, and visibility change.",
+  "evidence": [], "valid_until": "2026-09-21T08:00:00Z", "revoked_at": null,
+  "approval_id": "tasktra-publication-work-claim", "work_unit_id": "publish-tasktra", "action": "work-claim", "effect": "local-reversible-write", "resource_scope": null,
+  "provenance": {"kind": "local-human-ceremony", "attester_id": "matt", "subject_sha256": "65e40007a0127c067a239308175f3c72316fc9586812df4d24a96a9d39e60822", "attested_at": "2026-09-21T05:26:18Z"}
+}
