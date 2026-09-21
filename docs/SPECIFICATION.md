@@ -59,7 +59,7 @@ Substantial or concurrent implementation normally uses isolated Git worktrees. R
 
 ## Roles, packs, and contracts
 
-The always-available core roles are scout, implementer, tester, reviewer, writer, escalation specialist, and goal steward. Specialist capabilities are grouped into discoverable packs, including architecture, quality, delivery, product, operations, knowledge, and software development. The software-development family includes application, frontend, backend/API, data/migration, integration, test automation, end-to-end behavior, reliability/observability, developer-experience, and refactoring specialists.
+The always-available core roles are scout, implementer, tester, reviewer, writer, escalation specialist, and goal steward. Specialist capabilities are grouped into discoverable packs, including architecture, quality, delivery, product, operations, knowledge, planning, and software development. The planning pack supplies an optional Discovery skill that turns a rough project or feature idea into a reviewable project-owned Markdown plan before the human authorizes a goal. The software-development family includes application, frontend, backend/API, data/migration, integration, test automation, end-to-end behavior, reliability/observability, developer-experience, and refactoring specialists.
 
 Packs declare versions, dependencies, incompatibilities, activation conditions, required capabilities, roles, skills, workflows, schemas, policies, adapters, tests, and migrations. Resolution order is core, resolved packs, project profile, then project extensions. Conflicts fail visibly; no implicit last-write-wins behavior is allowed.
 

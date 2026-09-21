@@ -95,6 +95,17 @@ complete_transition = "Done"
 
 Then `tasktra jira-sync --root . plan --event claimed --issue PROJ-123 --goal-id <goal> --work-unit-id <unit>` builds a safe request. It does not contact Jira; an active approval, lease, and configured host executor are still required to apply the transition.
 
+### Optional discovery planning
+
+For a new project idea or a major feature, enable the `planning` pack and invoke `/tasktra-discovery` in Codex. It asks the product and architecture questions that change the implementation plan, then writes a reviewable, project-owned plan at `docs/plans/<plan-id>.md`.
+
+```toml
+[packs]
+enabled = ["core", "planning"]
+```
+
+Discovery does not begin implementation. After you approve the plan and authorize work, `/tasktra-goal` turns it into the durable Tasktra goal that workers can execute.
+
 ## Deterministic controls and agent work
 
 The CLI is intentionally not a second conversational interface. It is the deterministic control plane used for state transitions, validation, audit verification, compilation, checksums, and reproducible diagnostics. Those operations are cheaper and more reliable as direct code than as a model task, and their output gives agents compact evidence to reuse.

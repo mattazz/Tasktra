@@ -1,0 +1,21 @@
+[pack]
+id = "planning"
+version = "1.0.0"
+contract_version = 1
+trust = "builtin-data-only"
+dependencies = ["architecture", "product", "delivery"]
+conflicts = []
+roles = []
+skills = ["tasktra-discovery"]
+owns = ["workflow:discovery-to-goal"]
+required_capabilities = []
+optional_capabilities = []
+validation_commands = []
+detection_markers = []
+detection_globs = []
+activation_conditions = ["explicit-selection"]
+workflows = ["discovery-to-goal"]
+schemas = ["development-plan"]
+policies = ["human-approval-before-goal"]
+adapters = []
+tests = ["discovery-skill-projection"]
