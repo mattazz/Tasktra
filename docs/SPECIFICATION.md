@@ -77,6 +77,8 @@ Where available, Tasktra records measured input/output tokens, role, model tier,
 
 The local baseline supports Git when present, local Markdown work items, configurable validation commands, local artifact storage, and a visible capability report. GitHub, Jira, and other remote services are optional adapters. GitHub may initially use `gh`; Jira operations are expressed as structured capability requests that a connector-capable Codex agent fulfills. Missing capability leaves the operation pending and visible while unrelated local work continues. Credentials are obtained only from established secure environments and never stored in Tasktra configuration or prompts.
 
+Jira status synchronization is an explicit `jira-sync` pack, not a core policy. A project that enables it defines a small `[jira_sync]` mapping for the Jira host, project key, and its chosen `claimed`, optional `review-ready`, and `completed` transitions. Tasktra makes a closed, idempotent transition plan; only the normal approval- and lease-bound provider executor may apply it. A plan itself never changes Jira.
+
 Adapters are capability-based and support mock providers for tests. Third-party packs may be data-only or explicitly trusted executable packs. Executable adapters and migrations declare commands, network needs, and file access; installation previews requests and locks version and checksum.
 
 ## Adoption, upgrade, and compatibility

@@ -1,0 +1,21 @@
+[pack]
+id = "jira-sync"
+version = "1.0.0"
+contract_version = 1
+trust = "builtin-data-only"
+dependencies = ["core"]
+conflicts = []
+roles = []
+skills = ["tasktra-jira-sync"]
+owns = ["policy:jira-sync"]
+required_capabilities = []
+optional_capabilities = ["jira"]
+validation_commands = []
+detection_markers = []
+detection_globs = []
+activation_conditions = ["explicit-selection", "configured-jira-sync-policy"]
+workflows = ["claim-to-review-to-complete"]
+schemas = ["project-jira-sync"]
+policies = ["one-way-tasktra-to-jira", "host-executor-required"]
+adapters = ["jira-transition"]
+tests = ["jira-sync-plan"]

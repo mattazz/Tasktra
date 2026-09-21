@@ -77,6 +77,24 @@ tasktra lesson --root . list
 
 Configured validation commands execute as direct argument lists, not through a shell. Work-item updates require the current item version, and workspace inspection never creates branches or worktrees. Optional provider health can be supplied by a Codex or connector host for one invocation with `tasktra capabilities --root . --provider-health report.json`; the report is diagnostic and grants no authority.
 
+### Optional Jira status synchronization
+
+Jira is not part of the default project context. A project that wants one-way Tasktra-to-Jira status updates can explicitly enable the `jira-sync` pack and add a policy such as:
+
+```toml
+[packs]
+enabled = ["core", "jira-sync"]
+
+[jira_sync]
+host = "acme.atlassian.net"
+project = "PROJ"
+claim_transition = "In Progress"
+review_transition = "In Review"
+complete_transition = "Done"
+```
+
+Then `tasktra jira-sync --root . plan --event claimed --issue PROJ-123 --goal-id <goal> --work-unit-id <unit>` builds a safe request. It does not contact Jira; an active approval, lease, and configured host executor are still required to apply the transition.
+
 ## Deterministic controls and agent work
 
 The CLI is intentionally not a second conversational interface. It is the deterministic control plane used for state transitions, validation, audit verification, compilation, checksums, and reproducible diagnostics. Those operations are cheaper and more reliable as direct code than as a model task, and their output gives agents compact evidence to reuse.

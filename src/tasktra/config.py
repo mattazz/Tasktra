@@ -12,6 +12,7 @@ from typing import Mapping
 
 from .contracts import ContractError, validate_named
 from .identifiers import IdentifierError, require_identifier
+from .jira_sync import JiraSyncError, JiraSyncPolicy
 from .model_policy import MODEL_TIERS, REASONING_EFFORTS
 
 CONFIG_DIRECTORY = ".tasktra"
@@ -35,6 +36,7 @@ class ProjectConfig:
     catalog_trusted: bool = False
     codex_tier_models: Mapping[str, str] = field(default_factory=dict)
     codex_role_overrides: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
+    jira_sync: JiraSyncPolicy | None = None
     raw: dict = field(default_factory=dict, compare=False, repr=False)
 
     def database_path(self, root: Path) -> Path:
@@ -199,6 +201,7 @@ def load_project_config(root: Path) -> ProjectConfig:
     packs = _table(data.get("packs", {}), "packs")
     catalog = _table(data.get("catalog", {}), "catalog")
     validation = _table(data.get("validation", {}), "validation")
+    jira_sync_raw = data.get("jira_sync")
     tier_models, role_overrides = _codex_agents(data.get("agents", {}))
     name = project.get("name")
     version = project.get("config_version", 1)
@@ -218,6 +221,14 @@ def load_project_config(root: Path) -> ProjectConfig:
         raise ConfigError("catalog.trust_builtin must be boolean")
     if not isinstance(include_pack_defaults, bool):
         raise ConfigError("validation.include_pack_defaults must be boolean")
+    jira_sync = None
+    if jira_sync_raw is not None:
+        if "jira-sync" not in _string_list(packs.get("enabled", ["core"]), "packs.enabled"):
+            raise ConfigError("[jira_sync] requires the optional jira-sync pack")
+        try:
+            jira_sync = JiraSyncPolicy.from_mapping(_table(jira_sync_raw, "jira_sync"))
+        except JiraSyncError as error:
+            raise ConfigError(str(error)) from error
     return ProjectConfig(
         name=name, version=version, database=database,
         enabled_packs=_string_list(packs.get("enabled", ["core"]), "packs.enabled"),
@@ -226,4 +237,5 @@ def load_project_config(root: Path) -> ProjectConfig:
         concurrency_limit=concurrency, raw=data,
         catalog_trusted=catalog_trusted,
         codex_tier_models=tier_models, codex_role_overrides=role_overrides,
+        jira_sync=jira_sync,
     )

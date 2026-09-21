@@ -45,6 +45,7 @@ from .providers import (
 from .release import audit_release
 from .scheduling import SchedulerError, load_scheduler_health, load_schedule_resume, preview_schedule, reserve_schedule_resume
 from .provider_adapters import GitHubCliAdapter, JiraConnectorAdapter
+from .jira_sync import JiraSyncError, build_sync_plan
 from .state import SCHEMA_VERSION as STATE_SCHEMA_VERSION, StateError, StateStore
 from .telemetry import TelemetryError, TelemetryStore
 from .upgrades import UpgradeError, apply_upgrade, rollback_upgrade, upgrade_plan_digest
@@ -266,6 +267,15 @@ def build_parser() -> argparse.ArgumentParser:
     migrations.add_argument("--trust-catalog", action="store_true")
     migrations.add_argument("--pack", action="append", default=[])
     migrations.add_argument("--trust-executable", action="append", default=[], help="Trusted pack token id@version:sha256")
+
+    jira_sync = subcommands.add_parser("jira-sync", help="Plan an optional Jira status transition without contacting Jira")
+    jira_sync.add_argument("--root", default=".")
+    jira_sync_commands = jira_sync.add_subparsers(dest="jira_sync_command", required=True)
+    jira_sync_plan = jira_sync_commands.add_parser("plan", help="Build a closed Jira transition request for one Tasktra lifecycle event")
+    jira_sync_plan.add_argument("--event", choices=("claimed", "review-ready", "completed"), required=True)
+    jira_sync_plan.add_argument("--issue", required=True, help="Linked Jira issue key, for example PROJ-123")
+    jira_sync_plan.add_argument("--goal-id", required=True)
+    jira_sync_plan.add_argument("--work-unit-id", required=True)
 
     adopt = subcommands.add_parser("adopt", help="Preview Tasktra adoption without changing the project")
     adopt.add_argument("--root", default=".")
@@ -997,6 +1007,27 @@ def _packs(args: argparse.Namespace) -> dict[str, Any]:
     raise AssertionError(f"Unhandled pack command: {args.pack_command}")
 
 
+def _jira_sync(args: argparse.Namespace) -> dict[str, Any]:
+    """Return a closed Jira transition plan; this command never contacts Jira."""
+    root = _root(args.root)
+    config = load_project_config(root)
+    if "jira-sync" not in config.enabled_packs or config.jira_sync is None:
+        raise JiraSyncError(
+            "Jira synchronization is not enabled; add the optional jira-sync pack and [jira_sync] policy first"
+        )
+    if args.jira_sync_command == "plan":
+        return {
+            "ok": True,
+            "action": "jira-sync-plan",
+            "local_work_can_continue": True,
+            **build_sync_plan(
+                policy=config.jira_sync, event=args.event, issue=args.issue,
+                goal_id=args.goal_id, work_unit_id=args.work_unit_id,
+            ),
+        }
+    raise AssertionError(f"Unhandled Jira sync command: {args.jira_sync_command}")
+
+
 def _delegation(args: argparse.Namespace) -> dict[str, Any]:
     root = _root(args.root)
     config = load_project_config(root)
@@ -1579,6 +1610,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             output, code = _delegation(args), 0
         elif args.command == "packs":
             output, code = _packs(args), 0
+        elif args.command == "jira-sync":
+            output, code = _jira_sync(args), 0
         elif args.command == "adopt":
             output, code = _adopt(args), 0
         elif args.command == "upgrade":
