@@ -348,9 +348,10 @@ def _load_bound_json(project: Path, reference: object, *, reviewer: bool) -> tup
     digest = reference.get("sha256")
     if not isinstance(path, str) or not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
         return {}, None
-    target = (project / path).resolve()
+    project_root = project.resolve()
+    target = (project_root / path).resolve()
     try:
-        if project not in target.parents or not target.is_file():
+        if project_root not in target.parents or not target.is_file():
             return {}, None
         payload = target.read_bytes()
         if sha256(payload).hexdigest() != digest:
