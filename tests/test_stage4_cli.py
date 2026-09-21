@@ -161,6 +161,30 @@ class ProviderEffectCliTests(unittest.TestCase):
         self.assertEqual(provenance["message_sha256"], sha256(message.encode("utf-8")).hexdigest())
         self.assertNotEqual(provenance["subject_sha256"], "0" * 64)
 
+    def test_cli_accepts_explicit_codex_authorization_without_a_terminal_tty(self):
+        message = "I authorize this exact remote comment for this goal in Codex."
+        approval = {
+            "kind": "tasktra.transition-approval", "version": 4,
+            "approval_id": "codex-message-authorization", "goal_id": "goal-one", "work_unit_id": "unit-one",
+            "action": "remote-comment", "effect": "external-communication",
+            "scope": {"paths": ["src"], "exclusions": []}, "resource_scope": SCOPE,
+            "envelope_sha256": self.digest, "decision": "approved",
+            "approver": {"kind": "human", "id": "human"}, "performer_id": "worker",
+            "authority_clause": "Human authorized the exact provider scope in Codex.", "evidence": [],
+            "provenance": {"kind": "codex-user-message", "attester_id": "human",
+                           "subject_sha256": "0" * 64, "attested_at": "2030-01-01T00:00:00Z",
+                           "message_sha256": "0" * 64},
+            "valid_until": (self.now + timedelta(minutes=5)).replace(microsecond=0).isoformat().replace("+00:00", "Z"), "revoked_at": None,
+        }
+        approval["provenance"]["subject_sha256"] = transition_approval_subject_sha256(approval)
+        path = self._json("codex-message-authorization.json", approval)
+        code, recorded = run_cli(
+            "approval", "--root", str(self.root), "record", path, "--human-actor", "human",
+            "--codex-user-message", message,
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(recorded["approval"]["provenance"]["message_sha256"], sha256(message.encode("utf-8")).hexdigest())
+
     def test_cli_rejects_v4_codex_approval_without_explicit_message(self):
         approval = {
             "kind": "tasktra.transition-approval", "version": 4,

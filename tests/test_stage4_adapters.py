@@ -536,6 +536,31 @@ class Stage4AdapterTests(unittest.TestCase):
             self.assertFalse(ssh_sentinel.exists())
             adapter.close()
 
+    def test_github_dispatches_only_the_exact_scoped_workflow_and_branch(self):
+        calls = []
+
+        def invoke(**kwargs):
+            calls.append(kwargs)
+            return CommandResult(0)
+
+        adapter = GitHubCliAdapter(BoundedArgvRunner(invoke))
+        workflow_scope = ResourceScope(
+            "github", "github.com", "acme/widgets", "workflow",
+            ".github/workflows/publish-testpypi.yml", "refs/heads/main",
+        )
+        descriptor = OperationDescriptor(
+            "github", "remote-mutation", "github-workflow-dispatch",
+            action="github-workflow-dispatch", resource_scope=workflow_scope, protocol_version=2,
+        )
+        request = {"workflow": ".github/workflows/publish-testpypi.yml", "ref": "main"}
+        self.assertEqual(adapter.execute(descriptor, workflow_scope, request, "dispatch-1").state, "succeeded")
+        self.assertEqual(calls[0]["argv"], ("gh", "workflow", "run", ".github/workflows/publish-testpypi.yml", "--repo", "github.com/acme/widgets", "--ref", "main"))
+        self.assertEqual(adapter.reconcile(descriptor, workflow_scope, request, "dispatch-1").state, "indeterminate")
+        with self.assertRaisesRegex(ProviderError, "exact scoped workflow"):
+            adapter.execute(descriptor, workflow_scope, {"workflow": ".github/workflows/other.yml", "ref": "main"}, "dispatch-2")
+        with self.assertRaisesRegex(ProviderError, "exact scoped branch"):
+            adapter.execute(descriptor, workflow_scope, {"workflow": ".github/workflows/publish-testpypi.yml", "ref": "release"}, "dispatch-3")
+
     def test_github_has_no_network_health_and_writes_marker_via_stdin(self):
         calls = []
 

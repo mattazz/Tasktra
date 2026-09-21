@@ -54,6 +54,7 @@ _GITHUB_EFFECTS = {
     "github-issue-create": "remote-mutation",
     "github-pr-create": "remote-mutation",
     "github-status-set": "remote-mutation",
+    "github-workflow-dispatch": "remote-mutation",
 }
 _JIRA_READS = frozenset({"jira-issue-get", "jira-issue-discovery"})
 _JIRA_EFFECTS = {"jira-comment": "external-communication", "jira-transition": "remote-mutation"}
@@ -889,6 +890,10 @@ class GitHubCliAdapter:
                 host=scope.host,
             )
             return _write_command_result(result, "GitHub repository creation") if result is not None else ProviderResult("unavailable", "GitHub CLI adapter is not configured")
+        if descriptor.request_kind == "github-workflow-dispatch":
+            workflow, ref = _github_workflow_dispatch_request(scope, request)
+            result = self._run(["workflow", "run", workflow, "--repo", repository, "--ref", ref])
+            return _write_command_result(result, "GitHub workflow dispatch") if result is not None else ProviderResult("unavailable", "GitHub CLI adapter is not configured")
         marker = _github_marker(idempotency_key)
         body = _github_body(request.get("body", ""))
         payload = (body + "\n\n" + marker + "\n").encode("utf-8")
@@ -934,6 +939,9 @@ class GitHubCliAdapter:
         _github_repository(scope)
         self._assert_effect_descriptor(descriptor)
         kind = descriptor.request_kind
+        if kind == "github-workflow-dispatch":
+            _github_workflow_dispatch_request(scope, request)
+            return ProviderResult("indeterminate", "GitHub workflow dispatch has no exact idempotency-marker reconciliation")
         if kind == "github-repo-create":
             _github_repository_scope(scope)
             visibility = request.get("visibility")
@@ -1072,6 +1080,21 @@ def _github_repository(scope: ResourceScope) -> str:
 def _github_repository_scope(scope: ResourceScope) -> None:
     if scope.resource_kind != "repository" or scope.resource is not None or scope.ref is not None:
         raise ProviderError("GitHub repository operation requires an exact repository scope")
+
+
+def _github_workflow_dispatch_request(scope: ResourceScope, request: Mapping[str, Any]) -> tuple[str, str]:
+    if scope.resource_kind != "workflow" or not isinstance(scope.resource, str) or scope.ref is None:
+        raise ProviderError("GitHub workflow dispatch requires an exact workflow and branch scope")
+    if set(request) != {"workflow", "ref"}:
+        raise ProviderError("GitHub workflow dispatch request must contain only workflow and ref")
+    workflow, ref = request.get("workflow"), request.get("ref")
+    if not isinstance(workflow, str) or workflow != scope.resource or not workflow.startswith(".github/workflows/") or not workflow.endswith((".yml", ".yaml")):
+        raise ProviderError("GitHub workflow dispatch must target the exact scoped workflow")
+    if not isinstance(ref, str) or not _GITHUB_BRANCH.fullmatch(ref) or ".." in ref or ref.startswith(("/", "-")) or ref.endswith("/"):
+        raise ProviderError("GitHub workflow dispatch ref must be a canonical branch name")
+    if scope.ref != f"refs/heads/{ref}":
+        raise ProviderError("GitHub workflow dispatch ref must match the exact scoped branch")
+    return workflow, ref
 
 
 def _github_resource_scope(scope: ResourceScope, expected_kind: str) -> None:

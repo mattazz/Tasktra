@@ -45,7 +45,8 @@ from .providers import (
 )
 from .release import audit_release
 from .scheduling import SchedulerError, load_scheduler_health, load_schedule_resume, preview_schedule, reserve_schedule_resume
-from .provider_adapters import GitHubCliAdapter, JiraConnectorAdapter
+from .provider_adapters import BoundedArgvRunner, GitHubCliAdapter, JiraConnectorAdapter
+from .provider_execution import ProviderEffectExecutor
 from .jira_sync import JiraSyncError, build_sync_plan
 from .state import SCHEMA_VERSION as STATE_SCHEMA_VERSION, StateError, StateStore
 from .telemetry import TelemetryError, TelemetryStore
@@ -422,6 +423,8 @@ def build_parser() -> argparse.ArgumentParser:
     inspect = effect_commands.add_parser("inspect"); inspect.add_argument("key")
     provider_prepare = effect_commands.add_parser("provider-prepare", help="Durably prepare a protocol-v2 provider effect; does not invoke a provider")
     provider_prepare.add_argument("key"); provider_prepare.add_argument("--goal-id", required=True); provider_prepare.add_argument("--work-unit-id", required=True); provider_prepare.add_argument("--descriptor", required=True, help="closed protocol-v2 operation descriptor JSON file"); provider_prepare.add_argument("--request", required=True, help="bounded provider request JSON file"); provider_prepare.add_argument("--work-attempt-id", required=True); provider_prepare.add_argument("--envelope-sha256", required=True); provider_prepare.add_argument("--actor", required=True); provider_prepare.add_argument("--lease-token-env", default="TASKTRA_LEASE_TOKEN")
+    provider_execute = effect_commands.add_parser("provider-execute", help="Execute one prepared provider effect through a ledger-backed configured adapter")
+    provider_execute.add_argument("key"); provider_execute.add_argument("--descriptor", required=True, help="the exact prepared protocol-v2 operation descriptor JSON file"); provider_execute.add_argument("--actor", required=True); provider_execute.add_argument("--lease-token-env", default="TASKTRA_LEASE_TOKEN")
     provider_reconcile = effect_commands.add_parser("provider-reconcile", help="Record a bounded provider reconciliation observation")
     provider_reconcile.add_argument("key"); provider_reconcile.add_argument("--resolution", choices=("applied", "conflict"), required=True); provider_reconcile.add_argument("--observation", required=True, help="bounded reconciliation observation JSON file"); provider_reconcile.add_argument("--actor", required=True)
     audit = subcommands.add_parser("audit", help="Verify or export the runtime audit chain")
@@ -1538,8 +1541,9 @@ def _approval(args: argparse.Namespace) -> dict[str, Any]:
         message = args.codex_user_message
         if not isinstance(message, str) or not message.strip():
             raise StateError("v4 Codex approval import requires an explicit --codex-user-message")
-        if len(message) > 2_000 or "approve" not in message.casefold():
-            raise StateError("Codex approval message must be a short explicit approval")
+        normalized_message = message.casefold()
+        if len(message) > 2_000 or not any(term in normalized_message for term in ("approve", "authorize")):
+            raise StateError("Codex approval message must be a short explicit approval or authorization")
         subject_sha256 = transition_approval_subject_sha256(value)
         provenance = {
             "kind": "codex-user-message",
@@ -1586,6 +1590,17 @@ def _effect(args: argparse.Namespace) -> dict[str, Any]:
     elif args.effect_command == "provider-prepare":
         descriptor = OperationDescriptor.from_mapping(_runtime_json(args.descriptor))
         item = store.prepare_provider_effect(idempotency_key=args.key, goal_id=args.goal_id, work_unit_id=args.work_unit_id, operation_descriptor=descriptor, request=_runtime_json(args.request), envelope_sha256=args.envelope_sha256, performer_id=args.actor, work_attempt_id=args.work_attempt_id, lease_token=_lease_token(args.lease_token_env))
+    elif args.effect_command == "provider-execute":
+        descriptor = OperationDescriptor.from_mapping(_runtime_json(args.descriptor))
+        if descriptor.provider != "github":
+            raise ProviderError("no configured executor-backed adapter is available for this provider")
+        adapter = GitHubCliAdapter(BoundedArgvRunner())
+        registry = ProviderRegistry()
+        registry.register_provider("github", discovery=adapter, operations={descriptor: adapter})
+        item = ProviderEffectExecutor(store, registry).execute(
+            idempotency_key=args.key, operation_descriptor=descriptor, performer_id=args.actor,
+            lease_token=_lease_token(args.lease_token_env),
+        )
     elif args.effect_command == "provider-reconcile":
         item = store.reconcile_provider_effect(idempotency_key=args.key, resolution=args.resolution, observation=_runtime_json(args.observation), performer_id=args.actor)
     else:
