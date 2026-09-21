@@ -35,6 +35,8 @@ class CompilerTests(unittest.TestCase):
         self.assertIn("\nname: tasktra-init\n", skill)
         self.assertIn("\ndescription: ", skill)
         self.assertNotIn(PurePosixPath(".codex/skills/tasktra-init/SKILL.md"), projection.files)
+        self.assertIn(PurePosixPath(".agents/skills/eli5/SKILL.md"), projection.files)
+        self.assertIn(PurePosixPath(".claude/skills/eli5/SKILL.md"), projection.files)
         codex_agent = projection.files[PurePosixPath(".codex/agents/scout.toml")]
         self.assertIn('name = "scout"', codex_agent)
         entrypoint = projection.files[PurePosixPath("AGENTS.md")]

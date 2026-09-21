@@ -39,7 +39,7 @@
         "git"
       ],
       "required_capabilities": [],
-      "sha256": "b107bb18001d8b86c1c06dd8d6d596493f30a2c803d4bb2bb3dc2a6f5ab5bd20",
+      "sha256": "545977223350b2a02aa59e30ac61d1a882d679b102bf2f2a9e70813ffce3c27e",
       "trust": "builtin-data-only",
       "validation_commands": [
         [
