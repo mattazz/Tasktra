@@ -16,6 +16,7 @@ from typing import Iterable, Mapping, Sequence
 from . import __version__
 from .adoption import inspect_existing_instructions
 from .compiler import Catalog, CatalogError, compile_catalog
+from .model_policy import CodexModelPolicy
 from .config import ConfigError, ProjectConfig, config_path, load_project_config
 from .ecosystem import preflight_packs, preview_pack_migrations
 from .manifest import GeneratedManifest, ManifestError, TasktraLock, read_lockfile, read_manifest, sha256_bytes, sha256_text
@@ -55,6 +56,8 @@ def preview_adoption(
     validation_commands: Iterable[Sequence[str]] = (),
     tasktra_version: str = __version__,
     runtime_schema_version: int = SCHEMA_VERSION,
+    codex_model_policy: CodexModelPolicy | None = None,
+    codex_role_overrides: Mapping[str, Mapping[str, str]] | None = None,
 ) -> LifecyclePreview:
     """Return a bounded adoption plan without treating instructions as equivalent.
 
@@ -64,7 +67,7 @@ def preview_adoption(
     """
     project = _project_root(root)
     inspection = inspect_existing_instructions(project)
-    target = _target_projection(catalog, enabled_packs)
+    target = _target_projection(catalog, enabled_packs, codex_model_policy, codex_role_overrides)
     activation = preflight_packs(
         catalog, target.packs,
         available_capabilities=available_capabilities,
@@ -108,6 +111,8 @@ def preview_upgrade(
     tasktra_version: str = __version__,
     runtime_schema_version: int = SCHEMA_VERSION,
     validation_commands: Iterable[Sequence[str]] | None = None,
+    codex_model_policy: CodexModelPolicy | None = None,
+    codex_role_overrides: Mapping[str, Mapping[str, str]] | None = None,
 ) -> LifecyclePreview:
     """Compose a deterministic, authority-scoped upgrade preview.
 
@@ -127,7 +132,7 @@ def preview_upgrade(
             blockers.append(_blocker("lockfile", f"invalid lockfile: {error}"))
     selected = tuple(enabled_packs) if enabled_packs is not None else (lock.packs if lock is not None else ("core",))
     try:
-        target = _target_projection(catalog, selected)
+        target = _target_projection(catalog, selected, codex_model_policy, codex_role_overrides)
         activation = preflight_packs(
             catalog, target.packs,
             available_capabilities=available_capabilities,
@@ -221,11 +226,17 @@ def _project_root(root: Path | str) -> Path:
     return project
 
 
-def _target_projection(catalog: Catalog, enabled_packs: Iterable[str]):
+def _target_projection(
+    catalog: Catalog, enabled_packs: Iterable[str], codex_model_policy: CodexModelPolicy | None = None,
+    codex_role_overrides: Mapping[str, Mapping[str, str]] | None = None,
+):
     selected = tuple(sorted(set(enabled_packs)))
     if not selected:
         raise LifecycleError("enabled_packs must not be empty")
-    return compile_catalog(catalog, selected)
+    return compile_catalog(
+        catalog, selected, codex_model_policy=codex_model_policy,
+        codex_role_overrides=codex_role_overrides,
+    )
 
 
 def _target_state(catalog: Catalog, packs: Iterable[str], tasktra_version: str, runtime_schema_version: int) -> dict[str, object]:

@@ -10,3 +10,4 @@ These records capture load-bearing decisions. They are generic product decisions
 - [0006 — Capability-based integrations and local baseline](0006-capabilities-and-local-baseline.md)
 - [0007 — Safe adoption, upgrades, and compatibility](0007-safe-upgrades-and-compatibility.md)
 - [0008 — Continuous staged delivery and self-hosting](0008-staged-delivery-and-self-hosting.md)
+- [0009 — Deterministic control plane and portable agent routing](0009-deterministic-control-plane-and-portable-routing.md)

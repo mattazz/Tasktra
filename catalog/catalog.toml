@@ -1,3 +1,9 @@
 [catalog]
 version = "1.0.0"
 name = "Tasktra canonical catalog"
+
+[codex.model_tiers]
+fast = "gpt-5.6-luna"
+balanced = "gpt-5.6-terra"
+deep = "gpt-5.6-sol"
+exceptional = "gpt-6-astra"

@@ -7,8 +7,12 @@ import os
 from pathlib import Path
 import stat
 import tomllib
+from types import MappingProxyType
+from typing import Mapping
 
 from .contracts import ContractError, validate_named
+from .identifiers import IdentifierError, require_identifier
+from .model_policy import MODEL_TIERS, REASONING_EFFORTS
 
 CONFIG_DIRECTORY = ".tasktra"
 CONFIG_FILENAME = "project.toml"
@@ -29,6 +33,8 @@ class ProjectConfig:
     include_pack_validation_defaults: bool = True
     concurrency_limit: int = 3
     catalog_trusted: bool = False
+    codex_tier_models: Mapping[str, str] = field(default_factory=dict)
+    codex_role_overrides: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
     raw: dict = field(default_factory=dict, compare=False, repr=False)
 
     def database_path(self, root: Path) -> Path:
@@ -131,6 +137,46 @@ def _argv_list(value: object, name: str) -> tuple[tuple[str, ...], ...]:
     return tuple(argv)
 
 
+def _codex_agents(value: object) -> tuple[Mapping[str, str], Mapping[str, Mapping[str, str]]]:
+    agents = _table(value, "agents") if value else {}
+    if set(agents) - {"codex"}:
+        raise ConfigError("agents permits only the codex table")
+    codex = _table(agents.get("codex", {}), "agents.codex")
+    if set(codex) - {"model_tiers", "roles"}:
+        raise ConfigError("agents.codex permits only model_tiers and roles")
+    tiers = _table(codex.get("model_tiers", {}), "agents.codex.model_tiers")
+    parsed_tiers: dict[str, str] = {}
+    for tier, model in tiers.items():
+        if tier not in MODEL_TIERS:
+            raise ConfigError(f"agents.codex.model_tiers has unknown tier: {tier}")
+        if not isinstance(model, str) or not model.strip() or model == "inherit":
+            raise ConfigError(f"agents.codex.model_tiers.{tier} must be a non-empty model id")
+        parsed_tiers[tier] = model
+    roles = _table(codex.get("roles", {}), "agents.codex.roles")
+    parsed_roles: dict[str, Mapping[str, str]] = {}
+    for role, override in roles.items():
+        try:
+            require_identifier(role, label="agents.codex role")
+        except IdentifierError as error:
+            raise ConfigError(str(error)) from error
+        override = _table(override, f"agents.codex.roles.{role}")
+        if not override or set(override) - {"model", "reasoning_effort"}:
+            raise ConfigError(f"agents.codex.roles.{role} permits only non-empty model/reasoning_effort overrides")
+        parsed: dict[str, str] = {}
+        if "model" in override:
+            model = override["model"]
+            if not isinstance(model, str) or not model.strip():
+                raise ConfigError(f"agents.codex.roles.{role}.model must be a non-empty model id or inherit")
+            parsed["model"] = model
+        if "reasoning_effort" in override:
+            effort = override["reasoning_effort"]
+            if not isinstance(effort, str) or effort not in REASONING_EFFORTS | {"inherit"}:
+                raise ConfigError(f"agents.codex.roles.{role}.reasoning_effort is invalid")
+            parsed["reasoning_effort"] = effort
+        parsed_roles[role] = MappingProxyType(parsed)
+    return MappingProxyType(parsed_tiers), MappingProxyType(parsed_roles)
+
+
 def load_project_config(root: Path) -> ProjectConfig:
     path = config_path(root)
     if not path.is_file():
@@ -153,6 +199,7 @@ def load_project_config(root: Path) -> ProjectConfig:
     packs = _table(data.get("packs", {}), "packs")
     catalog = _table(data.get("catalog", {}), "catalog")
     validation = _table(data.get("validation", {}), "validation")
+    tier_models, role_overrides = _codex_agents(data.get("agents", {}))
     name = project.get("name")
     version = project.get("config_version", 1)
     database = runtime.get("database", DEFAULT_DATABASE)
@@ -178,4 +225,5 @@ def load_project_config(root: Path) -> ProjectConfig:
         include_pack_validation_defaults=include_pack_defaults,
         concurrency_limit=concurrency, raw=data,
         catalog_trusted=catalog_trusted,
+        codex_tier_models=tier_models, codex_role_overrides=role_overrides,
     )

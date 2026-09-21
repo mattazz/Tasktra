@@ -1,0 +1,85 @@
+{
+  "kind": "tasktra.authority-envelope",
+  "version": 2,
+  "goal_id": "tasktra-hardening-publish",
+  "outcome": "Commit the reviewed Tasktra hardening batch and push that exact commit to the existing private main branch.",
+  "motivation": "The human authorized resolving the identified bootstrap, routing, delegation, documentation, and validation issues and publishing the reviewed result. This envelope grants only one bounded commit and one exact guarded push, with no paid GitHub services or repository-setting changes.",
+  "author_id": "matt",
+  "acceptance_criteria": [
+    {
+      "id": "published",
+      "statement": "The reviewed hardening batch is committed and the exact commit is present on origin main with no billing or visibility changes."
+    }
+  ],
+  "scope": {
+    "paths": [
+      "."
+    ],
+    "exclusions": [
+      ".tasktra/runtime",
+      ".tasktra/preview"
+    ]
+  },
+  "resource_scopes": [
+    {
+      "provider": "git",
+      "host": "github.com",
+      "container": "mattazz/Tasktra",
+      "resource_kind": "repository",
+      "resource": "b37b8a4cfe657f8479479a0cee5023a403f140fcd213b9b75a215f1fcb543344",
+      "ref": "refs/heads/main"
+    }
+  ],
+  "allowed_actions": [
+    "goal-activate",
+    "work-claim",
+    "git-commit",
+    "git-push",
+    "acceptance-record",
+    "work-complete",
+    "goal-complete"
+  ],
+  "allowed_effects": [
+    "read-only",
+    "local-reversible-write",
+    "repository-history"
+  ],
+  "prohibited_actions": [
+    "change-billing",
+    "change-repository-visibility",
+    "change-actions-settings",
+    "create-pull-request",
+    "create-release",
+    "create-tag",
+    "deploy",
+    "destructive-delete",
+    "merge",
+    "remote-mutation"
+  ],
+  "quality_requirements": [
+    "Use the completed configured validation and independent review evidence for the unchanged batch.",
+    "Refuse unrelated staged paths, ignored runtime state, previews, credentials, and secrets.",
+    "Bind commit and push to exact scopes, approvals, lease, idempotency keys, and object identifiers.",
+    "Verify the remote object after the push and preserve repository privacy."
+  ],
+  "budgets": {
+    "tokens": null,
+    "attempts": 3,
+    "elapsed_seconds": 3600,
+    "concurrency": 1
+  },
+  "dependencies": [],
+  "checkpoints": [],
+  "stop_conditions": [
+    "The reviewed batch changes before the commit is prepared.",
+    "The staged tree contains unrelated or sensitive paths.",
+    "Local main or origin main differs from a5d35451ee4073696b54fd565ffe99da4f625aa6 before the commit and push sequence.",
+    "The push result is indeterminate or the remote object cannot be verified.",
+    "Any requested action would spend money or change repository visibility, billing, Actions settings, tags, releases, pull requests, or another repository."
+  ],
+  "escalation_conditions": [
+    "Git authentication is unavailable.",
+    "The exact local or remote ref changes unexpectedly.",
+    "The provider adapter cannot prove the commit or push result."
+  ]
+}

@@ -1,0 +1,3 @@
+# Catalog, projections, lockfiles, and documentation participate in deterministic
+# checksums. Keep every text checkout LF even when Git is configured for autocrlf.
+* text=auto eol=lf

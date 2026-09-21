@@ -2,6 +2,9 @@
 id = "implementer"
 title = "Implementer"
 family = "core"
+model_tier = "balanced"
+reasoning_effort = "high"
+sandbox_mode = "workspace-write"
 ---
 # Implementer
 

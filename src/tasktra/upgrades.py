@@ -16,6 +16,7 @@ from typing import Mapping
 from . import __version__
 from .compiler import Catalog, check_drift, compile_catalog, write_projection
 from .config import ConfigError, ProjectConfig
+from .delegation import projection_overrides
 from .manifest import (
     GeneratedManifest,
     build_generated_manifest,
@@ -70,7 +71,11 @@ def apply_upgrade(
         raise UpgradeError("upgrade apply requires explicit confirmation")
 
     selected = tuple(str(item["id"]) for item in normalized["target"]["packs"])
-    projection = compile_catalog(catalog, selected)
+    codex_model_policy, codex_role_overrides = projection_overrides(catalog, config)
+    projection = compile_catalog(
+        catalog, selected, codex_model_policy=codex_model_policy,
+        codex_role_overrides=codex_role_overrides,
+    )
     prior_manifest = _optional_manifest(project)
     allowed_deletes = {
         str(item["path"])

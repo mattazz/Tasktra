@@ -7,7 +7,7 @@
     "schema": 10,
     "tasktra_version": "1.0.0",
     "catalog_version": "1.0.0",
-    "audit_events_checked": 66,
+    "audit_events_checked": 136,
     "audit_issues": []
   },
   "self_host_upgrade": {
@@ -28,14 +28,20 @@
     "rollback_boundary": "Automatic projection rollback is disabled after a runtime schema migration; restore the exact verified database backup under explicit human recovery authority."
   },
   "validation": {
-    "total_test_cases": 341,
-    "passed": 335,
-    "skipped": 6,
+    "total_test_cases": 357,
+    "passed": 349,
+    "skipped": 8,
     "failed": 0,
     "groups": 6,
-    "measured_command_elapsed_ms": 78133,
+    "measured_command_elapsed_ms": 66450,
     "supplemental_packaging": "wheel reproducibility passed with the cached wheel tooling",
     "compile_check": "passed"
+  },
+  "hardening": {
+    "source_checkout": "Editable installs locate the canonical source catalog outside the Tasktra checkout; bootstrap preserves an existing profile and initializes only local runtime state.",
+    "agent_routing": "All 36 roles carry portable model, effort, and sandbox metadata; project tier and role overrides are shared by compile, adopt, upgrade preview/apply, and delegation planning.",
+    "delegation": "Read-only plans are bounded, strict-JSON, host-unverified, and Codex-host-required; they never claim CLI dispatch or broaden canonical sandbox authority.",
+    "independent_review": "No code blockers remain after strict-input, unknown-role, upgrade-apply, editable-catalog trust, and projection-consistency review."
   },
   "release_gate": {
     "open": true,

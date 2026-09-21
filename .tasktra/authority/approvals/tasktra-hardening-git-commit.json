@@ -1,0 +1,20 @@
+{
+  "kind": "tasktra.transition-approval",
+  "version": 3,
+  "goal_id": "tasktra-hardening-publish",
+  "scope": {"paths": ["."], "exclusions": [".tasktra/runtime", ".tasktra/preview"]},
+  "envelope_sha256": "9be1c646b879696d98d4b949755c32404f0569e2d5551ee7b3f8cf6a2f201ca8",
+  "decision": "approved",
+  "approver": {"kind": "human", "id": "matt"},
+  "performer_id": "codex-coordinator",
+  "authority_clause": "The human authorized work on all identified issues and authorized the reviewed commit and push while declining paid GitHub services.",
+  "evidence": [],
+  "valid_until": "2026-09-21T06:00:00Z",
+  "revoked_at": null,
+  "approval_id": "tasktra-hardening-git-commit",
+  "work_unit_id": "publish-hardening",
+  "action": "git-commit",
+  "effect": "repository-history",
+  "resource_scope": {"provider": "git", "host": "github.com", "container": "mattazz/Tasktra", "resource_kind": "repository", "resource": "b37b8a4cfe657f8479479a0cee5023a403f140fcd213b9b75a215f1fcb543344", "ref": "refs/heads/main"},
+  "provenance": {"kind": "local-human-ceremony", "attester_id": "matt", "subject_sha256": "35b3a25ae4713298b7dd8fdbb488eb0abe98fb437baef143b7c998742f0f1925", "attested_at": "2026-09-21T04:32:00Z"}
+}

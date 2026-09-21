@@ -19,6 +19,11 @@ from typing import Iterable, Mapping
 
 from .contracts import ContractError, validate_named
 from .identifiers import IdentifierError, require_identifier
+from .model_policy import (
+    CodexModelPolicy,
+    ModelPolicyError,
+    RoleModelMetadata,
+)
 
 
 class CatalogError(ValueError):
@@ -36,6 +41,9 @@ class Document:
     family: str
     source: Path
     content: str
+    model_tier: str | None = None
+    reasoning_effort: str | None = None
+    sandbox_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -82,6 +90,7 @@ class Catalog:
     roles: Mapping[str, Document]
     skills: Mapping[str, Document]
     packs: Mapping[str, Pack]
+    codex_model_policy: CodexModelPolicy | None = None
 
 
 @dataclass(frozen=True)
@@ -181,7 +190,7 @@ def load_catalog(catalog_dir: Path | str, *, source_trust: str = "builtin") -> C
     if "core" not in packs:
         raise CatalogError("catalog must define a core pack")
     _validate_pack_references(packs, roles, skills)
-    return Catalog(version, roles, skills, packs)
+    return Catalog(version, roles, skills, packs, _codex_model_policy(metadata, root / "catalog.toml"))
 
 
 def resolve_packs(catalog: Catalog, enabled_packs: Iterable[str] = ("core",)) -> tuple[str, ...]:
@@ -232,13 +241,28 @@ def resolve_packs(catalog: Catalog, enabled_packs: Iterable[str] = ("core",)) ->
     return tuple(resolved)
 
 
-def compile_catalog(catalog: Catalog, enabled_packs: Iterable[str] = ("core",)) -> Projection:
+def compile_catalog(
+    catalog: Catalog,
+    enabled_packs: Iterable[str] = ("core",),
+    *,
+    codex_model_policy: CodexModelPolicy | None = None,
+    codex_role_overrides: Mapping[str, Mapping[str, str]] | None = None,
+) -> Projection:
     """Return the exact Codex and Claude files for a selected pack set.
 
     Writes are intentionally separate in :func:`write_projection`, which lets
     callers preview changes before modifying a project.
     """
     packs = resolve_packs(catalog, enabled_packs)
+    model_policy = codex_model_policy or catalog.codex_model_policy
+    if model_policy is None:
+        raise CatalogError("catalog must define a Codex model policy")
+    role_overrides = codex_role_overrides or {}
+    unknown_overrides = set(role_overrides) - set(catalog.roles)
+    if unknown_overrides:
+        raise CatalogError(
+            "Codex role overrides reference unknown role(s): " + ", ".join(sorted(unknown_overrides))
+        )
     role_ids = _selected(packs, catalog.packs, "roles")
     skill_ids = _selected(packs, catalog.packs, "skills")
     files: dict[PurePosixPath, str] = {
@@ -249,7 +273,9 @@ def compile_catalog(catalog: Catalog, enabled_packs: Iterable[str] = ("core",)) 
     for role_id in role_ids:
         role = catalog.roles[role_id]
         files[PurePosixPath(".agents", "roles", f"{role_id}.md")] = _MARKER + role.content
-        files[PurePosixPath(".codex", "agents", f"{role_id}.toml")] = _codex_agent_projection(role)
+        files[PurePosixPath(".codex", "agents", f"{role_id}.toml")] = _codex_agent_projection(
+            role, model_policy, role_overrides.get(role_id, {})
+        )
         files[PurePosixPath(".claude", "agents", f"{role_id}.md")] = _agent_projection(role)
     for skill_id in skill_ids:
         skill = catalog.skills[skill_id]
@@ -473,7 +499,17 @@ def _load_documents(directory: Path, kind: str) -> dict[str, Document]:
         identifier = _require_identifier(identifier, source, kind)
         if _casefold_duplicate(identifier, documents):
             raise CatalogError(f"duplicate {kind} id: {identifier}")
-        documents[identifier] = Document(identifier, title, family, source, content)
+        metadata = _role_metadata(frontmatter, source) if kind == "role" else None
+        if kind == "role":
+            unknown = set(frontmatter) - {"id", "title", "family", "model_tier", "reasoning_effort", "sandbox_mode"}
+            if unknown:
+                raise CatalogError(f"{source}: unknown role frontmatter fields: {', '.join(sorted(unknown))}")
+        documents[identifier] = Document(
+            identifier, title, family, source, content,
+            metadata.model_tier if metadata else None,
+            metadata.reasoning_effort if metadata else None,
+            metadata.sandbox_mode if metadata else None,
+        )
     if not documents:
         raise CatalogError(f"no {kind} documents in {directory}")
     return documents
@@ -497,6 +533,13 @@ def _load_declared_roles(source: Path, existing: Mapping[str, Document]) -> dict
     for entry in entries:
         if not isinstance(entry, dict):
             raise CatalogError(f"{source}: role declarations must be tables")
+        unknown = set(entry) - {
+            "id", "title", "family", "focus", "trigger", "responsibility", "evidence_policy",
+            "inputs", "outputs", "stop_conditions", "validation_expectations",
+            "model_tier", "reasoning_effort", "sandbox_mode",
+        }
+        if unknown:
+            raise CatalogError(f"{source}: unknown role fields: {', '.join(sorted(unknown))}")
         identifier = entry.get("id")
         title = entry.get("title")
         family = entry.get("family")
@@ -528,7 +571,11 @@ def _load_declared_roles(source: Path, existing: Mapping[str, Document]) -> dict
             f"## Validation expectations\n\n{_bullets(validations)}\n\n"
             f"## Evidence policy\n\n{evidence_policy}\n"
         )
-        documents[identifier] = Document(identifier, title, family, source, content)
+        metadata = _role_metadata(entry, source)
+        documents[identifier] = Document(
+            identifier, title, family, source, content,
+            metadata.model_tier, metadata.reasoning_effort, metadata.sandbox_mode,
+        )
     return documents
 
 
@@ -536,6 +583,31 @@ def _role_contract_list(value: object, source: Path, identifier: object, label: 
     if not isinstance(value, list) or not value or not all(isinstance(item, str) and item for item in value):
         raise CatalogError(f"{source}: role {identifier!r} {label} must be a non-empty string list")
     return tuple(value)
+
+
+def _codex_model_policy(data: Mapping[str, object], source: Path) -> CodexModelPolicy:
+    section = data.get("codex")
+    if not isinstance(section, dict) or set(section) != {"model_tiers"}:
+        raise CatalogError(f"{source}: [codex] must contain only model_tiers")
+    tiers = section["model_tiers"]
+    if not isinstance(tiers, dict):
+        raise CatalogError(f"{source}: codex.model_tiers must be a table")
+    try:
+        return CodexModelPolicy(tiers)
+    except ModelPolicyError as error:
+        raise CatalogError(f"{source}: {error}") from error
+
+
+def _role_metadata(data: Mapping[str, object], source: Path) -> RoleModelMetadata:
+    """Require closed portable execution metadata on every canonical role."""
+    try:
+        return RoleModelMetadata(
+            model_tier=data.get("model_tier"),  # type: ignore[arg-type]
+            reasoning_effort=data.get("reasoning_effort"),  # type: ignore[arg-type]
+            sandbox_mode=data.get("sandbox_mode"),  # type: ignore[arg-type]
+        )
+    except ModelPolicyError as error:
+        raise CatalogError(f"{source}: {error}") from error
 
 
 def _bullets(values: tuple[str, ...]) -> str:
@@ -862,6 +934,11 @@ def _entrypoint(runtime: str, packs: tuple[str, ...], roles: tuple[str, ...], sk
         f"# Tasktra {runtime} entrypoint\n\n"
         "Use the assigned role for bounded work. Read a skill only when its trigger applies. "
         "Project authority, goal scope, and validation live in `.tasktra/project.toml` and project-owned policy sources.\n\n"
+        "Apply the efficiency ladder: reuse verified evidence; use deterministic tools for mechanical work; "
+        "delegate narrow retrieval to a scout; delegate concrete changes to a bounded implementer; use reviewers "
+        "for independent semantic judgment; and escalate only a specific unresolved difficulty. Do not delegate "
+        "a deterministic status, search, count, formatting, or comparison merely to avoid using a tool. Never "
+        "skip required validation to save model usage.\n\n"
         f"Enabled packs: {', '.join(packs)}\n\n"
         f"Roles: {', '.join(roles)}\n\n"
         f"Skills: {', '.join(skills)}\n"
@@ -873,13 +950,34 @@ def _agent_projection(role: Document) -> str:
     return _yaml_header(role.identifier, _summary(role)) + _MARKER + role.content
 
 
-def _codex_agent_projection(role: Document) -> str:
+def _codex_agent_projection(
+    role: Document, model_policy: CodexModelPolicy, override: Mapping[str, str]
+) -> str:
     """Render a native Codex custom-agent TOML definition."""
+    try:
+        metadata = RoleModelMetadata(role.model_tier, role.reasoning_effort, role.sandbox_mode)
+        model = model_policy.model_for(metadata.model_tier)
+    except ModelPolicyError as error:
+        raise CatalogError(f"{role.source}: invalid Codex role metadata: {error}") from error
+    if set(override) - {"model", "reasoning_effort"}:
+        raise CatalogError(f"{role.source}: invalid Codex role override")
+    model = None if override.get("model") == "inherit" else override.get("model", model)
+    effort = None if override.get("reasoning_effort") == "inherit" else override.get("reasoning_effort", metadata.reasoning_effort)
+    if model is not None and (not isinstance(model, str) or not model.strip()):
+        raise CatalogError(f"{role.source}: invalid Codex model override")
+    if effort is not None:
+        try:
+            RoleModelMetadata(metadata.model_tier, effort, metadata.sandbox_mode)
+        except ModelPolicyError as error:
+            raise CatalogError(f"{role.source}: invalid Codex reasoning override: {error}") from error
     return (
         "# Generated by Tasktra. Edit catalog sources, then compile.\n"
         f"name = {json.dumps(role.identifier)}\n"
         f"description = {json.dumps(_summary(role))}\n"
-        f"developer_instructions = {json.dumps(role.content)}\n"
+        + (f"model = {json.dumps(model)}\n" if model is not None else "")
+        + (f"model_reasoning_effort = {json.dumps(effort)}\n" if effort is not None else "")
+        + f"sandbox_mode = {json.dumps(metadata.sandbox_mode)}\n"
+        + f"developer_instructions = {json.dumps(role.content)}\n"
     )
 
 

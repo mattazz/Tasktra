@@ -6,7 +6,7 @@ import shutil
 from tempfile import TemporaryDirectory
 import unittest
 
-from tasktra.cli import main
+from tasktra.cli import _catalog_root, _catalog_source_trust, main
 from tasktra.state import SCHEMA_VERSION
 
 
@@ -21,6 +21,15 @@ def run_cli(*arguments: str):
 
 
 class CliTests(unittest.TestCase):
+    def test_editable_install_finds_its_source_catalog_outside_the_checkout(self):
+        with TemporaryDirectory() as directory:
+            catalog = _catalog_root(Path(directory), None)
+            self.assertEqual(catalog, REPOSITORY_ROOT / "catalog")
+            self.assertEqual(
+                _catalog_source_trust(catalog, False, allow_source_checkout=True),
+                "builtin",
+            )
+
     def test_external_catalog_requires_explicit_instruction_trust(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

@@ -28,18 +28,32 @@ Codex is the normal human interface. A small Python CLI provides deterministic o
 
 ## Quick start
 
-From a checkout:
+From a fresh Tasktra source checkout, install the local package and bootstrap
+the ignored runtime database. This preserves the committed project profile; do
+not run `init --apply` against this repository checkout.
 
 ```powershell
 python -m pip install --no-deps -e .
-tasktra init --root .
-tasktra init --root . --apply
-tasktra compile --root .
-tasktra compile --root . --check
+python -m tasktra bootstrap --root .
+python -m tasktra doctor --root .
+python -m tasktra compile --root . --check --trust-catalog
 python -m unittest discover -s tests -v
 ```
 
-`init` is preview-only unless `--apply` is present. `compile` refuses to replace project-owned files, requires `--force` for locally edited managed files, and requires `--prune-stale` before deleting obsolete managed files whose hashes still match the prior manifest.
+That path is for developing Tasktra itself. The same editable source install can
+orchestrate another repository; install it once into the Python environment that
+will run Codex's commands, then point Tasktra at the target from any directory:
+
+```powershell
+python -m pip install --no-deps -e C:\src\Tasktra
+python -m tasktra init --root C:\src\my-project
+python -m tasktra init --root C:\src\my-project --apply
+```
+
+A built wheel can be installed instead of the editable source checkout when a
+versioned distribution is available.
+
+`init` is preview-only unless `--apply` is present and never overwrites an existing profile. `bootstrap` preserves an existing profile and creates or migrates only its local runtime. `compile` refuses to replace project-owned files, requires `--force` for locally edited managed files, and requires `--prune-stale` before deleting obsolete managed files whose hashes still match the prior manifest. Installing the package is what makes `python -m tasktra` available outside the Tasktra checkout; `--root` identifies the project it should operate on.
 
 The local workflow surface includes preview-first validation, Markdown work items, structured handoffs, durable goals, capability reporting, and read-only workspace guidance:
 
@@ -62,6 +76,18 @@ tasktra lesson --root . list
 ```
 
 Configured validation commands execute as direct argument lists, not through a shell. Work-item updates require the current item version, and workspace inspection never creates branches or worktrees. Optional provider health can be supplied by a Codex or connector host for one invocation with `tasktra capabilities --root . --provider-health report.json`; the report is diagnostic and grants no authority.
+
+## Deterministic controls and agent work
+
+The CLI is intentionally not a second conversational interface. It is the deterministic control plane used for state transitions, validation, audit verification, compilation, checksums, and reproducible diagnostics. Those operations are cheaper and more reliable as direct code than as a model task, and their output gives agents compact evidence to reuse.
+
+Codex should delegate when the task needs reading, semantic judgment, implementation, or independent review. The default efficiency ladder is: reuse verified evidence; use deterministic tools; send a narrow lower-cost scout when investigation is needed; assign a bounded implementer for a concrete change; then use a stronger reviewer or escalation role only for a real unresolved difficulty. Required validation is never skipped to save tokens.
+
+## Portable model routing
+
+Canonical roles declare a portable tier (`fast`, `balanced`, `deep`, or `exceptional`), a reasoning effort, and a sandbox mode. The built-in Codex mapping is `fast` → `gpt-5.6-luna`, `balanced` → `gpt-5.6-terra`, `deep` → `gpt-5.6-sol`, and `exceptional` → `gpt-6-astra`. Generated `.codex/agents/*.toml` files contain the resolved native settings; edit catalog sources or project configuration, then compile, rather than editing a generated agent.
+
+A consuming project can replace selected tier mappings and set a role-specific model or reasoning effort in `[agents.codex]`. Resolution is role override first, then the project's tier mapping, then the catalog default. A role cannot widen the sandbox declared by the canonical catalog. See the [operations guide](docs/OPERATIONS.md#model-routing-and-delegation-plans) for configuration and the distinction between a local routing plan and actual Codex-host dispatch.
 
 ## Typical interaction
 

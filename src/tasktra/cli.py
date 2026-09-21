@@ -17,6 +17,7 @@ from .benchmarking import BenchmarkObservation, BenchmarkPlan, compare_observati
 from .compiler import CatalogError, catalog_digest, check_drift, compile_catalog, load_catalog, write_projection
 from .ecosystem import preflight_packs, preview_pack_migrations, recommend_packs
 from .config import ConfigError, config_path, initialize_project, load_project_config
+from .delegation import DelegationError, delegation_plan, projection_overrides
 from .handoffs import MAX_HANDOFF_BYTES, HandoffError, load_handoff, validate_handoff
 from .lessons import LessonError, LessonProposalStore
 from .lifecycle import LifecycleError, preview_adoption, preview_upgrade
@@ -112,6 +113,12 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--preview", "--dry-run", action="store_true", help="Inspect adoption without writing files")
     init.add_argument("--apply", action="store_true", help="Apply the previewed project profile")
     init.add_argument("--verbose", action="store_true", help="Include per-file instruction inventory and hashes")
+
+    bootstrap = subcommands.add_parser(
+        "bootstrap", help="Create a local runtime while preserving an existing project profile"
+    )
+    bootstrap.add_argument("--root", default=".")
+    bootstrap.add_argument("--name", help="Name for a newly created project profile")
 
     status = subcommands.add_parser("status", help="Show local project and runtime status")
     status.add_argument("--root", default=".")
@@ -232,6 +239,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Delete unchanged stale managed outputs after hash verification",
     )
+
+    delegation = subcommands.add_parser("delegation", help="Create a read-only Codex-host delegation plan")
+    delegation.add_argument("--root", default=".")
+    delegation_commands = delegation.add_subparsers(dest="delegation_command", required=True)
+    delegation_plan_command = delegation_commands.add_parser("plan", help="Resolve a bounded worker brief without dispatching")
+    delegation_plan_command.add_argument("request")
+    delegation_plan_command.add_argument("--handoff")
 
     packs = subcommands.add_parser("packs", help="Preview ecosystem pack recommendations and activation")
     packs.add_argument("--root", default=".")
@@ -435,6 +449,36 @@ def _init(args: argparse.Namespace) -> dict[str, Any]:
     if args.verbose:
         result["instructions"] = [item.as_dict() for item in preview.instructions]
     return result
+
+
+def _bootstrap(args: argparse.Namespace) -> dict[str, Any]:
+    """Make a checkout runnable without treating its committed profile as disposable.
+
+    ``init`` remains deliberately conflict-safe: it creates a project profile once
+    and refuses to replace it.  A source checkout already has that project-owned
+    profile, but its ignored SQLite runtime is absent in a fresh clone.  Bootstrap
+    preserves the profile byte-for-byte and initializes only that local runtime.
+    """
+    root = _root(args.root)
+    profile = config_path(root)
+    if profile.exists():
+        # Validate before writing runtime state so a malformed preserved profile
+        # cannot be mistaken for a bootstrap target.
+        load_project_config(root)
+        config_action = "preserve"
+    else:
+        profile = initialize_project(root, name=args.name)
+        config_action = "create"
+    state = _store(root)
+    schema_version = state.migrate()
+    return {
+        "ok": True,
+        "action": "bootstrap",
+        "config": str(profile),
+        "config_action": config_action,
+        "database": str(state.path),
+        "runtime_schema": schema_version,
+    }
 
 
 def _status(args: argparse.Namespace) -> dict[str, Any]:
@@ -782,7 +826,11 @@ def _compile(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     catalog_root = _catalog_root(root, args.catalog)
     catalog = load_catalog(
         catalog_root,
-        source_trust=_catalog_source_trust(catalog_root, args.trust_catalog or config.catalog_trusted),
+        source_trust=_catalog_source_trust(
+            catalog_root,
+            args.trust_catalog or config.catalog_trusted,
+            allow_source_checkout=args.catalog is None,
+        ),
     )
     activation = preflight_packs(
         catalog,
@@ -792,7 +840,11 @@ def _compile(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     )
     if not activation["ok"]:
         raise CatalogError(f"pack activation is blocked: {activation['blockers']}")
-    projection = compile_catalog(catalog, config.enabled_packs or ("core",))
+    policy, overrides = projection_overrides(catalog, config)
+    projection = compile_catalog(
+        catalog, config.enabled_packs or ("core",), codex_model_policy=policy,
+        codex_role_overrides=overrides,
+    )
     desired_manifest = build_generated_manifest(
         projection.files,
         tasktra_version=__version__,
@@ -905,7 +957,11 @@ def _packs(args: argparse.Namespace) -> dict[str, Any]:
     config = load_project_config(root)
     catalog = load_catalog(
         catalog_root,
-        source_trust=_catalog_source_trust(catalog_root, args.trust_catalog or config.catalog_trusted),
+        source_trust=_catalog_source_trust(
+            catalog_root,
+            args.trust_catalog or config.catalog_trusted,
+            allow_source_checkout=args.catalog is None,
+        ),
     )
     selected = tuple(args.pack) if getattr(args, "pack", None) else config.enabled_packs
     if args.pack_command == "recommend":
@@ -941,6 +997,21 @@ def _packs(args: argparse.Namespace) -> dict[str, Any]:
     raise AssertionError(f"Unhandled pack command: {args.pack_command}")
 
 
+def _delegation(args: argparse.Namespace) -> dict[str, Any]:
+    root = _root(args.root)
+    config = load_project_config(root)
+    catalog_root = _catalog_root(root, None)
+    catalog = load_catalog(
+        catalog_root,
+        source_trust=_catalog_source_trust(
+            catalog_root, config.catalog_trusted, allow_source_checkout=True
+        ),
+    )
+    request = _runtime_json(args.request)
+    handoff = _read_bounded_json_contract(args.handoff, MAX_HANDOFF_BYTES, load_handoff) if args.handoff else None
+    return {"ok": True, "action": "delegation-plan", **delegation_plan(catalog, config, request, handoff=handoff)}
+
+
 def _lifecycle_inputs(args: argparse.Namespace) -> tuple[Path, Any, Any, Path]:
     root = _root(args.root)
     config = load_project_config(root)
@@ -950,6 +1021,7 @@ def _lifecycle_inputs(args: argparse.Namespace) -> tuple[Path, Any, Any, Path]:
         source_trust=_catalog_source_trust(
             catalog_root,
             bool(getattr(args, "trust_catalog", False) or config.catalog_trusted),
+            allow_source_checkout=getattr(args, "catalog", None) is None,
         ),
     )
     return root, config, catalog, catalog_root
@@ -965,9 +1037,15 @@ def _adopt(args: argparse.Namespace) -> dict[str, Any]:
         config = None
     if config is not None:
         trusted = trusted or config.catalog_trusted
-    catalog = load_catalog(catalog_root, source_trust=_catalog_source_trust(catalog_root, trusted))
+    catalog = load_catalog(
+        catalog_root,
+        source_trust=_catalog_source_trust(
+            catalog_root, trusted, allow_source_checkout=args.catalog is None
+        ),
+    )
     selected = tuple(args.pack) or ((config.enabled_packs if config is not None else ()) or ("core",))
     validations = config.validation_commands if config is not None else ()
+    policy, overrides = projection_overrides(catalog, config) if config is not None else (None, None)
     return preview_adoption(
         root,
         catalog,
@@ -975,18 +1053,23 @@ def _adopt(args: argparse.Namespace) -> dict[str, Any]:
         available_capabilities=args.capability,
         trusted_executable_packs=args.trust_executable,
         validation_commands=validations,
+        codex_model_policy=policy,
+        codex_role_overrides=overrides,
     ).as_dict()
 
 
 def _upgrade_preview(args: argparse.Namespace) -> tuple[Path, Any, Any, Path, dict[str, Any]]:
     root, config, catalog, catalog_root = _lifecycle_inputs(args)
     selected = tuple(args.pack) if args.pack else None
+    policy, overrides = projection_overrides(catalog, config)
     plan = preview_upgrade(
         root,
         catalog,
         enabled_packs=selected,
         available_capabilities=args.capability,
         trusted_executable_packs=args.trust_executable,
+        codex_model_policy=policy,
+        codex_role_overrides=overrides,
     ).as_dict()
     return root, config, catalog, catalog_root, plan
 
@@ -1234,6 +1317,13 @@ def _catalog_root(root: Path, requested: str | None) -> Path:
     packaged_catalog = Path(__file__).resolve().with_name("catalog")
     if packaged_catalog.is_dir():
         return packaged_catalog
+    # An editable source install does not run ``build_py``, so its canonical
+    # catalog remains at the repository root instead of beside the package.
+    # Treat it as built-in because it shares the same source boundary as the
+    # imported Tasktra code.
+    source_catalog = Path(__file__).resolve().parents[2] / "catalog"
+    if (source_catalog / "catalog.toml").is_file():
+        return source_catalog
     installed_catalog = Path(sysconfig.get_path("data")) / "share" / "tasktra" / "catalog"
     if installed_catalog.is_dir():
         return installed_catalog
@@ -1242,14 +1332,22 @@ def _catalog_root(root: Path, requested: str | None) -> Path:
     )
 
 
-def _catalog_source_trust(catalog_root: Path, explicitly_trusted: bool) -> str:
+def _catalog_source_trust(
+    catalog_root: Path, explicitly_trusted: bool, *, allow_source_checkout: bool = False
+) -> str:
     if explicitly_trusted:
         return "builtin"
     packaged = Path(__file__).resolve().with_name("catalog")
+    source = Path(__file__).resolve().parents[2] / "catalog"
     installed = Path(sysconfig.get_path("data")) / "share" / "tasktra" / "catalog"
     try:
         if (
             (packaged.is_dir() and catalog_root.resolve() == packaged.resolve())
+            or (
+                allow_source_checkout
+                and (source / "catalog.toml").is_file()
+                and catalog_root.resolve() == source.resolve()
+            )
             or (installed.is_dir() and catalog_root.resolve() == installed.resolve())
         ):
             return "builtin"
@@ -1453,6 +1551,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "init":
             output, code = _init(args), 0
+        elif args.command == "bootstrap":
+            output, code = _bootstrap(args), 0
         elif args.command == "status":
             output, code = _status(args), 0
         elif args.command == "doctor":
@@ -1475,6 +1575,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             output, code = _release(args)
         elif args.command == "compile":
             output, code = _compile(args)
+        elif args.command == "delegation":
+            output, code = _delegation(args), 0
         elif args.command == "packs":
             output, code = _packs(args), 0
         elif args.command == "adopt":

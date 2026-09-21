@@ -3,6 +3,8 @@
 
 Use the assigned role for bounded work. Read a skill only when its trigger applies. Project authority, goal scope, and validation live in `.tasktra/project.toml` and project-owned policy sources.
 
+Apply the efficiency ladder: reuse verified evidence; use deterministic tools for mechanical work; delegate narrow retrieval to a scout; delegate concrete changes to a bounded implementer; use reviewers for independent semantic judgment; and escalate only a specific unresolved difficulty. Do not delegate a deterministic status, search, count, formatting, or comparison merely to avoid using a tool. Never skip required validation to save model usage.
+
 Enabled packs: core, architecture, delivery, knowledge, operations, product, quality, software-development, generic, python
 
 Roles: scout, implementer, tester, reviewer, writer, escalation, goal-steward, architecture-reviewer, domain-modeler, system-designer, issue-triager, pr-reviewer, pr-scanner, release-writer, work-selector, documentation-curator, lesson-curator, deployment-reviewer, incident-responder, product-analyst, research-analyst, ux-accessibility-reviewer, code-reviewer, performance-reviewer, security-reviewer, test-strategist, application-implementer, backend-api-specialist, data-migration-specialist, developer-experience-specialist, end-to-end-evaluator, frontend-specialist, integration-specialist, refactoring-specialist, reliability-observability-specialist, test-automation-specialist

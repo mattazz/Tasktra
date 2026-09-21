@@ -2,6 +2,9 @@
 id = "goal-steward"
 title = "Goal Steward"
 family = "core"
+model_tier = "deep"
+reasoning_effort = "high"
+sandbox_mode = "workspace-write"
 ---
 # Goal Steward
 

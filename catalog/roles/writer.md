@@ -2,6 +2,9 @@
 id = "writer"
 title = "Writer"
 family = "core"
+model_tier = "balanced"
+reasoning_effort = "medium"
+sandbox_mode = "workspace-write"
 ---
 # Writer
 

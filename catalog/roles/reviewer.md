@@ -2,6 +2,9 @@
 id = "reviewer"
 title = "Reviewer"
 family = "core"
+model_tier = "deep"
+reasoning_effort = "high"
+sandbox_mode = "read-only"
 ---
 # Reviewer
 

@@ -16,11 +16,11 @@ trust_builtin = true
 [validation]
 include_pack_defaults = false
 commands = [
-  ["python", "-m", "unittest", "tests.test_adoption", "tests.test_authority", "tests.test_cli", "tests.test_compiler", "tests.test_config", "tests.test_contracts", "tests.test_documentation", "tests.test_handoffs", "tests.test_manifest", "tests.test_routing", "tests.test_state", "tests.test_validation", "tests.test_workflow", "tests.test_workitems", "tests.test_workspace"],
+  ["python", "-m", "unittest", "tests.test_adoption", "tests.test_authority", "tests.test_cli", "tests.test_compiler", "tests.test_config", "tests.test_contracts", "tests.test_delegation", "tests.test_documentation", "tests.test_handoffs", "tests.test_manifest", "tests.test_routing", "tests.test_state", "tests.test_validation", "tests.test_workflow", "tests.test_workitems", "tests.test_workspace"],
   ["python", "-m", "unittest", "tests.test_stage3_acceptance", "tests.test_stage3_autonomy", "tests.test_stage3_checkpoints", "tests.test_stage3_cli", "tests.test_stage3_integrity", "tests.test_stage3_ledger", "tests.test_stage3_operations"],
   ["python", "-m", "unittest", "tests.test_stage4_adapters", "tests.test_stage4_authority", "tests.test_stage4_cli", "tests.test_stage4_effect_ledger", "tests.test_stage4_provider_execution", "tests.test_stage4_providers"],
   ["python", "-m", "unittest", "tests.test_stage5_ecosystem", "tests.test_stage5_specialist_contracts"],
   ["python", "-m", "unittest", "tests.test_stage6_benchmarks", "tests.test_stage6_cli", "tests.test_stage6_lesson_promotion", "tests.test_stage6_lessons", "tests.test_stage6_lifecycle", "tests.test_stage6_migrations", "tests.test_stage6_telemetry", "tests.test_stage6_upgrade_application"],
-  ["python", "-m", "unittest", "tests.test_stage7_examples", "tests.test_stage7_offline_lifecycle", "tests.test_stage7_packaging", "tests.test_stage7_release", "tests.test_stage7_scheduling", "tests.test_stage7_upgrade_bootstrap"],
+  ["python", "-m", "unittest", "tests.test_stage7_clean_bootstrap", "tests.test_stage7_examples", "tests.test_stage7_model_routing", "tests.test_stage7_offline_lifecycle", "tests.test_stage7_packaging", "tests.test_stage7_release", "tests.test_stage7_scheduling", "tests.test_stage7_upgrade_bootstrap"],
   ["python", "-m", "tasktra", "compile", "--root", ".", "--check", "--trust-catalog"],
 ]

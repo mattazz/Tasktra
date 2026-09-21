@@ -2,6 +2,9 @@
 id = "scout"
 title = "Scout"
 family = "core"
+model_tier = "fast"
+reasoning_effort = "medium"
+sandbox_mode = "read-only"
 ---
 # Scout
 

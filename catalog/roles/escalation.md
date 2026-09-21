@@ -2,6 +2,9 @@
 id = "escalation"
 title = "Escalation Analyst"
 family = "core"
+model_tier = "exceptional"
+reasoning_effort = "high"
+sandbox_mode = "read-only"
 ---
 # Escalation Analyst
 

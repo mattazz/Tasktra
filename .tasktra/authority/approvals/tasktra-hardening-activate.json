@@ -1,0 +1,20 @@
+{
+  "kind": "tasktra.transition-approval",
+  "version": 3,
+  "goal_id": "tasktra-hardening-publish",
+  "scope": {"paths": ["."], "exclusions": [".tasktra/runtime", ".tasktra/preview"]},
+  "envelope_sha256": "9be1c646b879696d98d4b949755c32404f0569e2d5551ee7b3f8cf6a2f201ca8",
+  "decision": "approved",
+  "approver": {"kind": "human", "id": "matt"},
+  "performer_id": "codex-coordinator",
+  "authority_clause": "The human authorized work on all identified issues and authorized the reviewed commit and push while declining paid GitHub services.",
+  "evidence": [],
+  "valid_until": "2026-09-21T06:00:00Z",
+  "revoked_at": null,
+  "approval_id": "tasktra-hardening-activate",
+  "work_unit_id": null,
+  "action": "goal-activate",
+  "effect": "local-reversible-write",
+  "resource_scope": null,
+  "provenance": {"kind": "local-human-ceremony", "attester_id": "matt", "subject_sha256": "afb90b0c0ff9fb0e0ee168ac081930f1d3b2acc37458430f2590c9a1968b2c6f", "attested_at": "2026-09-21T04:32:00Z"}
+}

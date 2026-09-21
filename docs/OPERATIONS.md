@@ -2,13 +2,30 @@
 
 ## Install and verify
 
-Install Tasktra into a virtual environment or isolated tool environment, then verify the packaged CLI and catalog before adopting it in a project:
+Install Tasktra into a virtual environment or isolated tool environment, then verify the public CLI and catalog before adopting it in a project:
 
 ```powershell
 python -m pip install --no-deps tasktra-1.0.0-py3-none-any.whl
 python -m tasktra --help
 python -m tasktra doctor --root .
 ```
+
+For a fresh checkout of the Tasktra repository itself, its committed
+`.tasktra/project.toml` is intentionally preserved while the local runtime is
+ignored. Use this one bootstrap path after the editable install; do not use
+`init --apply` there:
+
+```powershell
+python -m pip install --no-deps -e .
+python -m tasktra bootstrap --root .
+python -m tasktra doctor --root .
+python -m tasktra compile --root . --check --trust-catalog
+```
+
+`bootstrap` creates a project profile only when one is absent. When a profile
+already exists, it validates and preserves it byte-for-byte, then creates or
+migrates only the configured local runtime. `status` and `doctor` are
+read-only: they report a missing runtime rather than creating one.
 
 Package installation and removal affect only distribution files. They do not remove project-owned configuration, generated projections, knowledge, extensions, or runtime state. See [the release policy](RELEASE_POLICY.md).
 
@@ -25,6 +42,48 @@ python -m tasktra validate --root .
 ```
 
 Resolve every ownership conflict or uncertainty before a write. Existing instruction systems remain project-owned until deliberately composed or preserved.
+
+## Model routing and delegation plans
+
+Canonical Tasktra roles are portable: each declares a model tier, reasoning
+effort, and sandbox mode. The catalog's default Codex mapping is `fast` to
+`gpt-5.6-luna`, `balanced` to `gpt-5.6-terra`, `deep` to `gpt-5.6-sol`, and
+`exceptional` to `gpt-6-astra`. A project may replace particular tier models
+and, when necessary, the model or reasoning effort of a particular role:
+
+```toml
+[agents.codex.model_tiers]
+fast = "project-fast-model"
+
+[agents.codex.roles.scout]
+reasoning_effort = "low"
+
+[agents.codex.roles.reviewer]
+model = "project-review-model"
+```
+
+Resolution is deterministic: a role-specific setting wins, then the project's
+tier mapping, then the catalog mapping. A per-role `model = "inherit"` or
+`reasoning_effort = "inherit"` omits that native Codex field so the host can
+use its own default. Sandbox mode is canonical role policy and cannot be
+widened through project configuration. After changing model configuration,
+recompile the managed projections and review the resulting drift before
+accepting it.
+
+Use a delegation plan when Codex needs a bounded brief and resolved role
+profile without making the Python CLI pretend that it can launch a Codex
+subagent:
+
+```powershell
+python -m tasktra delegation --root . plan routing-request.json
+python -m tasktra delegation --root . plan routing-request.json --handoff .tasktra/handoffs/verified.json
+```
+
+The result is read-only (`mutation: none`) and intentionally reports
+`availability: host-unverified` and `dispatch: codex-host-required`. It is a
+recommendation and handoff-ready brief, not confirmation that a model or agent
+is available. Codex (or another capable host) performs any actual dispatch
+after applying its own availability checks and the goal's authority limits.
 
 ## Durable goals and manual fallback
 
@@ -77,7 +136,7 @@ The committed CI definition covers Windows, macOS, and Linux with Python 3.11–
 
 ## Optional providers and offline work
 
-GitHub, Jira, research, and scheduling integrations are optional. `tasktra capabilities` reports each one as available, degraded, or unavailable without granting authority or blocking unrelated local work. Do not store credentials in Tasktra configuration, prompts, telemetry, or evidence. Reconcile an indeterminate provider effect before retrying it.
+GitHub, Jira, research, and scheduling integrations are optional. `tasktra capabilities` reports each one as available, degraded, or unavailable without granting authority or blocking unrelated local work. Do not store credentials in Tasktra configuration, prompts, telemetry, or evidence. Reconcile an indeterminate provider effect before retrying it. An unavailable online capability can leave only its own operation pending; it never prevents eligible local planning, coding, validation, evidence capture, or recovery.
 
 ## Upgrades, backup, and recovery
 

@@ -17,6 +17,7 @@ from tasktra.compiler import (
     resolve_packs,
     write_projection,
 )
+from tasktra.model_policy import CodexModelPolicy
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,7 +36,66 @@ class CompilerTests(unittest.TestCase):
         self.assertIn("\ndescription: ", skill)
         codex_agent = projection.files[PurePosixPath(".codex/agents/scout.toml")]
         self.assertIn('name = "scout"', codex_agent)
+        entrypoint = projection.files[PurePosixPath("AGENTS.md")]
+        self.assertIn("delegate narrow retrieval to a scout", entrypoint)
+        self.assertIn("Do not delegate a deterministic status", entrypoint)
         self.assertGreaterEqual(len(catalog.roles), 30)
+
+    def test_every_role_has_portable_codex_metadata_and_a_matching_agent(self):
+        catalog = load_catalog(ROOT / "catalog")
+        projection = compile_catalog(catalog, enabled_packs=tuple(catalog.packs))
+        self.assertEqual(
+            {
+                "scout": ("gpt-5.6-luna", "medium", "read-only"),
+                "implementer": ("gpt-5.6-terra", "high", "workspace-write"),
+                "reviewer": ("gpt-5.6-sol", "high", "read-only"),
+                "escalation": ("gpt-6-astra", "high", "read-only"),
+            },
+            {
+                identifier: (
+                    catalog.codex_model_policy.model_for(role.model_tier),
+                    role.reasoning_effort,
+                    role.sandbox_mode,
+                )
+                for identifier, role in catalog.roles.items()
+                if identifier in {"scout", "implementer", "reviewer", "escalation"}
+            },
+        )
+        for identifier, role in catalog.roles.items():
+            with self.subTest(identifier=identifier):
+                self.assertIsNotNone(role.model_tier)
+                self.assertIsNotNone(role.reasoning_effort)
+                self.assertIsNotNone(role.sandbox_mode)
+                agent = projection.files[PurePosixPath(f".codex/agents/{identifier}.toml")]
+                self.assertIn(f'name = "{identifier}"', agent)
+                self.assertIn('model = "', agent)
+                self.assertIn('model_reasoning_effort = "', agent)
+                self.assertIn('sandbox_mode = "', agent)
+
+    def test_codex_model_policy_can_be_overridden_without_changing_role_metadata(self):
+        catalog = load_catalog(ROOT / "catalog")
+        override = CodexModelPolicy({
+            "fast": "project-fast", "balanced": "project-balanced",
+            "deep": "project-deep", "exceptional": "project-exceptional",
+        })
+        projection = compile_catalog(catalog, codex_model_policy=override)
+        scout = projection.files[PurePosixPath(".codex/agents/scout.toml")]
+        self.assertIn('model = "project-fast"', scout)
+        self.assertIn('model_reasoning_effort = "medium"', scout)
+
+    def test_invalid_role_model_metadata_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = Path(directory) / "catalog"
+            shutil.copytree(ROOT / "catalog", catalog)
+            source = catalog / "roles" / "scout.md"
+            source.write_text(
+                source.read_text(encoding="utf-8").replace(
+                    'model_tier = "fast"', 'model_tier = "unsupported"'
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(CatalogError, "model_tier"):
+                load_catalog(catalog)
 
     def test_stage_two_operational_skills_compile_with_executable_procedures(self):
         projection = compile_catalog(load_catalog(ROOT / "catalog"))
@@ -69,7 +129,13 @@ class CompilerTests(unittest.TestCase):
         packs = dict(catalog.packs)
         packs["one"] = Pack("one", "1.0.0", ("core",), ("two",), (), ())
         packs["two"] = Pack("two", "1.0.0", ("core",), (), (), ())
-        conflicting = Catalog(catalog.version, catalog.roles, catalog.skills, packs)
+        conflicting = Catalog(
+            catalog.version,
+            catalog.roles,
+            catalog.skills,
+            packs,
+            catalog.codex_model_policy,
+        )
         with self.assertRaisesRegex(CatalogError, "incompatible packs"):
             resolve_packs(conflicting, ("one", "two"))
 

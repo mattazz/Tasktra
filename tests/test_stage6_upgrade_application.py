@@ -14,6 +14,7 @@ import unittest
 from tasktra import __version__
 from tasktra.compiler import compile_catalog, load_catalog, write_projection
 from tasktra.config import ProjectConfig
+from tasktra.delegation import projection_overrides
 from tasktra.lifecycle import preview_upgrade
 from tasktra.manifest import (
     build_generated_manifest,
@@ -161,6 +162,35 @@ class UpgradeApplicationTests(unittest.TestCase):
             ).files)
             self.assertEqual(read_lockfile(project).pack_versions, (("core", self.catalog.packs["core"].version),))
             self.assertEqual(read_lockfile(project).generated_manifest_sha256, read_manifest(project).digest)
+
+    def test_apply_derives_project_model_overrides_from_config(self):
+        with TemporaryDirectory() as directory:
+            project, base_config, _ = self._project(Path(directory))
+            config = ProjectConfig(
+                name=base_config.name,
+                enabled_packs=base_config.enabled_packs,
+                validation_commands=base_config.validation_commands,
+                codex_tier_models={"fast": "project-fast"},
+                codex_role_overrides={
+                    "scout": {"model": "inherit", "reasoning_effort": "inherit"}
+                },
+            )
+            policy, overrides = projection_overrides(self.catalog, config)
+            plan = preview_upgrade(
+                project,
+                self.catalog,
+                current_lock=read_lockfile(project),
+                validation_commands=config.validation_commands,
+                codex_model_policy=policy,
+                codex_role_overrides=overrides,
+            ).as_dict()
+            self.assertTrue(plan["ok"], plan["conflicts"])
+
+            self._apply(project, config, plan)
+
+            scout = (project / ".codex/agents/scout.toml").read_text(encoding="utf-8")
+            self.assertNotIn("model =", scout)
+            self.assertNotIn("model_reasoning_effort", scout)
 
     def test_validation_failure_restores_generated_and_runtime_state(self):
         with TemporaryDirectory() as directory:
