@@ -257,7 +257,7 @@ class CliTests(unittest.TestCase):
                 pack.read_text(encoding="utf-8").replace(', "tasktra-stop"', ""),
                 encoding="utf-8",
             )
-            stale = root / ".codex" / "skills" / "tasktra-stop" / "SKILL.md"
+            stale = root / ".agents" / "skills" / "tasktra-stop" / "SKILL.md"
             code, payload = run_cli(*arguments)
             self.assertEqual(code, 2)
             self.assertIn("--prune-stale", payload["error"])
@@ -279,7 +279,7 @@ class CliTests(unittest.TestCase):
                 pack.read_text(encoding="utf-8").replace(', "tasktra-stop"', ""),
                 encoding="utf-8",
             )
-            stale = root / ".codex" / "skills" / "tasktra-stop" / "SKILL.md"
+            stale = root / ".agents" / "skills" / "tasktra-stop" / "SKILL.md"
             stale.write_text("locally modified\n", encoding="utf-8")
             code, payload = run_cli(*arguments, "--prune-stale")
             self.assertEqual(code, 2)

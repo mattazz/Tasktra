@@ -32,4 +32,4 @@ Stage 7 turns the reviewed local orchestration foundation into a portable, opera
 
 Record exact CI runs and platform versions, scheduler fixtures and fallback behavior, packaged artifacts and hashes, example commands and outcomes, offline and degraded-provider proofs, migration/recovery results, self-hosting ledger references, measured efficiency observations, independent findings, and the signed 1.0 release decision.
 
-Local evidence is recorded in `.tasktra/evidence/stage-7-local-readiness.json`, `.tasktra/evidence/stage-7-efficiency.json`, and `.tasktra/workflows/stage-7-operations-release.json`. The three unchecked criteria are deliberate release blockers: authoritative cross-platform execution, blocker-free final review, and the signed release decision.
+Historical local evidence is archived in `docs/development-history/tasktra-1.0/evidence/` and `docs/development-history/tasktra-1.0/workflows/`. The three unchecked criteria are deliberate release blockers: authoritative cross-platform execution, blocker-free final review, and the signed release decision.
