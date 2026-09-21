@@ -428,7 +428,8 @@ def _verify_decision_signature(project: Path, decision: dict[str, object]) -> bo
     payload.pop("signature")
     payload_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     payload_digest = sha256(payload_bytes).hexdigest()
-    key_file = (project / str(key_path)).resolve()
+    project_root = project.resolve()
+    key_file = (project_root / str(key_path)).resolve()
     key_bytes = _committed_bytes(project, decision.get("source_revision"), str(key_path))
     try:
         if key_bytes is None:
@@ -438,7 +439,7 @@ def _verify_decision_signature(project: Path, decision: dict[str, object]) -> bo
     except (OSError, json.JSONDecodeError, binascii.Error, ValueError):
         return False
     if (
-        project not in key_file.parents
+        project_root not in key_file.parents
         or sha256(key_bytes).hexdigest() != signature.get("public_key_sha256")
         or payload_digest != signature.get("payload_sha256")
         or not isinstance(key, dict)

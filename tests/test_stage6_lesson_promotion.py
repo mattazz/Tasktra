@@ -71,7 +71,7 @@ class LessonPromotionWorkflowTests(unittest.TestCase):
             checks = tuple(tuple(item) for item in plan["regression_checks"][0:1] for item in [item["argv"]])
             results = run_validations(project, checks)
             self.assertTrue(all(item.status == "passed" for item in results))
-            generated = project / ".codex" / "skills" / "tasktra-init" / "SKILL.md"
+            generated = project / ".agents" / "skills" / "tasktra-init" / "SKILL.md"
             self.assertIn("Promotion proof: independently reviewed.", generated.read_text(encoding="utf-8"))
 
 

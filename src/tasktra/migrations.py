@@ -463,8 +463,8 @@ def _safe_target(project: Path, relative: str) -> Path:
         if _is_linklike(cursor):
             raise MigrationError(f"migration path crosses a link or reparse point: {relative}")
     try:
-        target.resolve(strict=False).relative_to(project)
-    except ValueError as error:
+        target.resolve(strict=False).relative_to(project.resolve(strict=False))
+    except (OSError, ValueError) as error:
         raise MigrationError(f"migration path escapes the project: {relative}") from error
     return target
 

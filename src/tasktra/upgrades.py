@@ -370,7 +370,7 @@ def _write_canonical_projection(
 def _safe_project_file(project: Path, relative: str) -> Path:
     path = project.joinpath(*PurePosixPath(relative).parts)
     try:
-        path.resolve(strict=False).relative_to(project)
+        path.resolve(strict=False).relative_to(project.resolve(strict=False))
     except (OSError, ValueError) as error:
         raise UpgradeError(f"managed path escapes project: {relative}") from error
     if path.is_symlink():

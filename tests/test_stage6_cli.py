@@ -238,7 +238,7 @@ class Stage6CliTests(unittest.TestCase):
             )
             destination = root / ".tasktra" / "exports" / "telemetry.json"
             self.assertEqual((exported_code, exported["action"], exported["sanitized"]), (0, "telemetry-export", True))
-            self.assertEqual(Path(exported["path"]), destination)
+            self.assertEqual(Path(exported["path"]), destination.resolve())
             self.assertEqual(json.loads(destination.read_text(encoding="utf-8"))["records"][0]["event_id"], "event-006")
 
     def test_benchmark_regressions_are_nonzero_and_do_not_invent_savings(self) -> None:

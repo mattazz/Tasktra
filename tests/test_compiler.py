@@ -183,7 +183,7 @@ class CompilerTests(unittest.TestCase):
                 (project / ".codex").symlink_to(outside, target_is_directory=True)
             except OSError as error:
                 self.skipTest(f"symlink creation is unavailable: {error}")
-            with self.assertRaisesRegex(ProjectionError, "symlink"):
+            with self.assertRaisesRegex(ProjectionError, "link or reparse point"):
                 write_projection(project, projection)
             self.assertFalse((outside / "agents/safe.toml").exists())
 

@@ -19,7 +19,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.validation_commands, ())
             self.assertTrue(config.include_pack_validation_defaults)
             self.assertEqual(config.concurrency_limit, 3)
-            self.assertEqual(config.database_path(root), root / ".tasktra/runtime/tasktra.sqlite")
+            self.assertEqual(config.database_path(root), (root / ".tasktra/runtime/tasktra.sqlite").resolve())
 
     def test_rejects_invalid_project_name(self):
         with TemporaryDirectory() as directory:
