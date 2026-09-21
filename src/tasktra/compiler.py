@@ -281,7 +281,6 @@ def compile_catalog(
         skill = catalog.skills[skill_id]
         content = _skill_projection(skill)
         files[PurePosixPath(".agents", "skills", skill_id, "SKILL.md")] = content
-        files[PurePosixPath(".codex", "skills", skill_id, "SKILL.md")] = content
         files[PurePosixPath(".claude", "skills", skill_id, "SKILL.md")] = content
     return Projection(files, packs)
 

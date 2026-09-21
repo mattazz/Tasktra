@@ -30,10 +30,11 @@ class CompilerTests(unittest.TestCase):
         self.assertEqual(projection.packs, ("core",))
         self.assertIn(PurePosixPath(".codex/agents/scout.toml"), projection.files)
         self.assertIn(PurePosixPath(".claude/agents/scout.md"), projection.files)
-        skill = projection.files[PurePosixPath(".codex/skills/tasktra-init/SKILL.md")]
+        skill = projection.files[PurePosixPath(".agents/skills/tasktra-init/SKILL.md")]
         self.assertTrue(skill.startswith("---\n"))
         self.assertIn("\nname: tasktra-init\n", skill)
         self.assertIn("\ndescription: ", skill)
+        self.assertNotIn(PurePosixPath(".codex/skills/tasktra-init/SKILL.md"), projection.files)
         codex_agent = projection.files[PurePosixPath(".codex/agents/scout.toml")]
         self.assertIn('name = "scout"', codex_agent)
         entrypoint = projection.files[PurePosixPath("AGENTS.md")]
@@ -105,7 +106,7 @@ class CompilerTests(unittest.TestCase):
             "tasktra-remote": "tasktra effect --root <root> provider-prepare",
             "tasktra-validate": "tasktra validate",
         }
-        for runtime in (".agents", ".codex", ".claude"):
+        for runtime in (".agents", ".claude"):
             for skill_id, command in expected_commands.items():
                 content = projection.files[
                     PurePosixPath(f"{runtime}/skills/{skill_id}/SKILL.md")
@@ -139,13 +140,13 @@ class CompilerTests(unittest.TestCase):
         with self.assertRaisesRegex(CatalogError, "incompatible packs"):
             resolve_packs(conflicting, ("one", "two"))
 
-    def test_representative_codex_and_claude_outputs_match_golden_files(self):
+    def test_representative_agent_codex_and_claude_outputs_match_golden_files(self):
         projection = compile_catalog(load_catalog(ROOT / "catalog"))
         golden = ROOT / "tests" / "golden"
         expected = {
             PurePosixPath(".codex/agents/scout.toml"): "codex-scout.toml",
             PurePosixPath(".claude/agents/scout.md"): "claude-scout.md",
-            PurePosixPath(".codex/skills/tasktra-init/SKILL.md"): "tasktra-init-skill.md",
+            PurePosixPath(".agents/skills/tasktra-init/SKILL.md"): "tasktra-init-skill.md",
             PurePosixPath(".claude/skills/tasktra-init/SKILL.md"): "tasktra-init-skill.md",
         }
         for path, fixture in expected.items():
