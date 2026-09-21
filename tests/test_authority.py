@@ -1,4 +1,5 @@
 import unittest
+from hashlib import sha256
 
 from tasktra.authority import (
     AUTHORITY_ENVELOPE_KIND,
@@ -115,5 +116,25 @@ class TransitionApprovalTests(unittest.TestCase):
         }
         self.assertEqual(validate_transition_approval(value)["version"], 3)
         value["evidence"][0]["sha256"] = "b" * 64
+        with self.assertRaisesRegex(AuthorityError, "does not bind"):
+            validate_transition_approval(value)
+
+    def test_v4_codex_message_binds_the_exact_approval_subject(self):
+        value = approval()
+        value["version"] = 4
+        value["approver"] = {"kind": "human", "id": "human-owner"}
+        value["resource_scope"] = None
+        message = "I approve this exact bounded transition in Codex."
+        value["evidence"] = [{
+            "kind": "acceptance-evidence", "id": "criteria-1", "sha256": "a" * 64,
+        }]
+        value["provenance"] = {
+            "kind": "codex-user-message", "attester_id": "human-owner",
+            "subject_sha256": transition_approval_subject_sha256(value),
+            "attested_at": "2030-01-01T00:00:00Z",
+            "message_sha256": sha256(message.encode("utf-8")).hexdigest(),
+        }
+        self.assertEqual(validate_transition_approval(value)["version"], 4)
+        value["scope"]["paths"] = ["docs"]
         with self.assertRaisesRegex(AuthorityError, "does not bind"):
             validate_transition_approval(value)

@@ -2,6 +2,7 @@
 
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 import io
 import json
 import os
@@ -10,7 +11,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from tasktra.authority import authority_envelope_sha256
+from tasktra.authority import authority_envelope_sha256, transition_approval_subject_sha256
 from tasktra.autonomy import AutonomyStore
 from tasktra.cli import _capabilities, build_parser, main
 from tasktra.config import load_project_config
@@ -126,12 +127,59 @@ class ProviderEffectCliTests(unittest.TestCase):
             "envelope_sha256": self.digest, "decision": "approved",
             "approver": {"kind": "human", "id": "reviewer"}, "performer_id": "worker",
             "authority_clause": "Human approved the exact provider scope", "evidence": [],
-            "valid_until": (self.now + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"), "revoked_at": None,
+            "valid_until": (self.now + timedelta(minutes=5)).replace(microsecond=0).isoformat().replace("+00:00", "Z"), "revoked_at": None,
         }
         path = self._json("approval.json", approval)
         code, recorded = run_cli("approval", "--root", str(self.root), "record", path)
         self.assertEqual(code, 2)
-        self.assertIn("v3 local-human-ceremony", recorded["error"])
+        self.assertIn("v3 local-terminal or v4 Codex-message", recorded["error"])
+
+    def test_cli_records_v4_codex_user_message_without_a_terminal_tty(self):
+        message = "I approve the exact remote comment for this goal in Codex."
+        approval = {
+            "kind": "tasktra.transition-approval", "version": 4,
+            "approval_id": "codex-message-approval", "goal_id": "goal-one", "work_unit_id": "unit-one",
+            "action": "remote-comment", "effect": "external-communication",
+            "scope": {"paths": ["src"], "exclusions": []}, "resource_scope": SCOPE,
+            "envelope_sha256": self.digest, "decision": "approved",
+            "approver": {"kind": "human", "id": "human"}, "performer_id": "worker",
+            "authority_clause": "Human approved the exact provider scope in Codex.", "evidence": [],
+            "provenance": {"kind": "codex-user-message", "attester_id": "human",
+                           "subject_sha256": "0" * 64, "attested_at": "2030-01-01T00:00:00Z",
+                           "message_sha256": "0" * 64},
+            "valid_until": (self.now + timedelta(minutes=5)).replace(microsecond=0).isoformat().replace("+00:00", "Z"), "revoked_at": None,
+        }
+        approval["provenance"]["subject_sha256"] = transition_approval_subject_sha256(approval)
+        path = self._json("codex-message-approval.json", approval)
+        code, recorded = run_cli(
+            "approval", "--root", str(self.root), "record", path, "--human-actor", "human",
+            "--codex-user-message", message,
+        )
+        self.assertEqual(code, 0)
+        provenance = recorded["approval"]["provenance"]
+        self.assertEqual(provenance["kind"], "codex-user-message")
+        self.assertEqual(provenance["message_sha256"], sha256(message.encode("utf-8")).hexdigest())
+        self.assertNotEqual(provenance["subject_sha256"], "0" * 64)
+
+    def test_cli_rejects_v4_codex_approval_without_explicit_message(self):
+        approval = {
+            "kind": "tasktra.transition-approval", "version": 4,
+            "approval_id": "missing-codex-message", "goal_id": "goal-one", "work_unit_id": "unit-one",
+            "action": "remote-comment", "effect": "external-communication",
+            "scope": {"paths": ["src"], "exclusions": []}, "resource_scope": SCOPE,
+            "envelope_sha256": self.digest, "decision": "approved",
+            "approver": {"kind": "human", "id": "human"}, "performer_id": "worker",
+            "authority_clause": "Human approved the exact provider scope in Codex.", "evidence": [],
+            "provenance": {"kind": "codex-user-message", "attester_id": "human",
+                           "subject_sha256": "0" * 64, "attested_at": "2030-01-01T00:00:00Z",
+                           "message_sha256": "0" * 64},
+            "valid_until": (self.now + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"), "revoked_at": None,
+        }
+        approval["provenance"]["subject_sha256"] = transition_approval_subject_sha256(approval)
+        path = self._json("missing-codex-message.json", approval)
+        code, recorded = run_cli("approval", "--root", str(self.root), "record", path, "--human-actor", "human")
+        self.assertEqual(code, 2)
+        self.assertIn("explicit --codex-user-message", recorded["error"])
 
     def test_capabilities_uses_injected_provider_health_without_a_probe(self):
         registry = ProviderRegistry()

@@ -1325,7 +1325,7 @@ class StateStore:
                 if unit is None or unit["goal_id"] != goal_id:
                     raise StateError(f"cannot attest approval with an invalid work unit: {row['id']}")
             protocol_version = int(row["protocol_version"])
-            if protocol_version not in {1, 2, 3}:
+            if protocol_version not in {1, 2, 3, 4}:
                 raise StateError(f"cannot attest unsupported transition approval version: {row['id']}")
             record = {
                 "kind": "tasktra.transition-approval", "version": protocol_version,
@@ -1338,11 +1338,11 @@ class StateStore:
                 "evidence": _decode(row["evidence"], []), "valid_until": row["valid_until"],
                 "revoked_at": row["revoked_at"],
             }
-            if protocol_version in {2, 3}:
+            if protocol_version in {2, 3, 4}:
                 record["resource_scope"] = _decode(row["resource_scope"], None)
             elif row["resource_scope"] is not None:
                 raise StateError(f"cannot attest v1 approval with a resource scope: {row['id']}")
-            if protocol_version == 3:
+            if protocol_version >= 3:
                 record["provenance"] = _decode(row["provenance"], {})
             try:
                 validate_transition_approval(record)
@@ -1355,9 +1355,9 @@ class StateStore:
                     raise StateError(f"cannot attest current approval for a disallowed effect: {row['id']}")
                 if not StateStore._scope_within_contract(record["scope"], envelope["scope"]):
                     raise StateError(f"cannot attest current approval outside its envelope scope: {row['id']}")
-                if protocol_version not in {int(envelope["version"]), 3}:
+                if protocol_version not in {int(envelope["version"]), 3, 4}:
                     raise StateError(f"cannot attest current approval with a mismatched protocol version: {row['id']}")
-                if protocol_version in {2, 3} and row["effect"] not in {"read-only", "local-reversible-write"}:
+                if protocol_version in {2, 3, 4} and row["effect"] not in {"read-only", "local-reversible-write"}:
                     approval_resource = record.get("resource_scope")
                     if not isinstance(approval_resource, dict) or not any(
                         resource_scope_within(approval_resource, allowed)
@@ -1581,7 +1581,7 @@ class StateStore:
                         raise ValueError("missing approval")
                     approval_resource = _decode(approval["resource_scope"], {})
                     if (
-                        int(approval["protocol_version"]) != 3
+                        int(approval["protocol_version"]) < 3
                         or approval["goal_id"] != intent["goal_id"]
                         or approval["work_unit_id"] not in {None, intent["work_unit_id"]}
                         or approval["action"] != intent["operation"]
@@ -1971,18 +1971,22 @@ class StateStore:
                 except ValueError as error:
                     raise StateError(f"stored authority envelope is invalid: {error}") from error
             canonical_scope = envelope["scope"] if scope is None else scope
-            approval_version = 3 if provenance is not None else int(envelope["version"])
+            approval_version = (
+                4 if isinstance(provenance, dict) and provenance.get("kind") == "codex-user-message"
+                else 3 if provenance is not None
+                else int(envelope["version"])
+            )
             consequential = (effect or "read-only") in {
                 "repository-history", "remote-mutation", "external-communication",
                 "deployment", "merge", "destructive",
             }
-            if consequential and approval_version != 3:
+            if consequential and approval_version < 3:
                 raise StateError(
-                    "consequential approval requires v3 local-human-ceremony provenance; re-record it through approval record"
+                    "consequential approval requires v3+ human-bound provenance; re-record it through approval record"
                 )
             if (
                 decision == "approved"
-                and approval_version in {2, 3}
+                and approval_version in {2, 3, 4}
                 and consequential
             ):
                 try:
@@ -2002,7 +2006,7 @@ class StateStore:
                 "valid_until": expiry, "revoked_at": None}
             if approval_version == 2:
                 approval_record["resource_scope"] = resource_scope
-            elif approval_version == 3:
+            elif approval_version >= 3:
                 approval_record["resource_scope"] = resource_scope
                 approval_record["provenance"] = provenance
             try:

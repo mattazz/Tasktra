@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -389,7 +390,7 @@ def build_parser() -> argparse.ArgumentParser:
     contract.add_argument("--root", default="."); contract.add_argument("goal_id"); contract.add_argument("path"); contract.add_argument("--actor", required=True)
     approval = subcommands.add_parser("approval", help="Record or revoke protected transition approval")
     approval.add_argument("--root", default="."); approval_commands = approval.add_subparsers(dest="approval_command", required=True)
-    approval_record = approval_commands.add_parser("record"); approval_record.add_argument("path"); approval_record.add_argument("--human-actor")
+    approval_record = approval_commands.add_parser("record"); approval_record.add_argument("path"); approval_record.add_argument("--human-actor"); approval_record.add_argument("--codex-user-message", help="exact explicit human approval message received through Codex")
     approval_revoke = approval_commands.add_parser("revoke"); approval_revoke.add_argument("approval_id"); approval_revoke.add_argument("--actor", required=True)
     approval_repair = approval_commands.add_parser("repair-scope", help="Human-repair an unsealed migrated approval scope")
     approval_repair.add_argument("approval_id"); approval_repair.add_argument("path"); approval_repair.add_argument("--human-actor", required=True)
@@ -1508,7 +1509,7 @@ def _approval(args: argparse.Namespace) -> dict[str, Any]:
         and value["version"] < 3
     ):
         raise StateError(
-            "approved human approval import requires v3 local-human-ceremony provenance; re-create it locally"
+            "approved human approval import requires v3 local-terminal or v4 Codex-message provenance"
         )
     if value["version"] == 3:
         if args.human_actor != value["approver"]["id"]:
@@ -1530,6 +1531,22 @@ def _approval(args: argparse.Namespace) -> dict[str, Any]:
             "attester_id": args.human_actor,
             "subject_sha256": subject_sha256,
             "attested_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        }
+    elif value["version"] == 4:
+        if args.human_actor != value["approver"]["id"]:
+            raise StateError("v4 Codex approval import requires --human-actor matching approver.id")
+        message = args.codex_user_message
+        if not isinstance(message, str) or not message.strip():
+            raise StateError("v4 Codex approval import requires an explicit --codex-user-message")
+        if len(message) > 2_000 or "approve" not in message.casefold():
+            raise StateError("Codex approval message must be a short explicit approval")
+        subject_sha256 = transition_approval_subject_sha256(value)
+        provenance = {
+            "kind": "codex-user-message",
+            "attester_id": args.human_actor,
+            "subject_sha256": subject_sha256,
+            "attested_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "message_sha256": sha256(message.strip().encode("utf-8")).hexdigest(),
         }
     approval = store.record_transition_approval(goal_id=value["goal_id"], work_unit_id=value["work_unit_id"], action=value["action"], effect=value["effect"], scope=value["scope"], envelope_sha256=value["envelope_sha256"], decision=value["decision"], approver_id=value["approver"]["id"], approver_kind=value["approver"]["kind"], performer_id=value["performer_id"], authority_clause=value["authority_clause"], evidence=value["evidence"], valid_until=value["valid_until"], approval_id=value["approval_id"], resource_scope=value.get("resource_scope"), provenance=provenance)
     return {"ok": True, "approval": approval}

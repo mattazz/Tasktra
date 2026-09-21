@@ -31,6 +31,7 @@ TRANSITION_APPROVAL_KIND = "tasktra.transition-approval"
 TRANSITION_APPROVAL_VERSION = 1
 TRANSITION_APPROVAL_V2_VERSION = 2
 TRANSITION_APPROVAL_V3_VERSION = 3
+TRANSITION_APPROVAL_V4_VERSION = 4
 
 EFFECTS = frozenset(
     {
@@ -46,7 +47,7 @@ EFFECTS = frozenset(
 )
 APPROVER_KINDS = frozenset({"human", "steward"})
 DECISIONS = frozenset({"approved", "rejected", "needs_human_review"})
-APPROVAL_PROVENANCE_KINDS = frozenset({"local-human-ceremony"})
+APPROVAL_PROVENANCE_KINDS = frozenset({"local-human-ceremony", "codex-user-message"})
 APPROVAL_EVIDENCE_KINDS = frozenset(
     {"acceptance-evidence", "workflow-evidence", "checkpoint-evidence"}
 )
@@ -411,7 +412,7 @@ def _sha256_digest(value: Any, *, label: str) -> str:
 
 
 def transition_approval_subject_sha256(value: Mapping[str, Any]) -> str:
-    """Return the digest bound by a local human ceremony.
+    """Return the digest bound by a human approval provenance record.
 
     Provenance is omitted to avoid a circular digest. This binds the ceremony
     to the exact approval subject but intentionally does not authenticate the
@@ -448,6 +449,7 @@ def _validate_transition_semantics(value: dict[str, Any]) -> None:
     if value["version"] in {
         TRANSITION_APPROVAL_V2_VERSION,
         TRANSITION_APPROVAL_V3_VERSION,
+        TRANSITION_APPROVAL_V4_VERSION,
     }:
         resource_scope = value["resource_scope"]
         if value["effect"] in CONSEQUENTIAL_EFFECTS:
@@ -460,7 +462,7 @@ def _validate_transition_semantics(value: dict[str, Any]) -> None:
                     "read-only and local-reversible-write effects require null resource_scope"
                 )
     _sha256_digest(value["envelope_sha256"], label="envelope_sha256")
-    if value["version"] == TRANSITION_APPROVAL_V3_VERSION:
+    if value["version"] in {TRANSITION_APPROVAL_V3_VERSION, TRANSITION_APPROVAL_V4_VERSION}:
         evidence_keys: set[tuple[str, str]] = set()
         for evidence in value["evidence"]:
             if not isinstance(evidence, Mapping) or set(evidence) != {
@@ -478,19 +480,29 @@ def _validate_transition_semantics(value: dict[str, Any]) -> None:
                 raise AuthorityError("approval evidence bindings must be unique")
             evidence_keys.add(key)
         provenance = value["provenance"]
-        if not isinstance(provenance, Mapping) or set(provenance) != {
+        required_provenance = {
             "kind", "attester_id", "subject_sha256", "attested_at"
-        }:
+        }
+        if value["version"] == TRANSITION_APPROVAL_V4_VERSION:
+            required_provenance.add("message_sha256")
+        if not isinstance(provenance, Mapping) or set(provenance) != required_provenance:
             raise AuthorityError(
-                "approval provenance must contain kind, attester_id, subject_sha256, and attested_at"
+                "approval provenance has an invalid shape for its protocol version"
             )
-        if provenance["kind"] not in APPROVAL_PROVENANCE_KINDS:
-            raise AuthorityError("approval provenance kind is not supported")
+        expected_kind = (
+            "local-human-ceremony"
+            if value["version"] == TRANSITION_APPROVAL_V3_VERSION
+            else "codex-user-message"
+        )
+        if provenance["kind"] != expected_kind:
+            raise AuthorityError("approval provenance kind does not match its protocol version")
         if approver["kind"] != "human":
-            raise AuthorityError("local human ceremony provenance requires a human approver")
+            raise AuthorityError("human approval provenance requires a human approver")
         if _identifier(provenance["attester_id"], label="provenance.attester_id") != approver_id:
-            raise AuthorityError("local human ceremony attester must match approver.id")
+            raise AuthorityError("human approval attester must match approver.id")
         _sha256_digest(provenance["subject_sha256"], label="provenance.subject_sha256")
+        if value["version"] == TRANSITION_APPROVAL_V4_VERSION:
+            _sha256_digest(provenance["message_sha256"], label="provenance.message_sha256")
         _parse_timestamp(provenance["attested_at"], label="provenance.attested_at")
         if provenance["subject_sha256"] != transition_approval_subject_sha256(value):
             raise AuthorityError("approval provenance does not bind the approval subject")
@@ -520,6 +532,8 @@ def _transition_approval_schema(value: Mapping[str, Any]) -> str:
         return "transition-approval-v2"
     if version == TRANSITION_APPROVAL_V3_VERSION:
         return "transition-approval-v3"
+    if version == TRANSITION_APPROVAL_V4_VERSION:
+        return "transition-approval-v4"
     raise AuthorityError(f"Unsupported transition approval version: {version!r}")
 
 

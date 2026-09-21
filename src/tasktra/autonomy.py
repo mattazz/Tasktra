@@ -323,7 +323,7 @@ class AutonomyStore(StateStore):
             if work_unit_id is not None and not _scope_covers(approval["scope"], unit_scope):
                 continue
             try:
-                if int(approval.get("protocol_version") or 1) == 3:
+                if int(approval.get("protocol_version") or 1) >= 3:
                     AutonomyStore._verify_approval_evidence(connection, goal_id, approval)
                 if require_completion_evidence:
                     AutonomyStore._verify_completion_approval_evidence(connection, goal_id, approval)
@@ -366,10 +366,10 @@ class AutonomyStore(StateStore):
 
     @staticmethod
     def _verify_completion_approval_evidence(connection: Any, goal_id: str, approval: Mapping[str, Any]) -> None:
-        """Require a v3 final approval to bind every recorded acceptance fact."""
-        if int(approval.get("protocol_version") or 1) != 3:
+        """Require human-bound final approval to bind every recorded acceptance fact."""
+        if int(approval.get("protocol_version") or 1) < 3:
             raise AutonomyError(
-                "goal completion requires a v3 local-human-ceremony approval with verified evidence; re-record approval"
+                "goal completion requires a v3+ human-bound approval with verified evidence; re-record approval"
             )
         AutonomyStore._verify_approval_evidence(connection, goal_id, approval)
         criteria = {
@@ -1072,7 +1072,7 @@ class AutonomyStore(StateStore):
                 continue
             approval = _row(row) or {}
             if (
-                int(approval.get("protocol_version") or 1) != 3
+                int(approval.get("protocol_version") or 1) < 3
                 or approval["approver_kind"] != "human"
                 or approval["approver_id"] == performer_id
                 or approval["effect"] != descriptor.effect_class
@@ -1091,7 +1091,7 @@ class AutonomyStore(StateStore):
                 and _resource_scope_within(descriptor.resource_scope.to_dict(), approval_scope)
             ):
                 return dict(row)
-        raise AutonomyError("no current v3 human-ceremony approval with verified evidence binds this provider effect")
+        raise AutonomyError("no current human-bound approval with verified evidence binds this provider effect")
 
     def prepare_provider_effect(self, *, idempotency_key: str, goal_id: str, work_unit_id: str,
                                 operation_descriptor: Mapping[str, Any] | ProviderOperationDescriptor,

@@ -15,7 +15,7 @@ Use Tasktra as either:
 - a generic, ready-to-adopt project template; or
 - a versioned foundation that a project initializes, configures with packs and extensions, and upgrades through previewable migrations.
 
-Codex is the normal human interface. A small Python CLI provides deterministic operations that Codex can invoke and that remain available for automation and diagnostics.
+Codex is the normal human interface. A small Python CLI provides deterministic operations that Codex can invoke and that remain available for automation and diagnostics. In Codex, an explicit current user approval can be recorded as a content-bound `codex-user-message` approval for the exact action, scope, performer, and authority-envelope hash. It does not let an agent reuse a plan, its own output, or a prior approval as fresh authority; terminal-only users can continue to use the local confirmation ceremony.
 
 ## Product principles
 

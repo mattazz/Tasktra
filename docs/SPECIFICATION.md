@@ -4,7 +4,7 @@
 
 Tasktra is a reusable workflow orchestration foundation for software projects. It converts a human's high-level intent into bounded, durable, reviewable work while preserving a project's own instructions and allowing local work when optional online services are unavailable.
 
-The normal interface is Codex conversation. A portable Python command-line engine supplies deterministic state transitions, compilation, validation, upgrades, and diagnostics. Tasktra's canonical contracts are runtime-neutral; Codex is the first-class runtime and Claude is a supported generated projection.
+The normal interface is Codex conversation. A portable Python command-line engine supplies deterministic state transitions, compilation, validation, upgrades, and diagnostics. Tasktra's canonical contracts are runtime-neutral; Codex is the first-class runtime and Claude is a supported generated projection. When Codex carries an explicit current human approval, Tasktra can record v4 `codex-user-message` provenance that binds the message hash to one exact approval subject. The user remains distinct from the performer, and generated content or prior approvals cannot create fresh authority. The v3 local-terminal ceremony remains available where no Codex conversation is the approval channel.
 
 ## Non-goals
 
