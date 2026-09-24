@@ -118,6 +118,10 @@ Canonical roles declare a portable tier (`fast`, `balanced`, `deep`, or `excepti
 
 A consuming project can replace selected tier mappings and set a role-specific model or reasoning effort in `[agents.codex]`. Resolution is role override first, then the project's tier mapping, then the catalog default. A role cannot widen the sandbox declared by the canonical catalog. See the [operations guide](docs/OPERATIONS.md#model-routing-and-delegation-plans) for configuration and the distinction between a local routing plan and actual Codex-host dispatch.
 
+Enabled pack roles and project-owned `.codex/agents/*.toml` specialists become default choices for matching substantive work. Enabling a pack or adding a valid project agent file is the opt-in; routine use needs no per-task route or explicit agent name. Projects can add [specialist and skill routes](docs/OPERATIONS.md#project-specialist-and-skill-routes) when they need more precise triggers or output boundaries. Compilation preserves custom agent files and their model settings. The host still decides whether it can dispatch the agent under the current runtime and user instructions.
+
+For measured work, the optional project-local [`execution` ledger](docs/OPERATIONS.md#agent-execution-and-usage) separates a host callback, a manual execution assertion, and rollout-verified usage from the configured agent profile. It can import per-response usage from a named Codex rollout, keeps unavailable measurements null, and does not claim that a planned specialist ran.
+
 ## Typical interaction
 
 A typical Codex conversation can be as simple as:

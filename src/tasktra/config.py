@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
+import re
 import stat
 import tomllib
 from types import MappingProxyType
@@ -25,6 +26,16 @@ class ConfigError(ValueError):
 
 
 @dataclass(frozen=True)
+class ProjectRoute:
+    identifier: str
+    trigger: str
+    role: str | None = None
+    skills: tuple[str, ...] = ()
+    boundary: str | None = None
+    roles: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ProjectConfig:
     name: str
     version: int = 1
@@ -36,6 +47,7 @@ class ProjectConfig:
     catalog_trusted: bool = False
     codex_tier_models: Mapping[str, str] = field(default_factory=dict)
     codex_role_overrides: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
+    routes: tuple[ProjectRoute, ...] = ()
     jira_sync: JiraSyncPolicy | None = None
     raw: dict = field(default_factory=dict, compare=False, repr=False)
 
@@ -179,6 +191,52 @@ def _codex_agents(value: object) -> tuple[Mapping[str, str], Mapping[str, Mappin
     return MappingProxyType(parsed_tiers), MappingProxyType(parsed_roles)
 
 
+def _routes(value: object) -> tuple[ProjectRoute, ...]:
+    routing = _table(value, "routing") if value else {}
+    entries = routing.get("routes", [])
+    routes: list[ProjectRoute] = []
+    identifiers: set[str] = set()
+    triggers: set[str] = set()
+    for index, entry in enumerate(entries):
+        identifier = entry["id"]
+        try:
+            require_identifier(identifier, label=f"routing.routes[{index}].id")
+        except IdentifierError as error:
+            raise ConfigError(str(error)) from error
+        trigger = entry["trigger"].strip()
+        role = entry.get("role")
+        roles = tuple(entry.get("roles", []))
+        skills = tuple(entry.get("skills", []))
+        boundary = entry.get("boundary")
+        if not trigger or "\n" in trigger or "\r" in trigger:
+            raise ConfigError(f"routing.routes[{index}].trigger must be one non-empty line")
+        if boundary is not None and (not boundary.strip() or "\n" in boundary or "\r" in boundary):
+            raise ConfigError(f"routing.routes[{index}].boundary must be one non-empty line")
+        if role is not None and roles:
+            raise ConfigError(f"routing.routes[{index}] permits role or roles, not both")
+        if role is None and not roles and not skills:
+            raise ConfigError(f"routing.routes[{index}] needs a role or skill")
+        for selected_role in ((role,) if role is not None else roles):
+            try:
+                require_identifier(selected_role, label=f"routing.routes[{index}].role")
+            except IdentifierError as error:
+                raise ConfigError(str(error)) from error
+        if len({selected_role.casefold() for selected_role in roles}) != len(roles):
+            raise ConfigError(f"routing.routes[{index}].roles contains duplicates")
+        if any(re.fullmatch(r"[a-z0-9][a-z0-9._:-]*", skill) is None for skill in skills):
+            raise ConfigError(f"routing.routes[{index}].skills contains an invalid name")
+        if len({skill.casefold() for skill in skills}) != len(skills):
+            raise ConfigError(f"routing.routes[{index}].skills contains duplicates")
+        if identifier.casefold() in identifiers:
+            raise ConfigError(f"duplicate route id: {identifier}")
+        if trigger.casefold() in triggers:
+            raise ConfigError(f"duplicate route trigger: {trigger}")
+        identifiers.add(identifier.casefold())
+        triggers.add(trigger.casefold())
+        routes.append(ProjectRoute(identifier, trigger, role, skills, boundary.strip() if boundary else None, roles))
+    return tuple(routes)
+
+
 def load_project_config(root: Path) -> ProjectConfig:
     path = config_path(root)
     if not path.is_file():
@@ -203,6 +261,7 @@ def load_project_config(root: Path) -> ProjectConfig:
     validation = _table(data.get("validation", {}), "validation")
     jira_sync_raw = data.get("jira_sync")
     tier_models, role_overrides = _codex_agents(data.get("agents", {}))
+    routes = _routes(data.get("routing", {}))
     name = project.get("name")
     version = project.get("config_version", 1)
     database = runtime.get("database", DEFAULT_DATABASE)
@@ -237,5 +296,6 @@ def load_project_config(root: Path) -> ProjectConfig:
         concurrency_limit=concurrency, raw=data,
         catalog_trusted=catalog_trusted,
         codex_tier_models=tier_models, codex_role_overrides=role_overrides,
+        routes=routes,
         jira_sync=jira_sync,
     )

@@ -17,7 +17,7 @@ from . import __version__
 from .adoption import inspect_existing_instructions
 from .compiler import Catalog, CatalogError, compile_catalog
 from .model_policy import CodexModelPolicy
-from .config import ConfigError, ProjectConfig, config_path, load_project_config
+from .config import ConfigError, ProjectConfig, ProjectRoute, config_path, load_project_config
 from .ecosystem import preflight_packs, preview_pack_migrations
 from .manifest import GeneratedManifest, ManifestError, TasktraLock, read_lockfile, read_manifest, sha256_bytes, sha256_text
 from .state import SCHEMA_VERSION, StateError, StateStore
@@ -58,6 +58,7 @@ def preview_adoption(
     runtime_schema_version: int = SCHEMA_VERSION,
     codex_model_policy: CodexModelPolicy | None = None,
     codex_role_overrides: Mapping[str, Mapping[str, str]] | None = None,
+    project_routes: Iterable[ProjectRoute] = (),
 ) -> LifecyclePreview:
     """Return a bounded adoption plan without treating instructions as equivalent.
 
@@ -67,7 +68,7 @@ def preview_adoption(
     """
     project = _project_root(root)
     inspection = inspect_existing_instructions(project)
-    target = _target_projection(catalog, enabled_packs, codex_model_policy, codex_role_overrides)
+    target = _target_projection(catalog, enabled_packs, codex_model_policy, codex_role_overrides, project_routes, project)
     activation = preflight_packs(
         catalog, target.packs,
         available_capabilities=available_capabilities,
@@ -113,6 +114,7 @@ def preview_upgrade(
     validation_commands: Iterable[Sequence[str]] | None = None,
     codex_model_policy: CodexModelPolicy | None = None,
     codex_role_overrides: Mapping[str, Mapping[str, str]] | None = None,
+    project_routes: Iterable[ProjectRoute] = (),
 ) -> LifecyclePreview:
     """Compose a deterministic, authority-scoped upgrade preview.
 
@@ -132,7 +134,7 @@ def preview_upgrade(
             blockers.append(_blocker("lockfile", f"invalid lockfile: {error}"))
     selected = tuple(enabled_packs) if enabled_packs is not None else (lock.packs if lock is not None else ("core",))
     try:
-        target = _target_projection(catalog, selected, codex_model_policy, codex_role_overrides)
+        target = _target_projection(catalog, selected, codex_model_policy, codex_role_overrides, project_routes, project)
         activation = preflight_packs(
             catalog, target.packs,
             available_capabilities=available_capabilities,
@@ -229,13 +231,15 @@ def _project_root(root: Path | str) -> Path:
 def _target_projection(
     catalog: Catalog, enabled_packs: Iterable[str], codex_model_policy: CodexModelPolicy | None = None,
     codex_role_overrides: Mapping[str, Mapping[str, str]] | None = None,
+    project_routes: Iterable[ProjectRoute] = (), project_root: Path | None = None,
 ):
     selected = tuple(sorted(set(enabled_packs)))
     if not selected:
         raise LifecycleError("enabled_packs must not be empty")
     return compile_catalog(
         catalog, selected, codex_model_policy=codex_model_policy,
-        codex_role_overrides=codex_role_overrides,
+        codex_role_overrides=codex_role_overrides, project_routes=project_routes,
+        project_root=project_root,
     )
 
 

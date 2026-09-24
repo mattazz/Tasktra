@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 from hashlib import sha256
 import json
 from pathlib import Path, PurePosixPath
@@ -13,7 +14,7 @@ import unittest
 
 from tasktra import __version__
 from tasktra.compiler import compile_catalog, load_catalog, write_projection
-from tasktra.config import ProjectConfig
+from tasktra.config import ProjectConfig, ProjectRoute
 from tasktra.delegation import projection_overrides
 from tasktra.lifecycle import preview_upgrade
 from tasktra.manifest import (
@@ -114,6 +115,23 @@ class UpgradeApplicationTests(unittest.TestCase):
             expected_plan_sha256=upgrade_plan_digest(plan),
             confirmed=True,
         )
+
+    def test_apply_rejects_route_changes_after_preview_without_writing(self):
+        with TemporaryDirectory() as directory:
+            project, config, plan = self._project(Path(directory))
+            before = {
+                path: self._bytes(project, path)
+                for path in ("AGENTS.md", "CLAUDE.md", ".tasktra/generated/manifest.json", ".tasktra/tasktra.lock")
+            }
+            changed_config = replace(config, routes=(
+                ProjectRoute("art", "Create artwork", skills=("imagegen",)),
+            ))
+            with self.assertRaisesRegex(UpgradeError, "projection changed after the upgrade preview"):
+                self._apply(project, changed_config, plan)
+            self.assertEqual(
+                before,
+                {path: self._bytes(project, path) for path in before},
+            )
 
     def test_apply_requires_the_exact_lifecycle_plan_digest_before_writing(self):
         with TemporaryDirectory() as directory:

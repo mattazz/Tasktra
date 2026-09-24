@@ -12,12 +12,14 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import stat
 import tempfile
 import tomllib
 from typing import Iterable, Mapping
 
 from .contracts import ContractError, validate_named
+from .config import ProjectRoute
 from .identifiers import IdentifierError, require_identifier
 from .model_policy import (
     CodexModelPolicy,
@@ -44,6 +46,12 @@ class Document:
     model_tier: str | None = None
     reasoning_effort: str | None = None
     sandbox_mode: str | None = None
+
+
+@dataclass(frozen=True)
+class ProjectAgent:
+    identifier: str
+    description: str
 
 
 @dataclass(frozen=True)
@@ -247,6 +255,8 @@ def compile_catalog(
     *,
     codex_model_policy: CodexModelPolicy | None = None,
     codex_role_overrides: Mapping[str, Mapping[str, str]] | None = None,
+    project_routes: Iterable[ProjectRoute] = (),
+    project_root: Path | str | None = None,
 ) -> Projection:
     """Return the exact Codex and Claude files for a selected pack set.
 
@@ -265,9 +275,12 @@ def compile_catalog(
         )
     role_ids = _selected(packs, catalog.packs, "roles")
     skill_ids = _selected(packs, catalog.packs, "skills")
+    routes = tuple(project_routes)
+    project_agents = _discover_project_agents(catalog, project_root)
+    _validate_project_routes(catalog, role_ids, skill_ids, routes, project_agents, project_root)
     files: dict[PurePosixPath, str] = {
-        PurePosixPath("AGENTS.md"): _entrypoint("Codex", packs, role_ids, skill_ids),
-        PurePosixPath("CLAUDE.md"): _entrypoint("Claude", packs, role_ids, skill_ids),
+        PurePosixPath("AGENTS.md"): _entrypoint("Codex", packs, role_ids, skill_ids, routes, project_agents),
+        PurePosixPath("CLAUDE.md"): _entrypoint("Claude", packs, role_ids, skill_ids, routes, project_agents),
         PurePosixPath(".tasktra", "generated", "pack-plan.json"): _pack_plan(catalog, packs),
     }
     for role_id in role_ids:
@@ -926,7 +939,155 @@ def _selected(packs: Iterable[str], definitions: Mapping[str, Pack], attribute: 
     return tuple(selected)
 
 
-def _entrypoint(runtime: str, packs: tuple[str, ...], roles: tuple[str, ...], skills: tuple[str, ...]) -> str:
+def _discover_project_agents(
+    catalog: Catalog, project_root: Path | str | None
+) -> tuple[ProjectAgent, ...]:
+    """Treat project-owned Codex agent files as opted-in selection defaults."""
+    if project_root is None:
+        return ()
+    project = Path(project_root).resolve()
+    directory = project / ".codex" / "agents"
+    _reject_symlink_ancestors(project, directory)
+    if not directory.exists():
+        return ()
+    if not directory.is_dir():
+        raise CatalogError(f"project agent path is not a directory: {directory}")
+    sources = sorted(
+        source for source in directory.glob("*.toml")
+        if source.stem not in catalog.roles
+    )
+    if len(sources) > 64:
+        raise CatalogError(f"project has more than 64 project-owned Codex agent files: {directory}")
+    discovered: list[ProjectAgent] = []
+    for source in sources:
+        identifier = source.stem
+        try:
+            require_identifier(identifier, label="project agent")
+        except IdentifierError as error:
+            raise CatalogError(f"{source}: {error}") from error
+        _reject_symlink_ancestors(project, source)
+        try:
+            if source.stat().st_size > 64 * 1024:
+                raise CatalogError(f"project agent file exceeds 64 KiB: {source}")
+            agent = tomllib.loads(source.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, tomllib.TOMLDecodeError) as error:
+            raise CatalogError(f"project agent file is unreadable or invalid: {source}") from error
+        if agent.get("name") != identifier:
+            raise CatalogError(f"project agent file must declare name = {identifier!r}: {source}")
+        description = agent.get("description")
+        if not isinstance(description, str) or not description.strip():
+            raise CatalogError(f"project agent needs a description for default routing: {source}")
+        summary = " ".join(description.split())
+        if not summary.isprintable():
+            raise CatalogError(f"project agent description must be printable: {source}")
+        if len(summary) > 240:
+            summary = summary[:237].rstrip() + "..."
+        discovered.append(ProjectAgent(identifier, summary))
+    return tuple(discovered)
+
+
+def _validate_project_routes(
+    catalog: Catalog,
+    roles: tuple[str, ...],
+    skills: tuple[str, ...],
+    routes: tuple[ProjectRoute, ...],
+    project_agents: tuple[ProjectAgent, ...],
+    project_root: Path | str | None,
+) -> None:
+    project_role_ids = {agent.identifier for agent in project_agents}
+    identifiers: set[str] = set()
+    triggers: set[str] = set()
+    for route in routes:
+        try:
+            require_identifier(route.identifier, label="route id")
+        except IdentifierError as error:
+            raise CatalogError(str(error)) from error
+        trigger = route.trigger.strip()
+        if not trigger or len(trigger) > 240 or not trigger.isprintable():
+            raise CatalogError(f"route {route.identifier}: trigger must be one printable line of at most 240 characters")
+        if route.boundary is not None and (
+            not route.boundary.strip() or len(route.boundary) > 400 or not route.boundary.isprintable()
+        ):
+            raise CatalogError(f"route {route.identifier}: boundary must be one printable line of at most 400 characters")
+        if route.role is not None and route.roles:
+            raise CatalogError(f"route {route.identifier}: role and roles cannot both be set")
+        if route.role is None and not route.roles and not route.skills:
+            raise CatalogError(f"route {route.identifier}: a role or skill is required")
+        if len({role.casefold() for role in route.roles}) != len(route.roles):
+            raise CatalogError(f"route {route.identifier}: duplicate roles")
+        if route.identifier.casefold() in identifiers or trigger.casefold() in triggers:
+            raise CatalogError(f"route {route.identifier}: duplicate route id or trigger")
+        identifiers.add(route.identifier.casefold())
+        triggers.add(trigger.casefold())
+        for role in ((route.role,) if route.role is not None else route.roles):
+            try:
+                require_identifier(role, label="route role")
+            except IdentifierError as error:
+                raise CatalogError(str(error)) from error
+            if role in catalog.roles:
+                if role not in roles:
+                    raise CatalogError(f"route {route.identifier}: role {role} requires an enabled pack")
+            else:
+                if _casefold_duplicate(role, catalog.roles):
+                    raise CatalogError(f"route {route.identifier}: role {role} conflicts with a catalog role")
+                if project_root is None:
+                    raise CatalogError(f"route {route.identifier}: project root is required for custom role {role}")
+                if role not in project_role_ids:
+                    source = Path(project_root).resolve() / ".codex" / "agents" / f"{role}.toml"
+                    raise CatalogError(f"route {route.identifier}: custom role file is missing: {source}")
+        for skill in route.skills:
+            if not re.fullmatch(r"[a-z0-9][a-z0-9._:-]*", skill):
+                raise CatalogError(f"route {route.identifier}: invalid skill name: {skill}")
+            if skill in catalog.skills and skill not in skills:
+                raise CatalogError(f"route {route.identifier}: skill {skill} requires an enabled pack")
+            if skill not in catalog.skills and _casefold_duplicate(skill, catalog.skills):
+                raise CatalogError(f"route {route.identifier}: skill {skill} conflicts with a catalog skill")
+
+
+def _route_entrypoint(routes: tuple[ProjectRoute, ...]) -> str:
+    if not routes:
+        return ""
+    lines = [
+        "\nProject routes from `.tasktra/project.toml` (selection guidance, not runtime enforcement):",
+        "Match substantive requests below. Skills supply procedures; selecting a skill does not dispatch a specialist. "
+        "Apply each skill's own trigger, including explicit-only triggers. Check skill and tool availability in the "
+        "active session; external skill names are host-unverified. Routes grant no new effect authority.",
+        "When a route names several specialists, choose bounded subtasks and dispatch only where the host and current work allow it.",
+    ]
+    for route in routes:
+        targets: list[str] = []
+        if route.role:
+            targets.append(f"specialist `{route.role}`")
+        elif route.roles:
+            targets.append("specialists " + ", ".join(f"`{role}`" for role in route.roles) + " as needed")
+        if route.skills:
+            targets.append("skill " + ", ".join(f"`{skill}`" for skill in route.skills) + " when applicable")
+        line = f"- {route.trigger} → {'; '.join(targets)}."
+        if route.boundary:
+            line += f" {route.boundary}"
+        lines.append(line)
+    return "\n".join(lines) + "\n"
+
+
+def _project_agent_entrypoint(agents: tuple[ProjectAgent, ...]) -> str:
+    if not agents:
+        return ""
+    lines = [
+        "\nProject-owned Codex specialists are opted in by their `.codex/agents/*.toml` files. "
+        "Use the matching specialist for substantive bounded work even when the user does not name it. "
+        "Read its agent file and preserve its model and effort pins. Other hosts must verify an equivalent agent before dispatch:",
+    ]
+    lines.extend(
+        f"- `{agent.identifier}` (`.codex/agents/{agent.identifier}.toml`): {agent.description}"
+        for agent in agents
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _entrypoint(
+    runtime: str, packs: tuple[str, ...], roles: tuple[str, ...], skills: tuple[str, ...],
+    routes: tuple[ProjectRoute, ...] = (), project_agents: tuple[ProjectAgent, ...] = (),
+) -> str:
     return (
         _MARKER
         +
@@ -938,9 +1099,16 @@ def _entrypoint(runtime: str, packs: tuple[str, ...], roles: tuple[str, ...], sk
         "for independent semantic judgment; and escalate only a specific unresolved difficulty. Do not delegate "
         "a deterministic status, search, count, formatting, or comparison merely to avoid using a tool. Never "
         "skip required validation to save model usage.\n\n"
+        "Enabled pack roles and project-owned `.codex/agents/*.toml` agents are opted-in defaults: select a matching "
+        "specialist by its description for substantive bounded work when the host permits delegation. Follow explicit "
+        "user model and no-subagent "
+        "choices and runtime delegation limits. Check host availability; if unavailable, state the limitation, use a "
+        "suitable role or follow the workflow locally, and report what actually ran.\n\n"
         f"Enabled packs: {', '.join(packs)}\n\n"
         f"Roles: {', '.join(roles)}\n\n"
         f"Skills: {', '.join(skills)}\n"
+        + _project_agent_entrypoint(project_agents)
+        + _route_entrypoint(routes)
     )
 
 

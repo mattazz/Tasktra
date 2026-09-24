@@ -85,6 +85,65 @@ recommendation and handoff-ready brief, not confirmation that a model or agent
 is available. Codex (or another capable host) performs any actual dispatch
 after applying its own availability checks and the goal's authority limits.
 
+### Project specialist and skill routes
+
+Enabled packs opt their catalog roles in by default. A project-owned Codex
+agent in `.codex/agents/<role>.toml` is also opted in automatically: Tasktra
+uses its `description` as a concise selection hint in generated `AGENTS.md`
+and `CLAUDE.md`. The file needs a matching `name` and a useful description.
+That is the normal setup: enable the pack or add the project agent file once,
+then the coordinator selects a matching agent for suitable work without a
+per-task route or a request that names the agent.
+Tasktra does not take ownership of the file or change its model and effort.
+Set custom-agent model and effort in that file; `[agents.codex.roles]` applies
+to catalog roles only. The coordinator selects a matching specialist for
+substantive bounded work when delegation is permitted; a simple lookup stays
+direct. Other hosts must check for an equivalent callable agent.
+
+Add explicit routes to `.tasktra/project.toml` only when the agent's
+description is insufficient, such as distinct boundaries for a concept draft,
+an art critique, and approved art integration, or a skill that should accompany
+a specialist:
+
+```toml
+[[routing.routes]]
+id = "art-concept"
+trigger = "Create or revise character artwork, including a draft for review"
+role = "graphic-designer"
+skills = ["imagegen"]
+boundary = "Return a draft for review; do not register or publish it."
+
+[[routing.routes]]
+id = "art-critique"
+trigger = "Critique existing character artwork"
+role = "graphic-designer"
+boundary = "Return findings without generation or edits."
+```
+
+Each route needs a distinct `id` and `trigger`, plus a `role`, `roles`, one or
+more `skills`, or a role/skill combination. Use `roles = ["tester",
+"implementer"]` when distinct bounded subtasks may need different specialists;
+this is selection guidance, not an instruction to spawn all of them.
+`boundary` states the requested output and effect limit.
+Routes may refer to roles in enabled packs or to an existing project-owned
+Codex agent. A catalog role or skill from a disabled pack is an error. Names
+of skills outside the catalog, such as personal or plugin skills, are kept as
+host-unverified references: the coordinator checks availability and the
+skill's actual trigger, including explicit-only triggers, in the active
+session. A skill-only route does not request agent delegation.
+
+Compile and inspect the generated entrypoints after changing routes. The
+compiler rejects invalid custom agents and duplicate route IDs or exact
+triggers. Overlapping natural-language triggers still need project review.
+The selection guidance is not a deterministic dispatch engine;
+user instructions, runtime delegation limits, and the existing goal authority
+remain controlling. If a matching role, model, skill, or tool is unavailable,
+the coordinator must state the limitation and accurately report the fallback
+it used. Keep direct lookups and trivial mechanical changes direct.
+The `delegation plan` command intentionally resolves an explicit primary signal
+to a core role for a reproducible brief. The generated host instructions handle
+matching project agents by description during normal conversational work.
+
 ## Durable goals and manual fallback
 
 The core recovery loop is:
@@ -176,6 +235,46 @@ python -m tasktra telemetry --root . export .tasktra/evidence/telemetry-export.j
 ```
 
 Collection accepts only the closed local metadata schema. It excludes prompts, source content, credentials, arbitrary labels, and secrets. Export is a separate explicit action and remains project-local until a separately authorized external transfer occurs.
+
+### Agent execution and usage
+
+`tasktra execution` is a separate, project-local ledger for individual agent work.
+Creating a work record opts that record in; it does not backfill historical
+sessions or turn on the older aggregate telemetry store. The configured role,
+model, and effort come from an enabled catalog role or an opted-in project
+agent file. A requested override is recorded separately. The report labels
+manual start and finish entries as assertions; a host callback or a matching
+Codex rollout supplies stronger execution evidence.
+
+```powershell
+python -m tasktra execution --root . plan work-1 --role scout
+python -m tasktra execution --root . start work-1 --host local --thread-id <host-thread-id> --agent-id /root/scout
+python -m tasktra execution --root . finish work-1 --outcome succeeded --rollout <local-rollout.jsonl>
+python -m tasktra execution --root . report
+```
+
+When a host provides lifecycle callbacks, its adapter can record the start and
+finish receipts and import the named rollout at completion. The CLI is the
+explicit fallback for hosts without such a callback; its entries remain
+manual assertions unless a rollout verifies the matching thread. Tasktra's
+Python control plane cannot observe an arbitrary native Codex subagent spawn
+by itself. If usage is unavailable, finish with
+`--unknown-reason host-no-usage` (or another short reason code) and leave token
+counters null. A final rollout import can refresh a completed record without
+double counting responses. Scope reused
+sessions by turn; one whole-thread record cannot overlap records for its
+individual turns. Coordinator work needs its own record and attribution reason.
+
+The project-local database is `.tasktra/runtime/agent-execution.sqlite`, separate from
+the canonical workflow database and aggregate telemetry. It stores counters,
+identifiers, profile provenance, and a source digest, not raw rollout content
+or the rollout path. Do not add the project-local database, its WAL, or raw host logs
+to version control or an export. The project-local database uses the project's
+filesystem permissions and is not encrypted; limit access to its runtime directory when
+host, thread, or agent identifiers are sensitive. Usage totals describe measured work only;
+cached and reasoning counters are subsets, and no token savings or quality
+effect is inferred from them. The record outcome does not replace configured
+validation evidence.
 
 ## Stop and incident response
 

@@ -10,15 +10,17 @@ import os
 from pathlib import Path
 import sys
 import sysconfig
+import tomllib
 from typing import Any, Sequence
 
 from . import __version__
 from .adoption import preview_initialization
 from .benchmarking import BenchmarkObservation, BenchmarkPlan, compare_observations
-from .compiler import CatalogError, catalog_digest, check_drift, compile_catalog, load_catalog, write_projection
+from .compiler import CatalogError, _discover_project_agents, catalog_digest, check_drift, compile_catalog, load_catalog, resolve_packs, write_projection
 from .ecosystem import preflight_packs, preview_pack_migrations, recommend_packs
 from .config import ConfigError, config_path, initialize_project, load_project_config
-from .delegation import DelegationError, delegation_plan, projection_overrides
+from .delegation import DelegationError, agent_profile, delegation_plan, projection_overrides
+from .execution import ExecutionError, ExecutionStore
 from .handoffs import MAX_HANDOFF_BYTES, HandoffError, load_handoff, validate_handoff
 from .lessons import LessonError, LessonProposalStore
 from .lifecycle import LifecycleError, preview_adoption, preview_upgrade
@@ -330,6 +332,41 @@ def build_parser() -> argparse.ArgumentParser:
     telemetry_record.add_argument("--enable", action="store_true", help="explicitly enable this local append")
     telemetry_export = telemetry_commands.add_parser("export", help="Write an explicit sanitized project-local export")
     telemetry_export.add_argument("destination", help="project-relative destination")
+
+    execution = subcommands.add_parser("execution", help="Record agent execution assertions and local usage")
+    execution.add_argument("--root", default=".")
+    execution_commands = execution.add_subparsers(dest="execution_command", required=True)
+    execution_plan = execution_commands.add_parser("plan", help="Opt in one bounded work record")
+    execution_plan.add_argument("work_id")
+    execution_plan.add_argument("--role", required=True)
+    execution_plan.add_argument("--requested-model")
+    execution_plan.add_argument("--requested-effort")
+    execution_plan.add_argument("--override-reason")
+    execution_plan.add_argument("--parent-work-id")
+    execution_plan.add_argument("--attribution-reason")
+    execution_start = execution_commands.add_parser("start", help="Record a manual dispatch assertion")
+    execution_start.add_argument("work_id")
+    execution_start.add_argument("--provider", default="codex")
+    execution_start.add_argument("--host", required=True)
+    execution_start.add_argument("--thread-id", required=True)
+    execution_start.add_argument("--turn-id")
+    execution_start.add_argument("--agent-id")
+    execution_start.add_argument("--observed-model")
+    execution_start.add_argument("--observed-effort")
+    execution_start.add_argument("--fallback-reason")
+    execution_import = execution_commands.add_parser("import", help="Refresh usage from a named local Codex rollout")
+    execution_import.add_argument("work_id")
+    execution_import.add_argument("rollout")
+    execution_import.add_argument("--fallback-reason")
+    execution_finish = execution_commands.add_parser("finish", help="Record a manual terminal assertion")
+    execution_finish.add_argument("work_id")
+    execution_finish.add_argument("--outcome", choices=("succeeded", "failed", "cancelled"), required=True)
+    execution_finish.add_argument("--unknown-reason")
+    execution_finish.add_argument("--rollout")
+    execution_finish.add_argument("--fallback-reason")
+    execution_show = execution_commands.add_parser("show", help="Read one local execution record")
+    execution_show.add_argument("work_id")
+    execution_commands.add_parser("report", help="Summarize measured and unknown work without estimating savings")
 
     benchmark = subcommands.add_parser("benchmark", help="Compare measured representative observations")
     benchmark.add_argument("baseline", help="bounded baseline JSON array")
@@ -857,7 +894,7 @@ def _compile(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     policy, overrides = projection_overrides(catalog, config)
     projection = compile_catalog(
         catalog, config.enabled_packs or ("core",), codex_model_policy=policy,
-        codex_role_overrides=overrides,
+        codex_role_overrides=overrides, project_routes=config.routes, project_root=root,
     )
     desired_manifest = build_generated_manifest(
         projection.files,
@@ -1090,6 +1127,7 @@ def _adopt(args: argparse.Namespace) -> dict[str, Any]:
         validation_commands=validations,
         codex_model_policy=policy,
         codex_role_overrides=overrides,
+        project_routes=config.routes if config is not None else (),
     ).as_dict()
 
 
@@ -1105,6 +1143,7 @@ def _upgrade_preview(args: argparse.Namespace) -> tuple[Path, Any, Any, Path, di
         trusted_executable_packs=args.trust_executable,
         codex_model_policy=policy,
         codex_role_overrides=overrides,
+        project_routes=config.routes,
     ).as_dict()
     return root, config, catalog, catalog_root, plan
 
@@ -1231,6 +1270,69 @@ def _telemetry(args: argparse.Namespace) -> dict[str, Any]:
     store = TelemetryStore(root, enabled=False)
     destination = store.export_sanitized(args.destination)
     return {"ok": True, "action": "telemetry-export", "path": str(destination), "sanitized": True}
+
+
+def _execution_profile(root: Path, role_id: str) -> tuple[str | None, str | None]:
+    """Resolve configured pins from opted-in project or enabled catalog agents."""
+    if role_id == "coordinator":
+        return None, None
+    config = load_project_config(root)
+    catalog_root = _catalog_root(root, None)
+    catalog = load_catalog(
+        catalog_root,
+        source_trust=_catalog_source_trust(catalog_root, config.catalog_trusted, allow_source_checkout=True),
+    )
+    enabled = resolve_packs(catalog, config.enabled_packs)
+    enabled_roles = {role for pack_id in enabled for role in catalog.packs[pack_id].roles}
+    if role_id in catalog.roles:
+        if role_id not in enabled_roles:
+            raise ExecutionError(f"agent role is not opted in by an enabled pack: {role_id}")
+        profile = agent_profile(catalog, config, role_id)
+        return profile.model, profile.reasoning_effort
+    if role_id not in {agent.identifier for agent in _discover_project_agents(catalog, root)}:
+        raise ExecutionError(f"project agent is not opted in: {role_id}")
+    agent = tomllib.loads((root / ".codex" / "agents" / f"{role_id}.toml").read_text(encoding="utf-8"))
+    model, effort = agent.get("model"), agent.get("model_reasoning_effort")
+    for label, value in (("model", model), ("model_reasoning_effort", effort)):
+        if value is not None and (not isinstance(value, str) or not value.strip() or len(value) > 128):
+            raise ExecutionError(f"project agent {role_id} has invalid {label}")
+    return model, effort
+
+
+def _execution(args: argparse.Namespace) -> dict[str, Any]:
+    root = _root(args.root)
+    store = ExecutionStore(root)
+    action = args.execution_command
+    if action == "plan":
+        model, effort = _execution_profile(root, args.role)
+        record = store.plan(
+            args.work_id, args.role, model, effort,
+            requested_model=args.requested_model, requested_effort=args.requested_effort,
+            override_reason=args.override_reason, parent_work_id=args.parent_work_id,
+            attribution_reason=args.attribution_reason,
+        )
+    elif action == "start":
+        record = store.start(
+            args.work_id, args.provider, args.host, args.thread_id,
+            agent_id=args.agent_id, turn_id=args.turn_id,
+            observed_model=args.observed_model, observed_effort=args.observed_effort,
+            fallback_reason=args.fallback_reason,
+        )
+    elif action == "import":
+        record = store.import_codex_rollout(args.work_id, Path(args.rollout), fallback_reason=args.fallback_reason)
+    elif action == "finish":
+        record = store.finish(
+            args.work_id, args.outcome, unknown_reason=args.unknown_reason,
+            rollout_path=Path(args.rollout) if args.rollout else None,
+            fallback_reason=args.fallback_reason,
+        )
+    elif action == "show":
+        record = store.get(args.work_id)
+    elif action == "report":
+        return {"ok": True, "action": "execution-report", "local_only": True, "report": store.report()}
+    else:
+        raise AssertionError(f"Unhandled execution command: {action}")
+    return {"ok": True, "action": f"execution-{action}", "local_only": True, "record": record}
 
 
 def _bounded_json_value(path_value: str, *, limit: int = _MAX_RUNTIME_JSON_BYTES) -> Any:
@@ -1650,6 +1752,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             output, code = _upgrade(args), 0
         elif args.command == "telemetry":
             output, code = _telemetry(args), 0
+        elif args.command == "execution":
+            output, code = _execution(args), 0
         elif args.command == "benchmark":
             output = _benchmark(args)
             code = 0 if output["ok"] else 1
@@ -1675,7 +1779,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             output, code = _effect(args), 0
         else:
             raise AssertionError(f"Unhandled command: {args.command}")
-    except (CatalogError, ConfigError, FileExistsError, FileNotFoundError, HandoffError, LessonError, LifecycleError, ManifestError, MigrationError, SchedulerError, StateError, TelemetryError, UpgradeError, ValidationError, WorkflowError, WorkItemError, OSError, ValueError) as error:
+    except (CatalogError, ConfigError, ExecutionError, FileExistsError, FileNotFoundError, HandoffError, LessonError, LifecycleError, ManifestError, MigrationError, SchedulerError, StateError, TelemetryError, UpgradeError, ValidationError, WorkflowError, WorkItemError, OSError, ValueError) as error:
         _emit({"ok": False, "error": str(error)}, stream=sys.stderr)
         return 2
     _emit(output)
