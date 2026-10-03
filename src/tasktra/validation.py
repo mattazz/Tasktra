@@ -227,11 +227,15 @@ def _run_one(project: Path, argv: ValidationArgv, timeout_seconds: int) -> Valid
         status = "passed" if exit_code == 0 else "failed"
     except subprocess.TimeoutExpired:
         status = "timed_out"
-        _terminate_process_tree(running)
+        try:
+            _terminate_process_tree(running)
+        except (ValidationError, OSError, subprocess.TimeoutExpired) as error:
+            status = "failed"
+            stderr.append(f"\nvalidation process cleanup failed: {error}".encode())
     finally:
         try:
             _finish_readers(running, readers)
-        except ValidationError as error:
+        except (ValidationError, OSError, subprocess.TimeoutExpired) as error:
             status = "failed"
             stderr.append(f"\n{error}".encode())
 
@@ -325,6 +329,9 @@ def _terminate_posix_group(process: subprocess.Popen[bytes]) -> None:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
         return
+    except PermissionError as error:
+        if not _posix_group_has_no_live_members(process.pid):
+            raise ValidationError("validation process group termination was denied; cleanup is unverified") from error
     try:
         process.wait(timeout=_TERMINATION_GRACE_SECONDS)
     except subprocess.TimeoutExpired:
@@ -335,7 +342,33 @@ def _terminate_posix_group(process: subprocess.Popen[bytes]) -> None:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+    except PermissionError as error:
+        if not _posix_group_has_no_live_members(process.pid):
+            raise ValidationError("validation process group termination was denied; cleanup is unverified") from error
     process.wait(timeout=_TERMINATION_GRACE_SECONDS)
+
+
+def _posix_group_has_no_live_members(pgid: int) -> bool:
+    # Darwin can report EPERM for a group containing only zombies. Confirm
+    # absence of live members independently; parent exit and pipe EOF are not
+    # sufficient evidence that every descendant stopped.
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-A", "-o", "pgid=", "-o", "stat="],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            check=False, timeout=_TERMINATION_GRACE_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0 or not result.stdout.strip():
+        return False
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) != 2 or not fields[0].isdigit() or not fields[1][0].isalpha():
+            return False
+        if int(fields[0]) == pgid and not fields[1].startswith("Z"):
+            return False
+    return True
 
 
 def _terminate_windows_tree(process: subprocess.Popen[bytes], job: _WindowsJob | None) -> None:

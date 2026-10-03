@@ -1,11 +1,14 @@
 from pathlib import Path
 import os
+import subprocess
 import sys
 from tempfile import TemporaryDirectory
 from time import monotonic, sleep
 import unittest
+from unittest.mock import Mock, patch
 
 from tasktra.validation import MAX_CAPTURE_CHARS, ValidationError, parse_command, run_validations, validation_plan
+from tasktra.validation import _posix_group_has_no_live_members, _terminate_posix_group
 
 
 def python_argv(source: str) -> list[str]:
@@ -13,6 +16,58 @@ def python_argv(source: str) -> list[str]:
 
 
 class ValidationTests(unittest.TestCase):
+    def test_permission_denied_cleanup_requires_no_live_group_members(self):
+        cases = (
+            ("42 Z\n42 Z+\n7 S\n", True),
+            ("7 S\n", True),
+            ("42 S\n", False),
+            ("42 Z\n42 T\n", False),
+            ("not a process listing\n", False),
+            ("", False),
+        )
+        for listing, expected in cases:
+            with self.subTest(listing=listing), patch(
+                "tasktra.validation.subprocess.run",
+                return_value=subprocess.CompletedProcess([], 0, listing, ""),
+            ):
+                self.assertEqual(_posix_group_has_no_live_members(42), expected)
+        for error in (OSError("no ps"), subprocess.TimeoutExpired("ps", 2)):
+            with self.subTest(error=error), patch("tasktra.validation.subprocess.run", side_effect=error):
+                self.assertFalse(_posix_group_has_no_live_members(42))
+        with patch("tasktra.validation.subprocess.run", return_value=subprocess.CompletedProcess([], 1, "42 Z", "denied")):
+            self.assertFalse(_posix_group_has_no_live_members(42))
+
+    def test_both_posix_signals_handle_zombie_only_permission_errors(self):
+        process = Mock(pid=42)
+        # Windows does not expose SIGKILL/killpg; the injected values exercise
+        # this platform-independent control flow on every CI host.
+        with patch("tasktra.validation.os.killpg", create=True, side_effect=PermissionError) as killpg, patch(
+            "tasktra.validation.signal.SIGKILL", 9, create=True,
+        ), patch("tasktra.validation._posix_group_has_no_live_members", return_value=True) as probe:
+            _terminate_posix_group(process)
+        self.assertEqual(killpg.call_count, 2)
+        self.assertEqual(probe.call_count, 2)
+        process.wait.assert_called()
+        with patch("tasktra.validation.os.killpg", create=True, side_effect=PermissionError), patch(
+            "tasktra.validation._posix_group_has_no_live_members", return_value=False,
+        ):
+            with self.assertRaisesRegex(ValidationError, "cleanup is unverified"):
+                _terminate_posix_group(process)
+
+    def test_cleanup_denial_fails_validation_and_stops_sequence(self):
+        import tasktra.validation as validation
+        original = validation._finish_readers
+
+        def deny_after_cleanup(*args):
+            original(*args)
+            raise PermissionError("cleanup denied")
+
+        with TemporaryDirectory() as directory, patch("tasktra.validation._finish_readers", side_effect=deny_after_cleanup):
+            results = run_validations(directory, [python_argv("pass"), python_argv("print('never')")])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].status, "failed")
+        self.assertIn("cleanup denied", results[0].stderr)
+
     def test_plan_does_not_execute_commands(self):
         with TemporaryDirectory() as directory:
             marker = Path(directory) / "marker"
