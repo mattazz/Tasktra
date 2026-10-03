@@ -83,6 +83,12 @@ class FileLockTests(unittest.TestCase):
             with exclusive_file_lock(path, root=aliased_root):
                 pass
             self.assertTrue((project / ".store.lock").is_file())
+            # A store may return its canonical path to a caller that retains
+            # the original root alias, as LessonStore does on macOS/Windows.
+            with exclusive_file_lock((project / ".store.lock").resolve(), root=aliased_root):
+                with self.assertRaises(FileLockBusyError):
+                    with exclusive_file_lock(path, root=aliased_root):
+                        pass
 
     @unittest.skipIf(os.name == "nt", "POSIX directory-descriptor behavior")
     def test_posix_first_creator_race_reopens_the_contender_lock(self):

@@ -107,27 +107,33 @@ def _try_acquire(descriptor: int) -> None:
 
 
 def _normalise_root_and_target(path: Path | str, root: Path | str) -> tuple[Path, Path]:
-    """Resolve the declared root after deriving a lexical in-root relative path.
+    """Normalize the declared root without resolving target components.
 
     macOS ``/var`` and Windows 8.3 paths can name the same root differently.
-    Deriving the relative path first lets the root normalize to its canonical
+    Derive the relative path beneath either the supplied or canonical root
     spelling without resolving a target that might cross an in-root link.
     """
     supplied_root = Path(root).absolute()
-    supplied_target = Path(path)
-    if supplied_target.is_absolute():
-        try:
-            parts = supplied_target.relative_to(supplied_root).parts
-        except ValueError as error:
-            raise FileLockError("lock path escapes the project root") from error
-    else:
-        parts = supplied_target.parts
-    if not parts or any(part in {".", ".."} for part in parts):
-        raise FileLockError("lock path must name a file inside the project root")
     try:
         anchor = supplied_root.resolve(strict=True)
     except OSError as error:
         raise FileLockError("project root is unavailable") from error
+    supplied_target = Path(path)
+    if supplied_target.is_absolute():
+        try:
+            parts = supplied_target.relative_to(supplied_root).parts
+        except ValueError:
+            # Stores may have already canonicalized their target while the
+            # caller still supplies the original root spelling. Only these two
+            # root prefixes are accepted; never resolve the target itself.
+            try:
+                parts = supplied_target.relative_to(anchor).parts
+            except ValueError as error:
+                raise FileLockError("lock path escapes the project root") from error
+    else:
+        parts = supplied_target.parts
+    if not parts or any(part in {".", ".."} for part in parts):
+        raise FileLockError("lock path must name a file inside the project root")
     return anchor, anchor.joinpath(*parts)
 
 
