@@ -6,11 +6,15 @@ from copy import deepcopy
 from dataclasses import replace
 from hashlib import sha256
 import json
+import os
 from pathlib import Path, PurePosixPath
 import sqlite3
+import shutil
+import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from tasktra import __version__
 from tasktra.compiler import compile_catalog, load_catalog, write_projection
@@ -25,7 +29,8 @@ from tasktra.manifest import (
     write_lockfile,
     write_manifest,
 )
-from tasktra.migrations import MigrationError
+from tasktra.migrations import MigrationError, write_prepared_runtime_recovery
+from tasktra.migrations import CommittedRuntimeRecoveryRequired
 from tasktra.state import SCHEMA_VERSION, StateStore
 from tasktra.upgrades import UpgradeError, apply_upgrade, rollback_upgrade, upgrade_plan_digest
 
@@ -253,6 +258,165 @@ class UpgradeApplicationTests(unittest.TestCase):
                     str(migration["plan_sha256"]),
                     expected_before_sha256=str(migration["before_sha256"]),
                 )
+
+    def test_post_commit_canonical_failure_requires_recovery_and_preserves_receipt(self):
+        with TemporaryDirectory() as directory:
+            project, config, plan = self._project(Path(directory))
+            before_manifest = self._bytes(project, ".tasktra/generated/manifest.json")
+            import tasktra.upgrades as upgrades
+
+            original = upgrades._write_canonical_projection
+            calls = 0
+
+            def fail_second_projection(*args: object, **kwargs: object) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("forced finalization failure")
+                original(*args, **kwargs)
+
+            with patch("tasktra.upgrades._write_canonical_projection", side_effect=fail_second_projection):
+                with self.assertRaisesRegex(MigrationError, "recovery is required"):
+                    self._apply(project, config, plan)
+
+            self.assertEqual(StateStore(config.database_path(project)).inspect_schema_version(), SCHEMA_VERSION)
+            self.assertNotEqual(self._bytes(project, ".tasktra/generated/manifest.json"), before_manifest)
+            receipts = list((project / ".tasktra" / "upgrades").glob("*/receipt.json"))
+            self.assertEqual(len(receipts), 1)
+            receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
+            verification = receipt["verification"]
+            backup = Path(str(verification["runtime_backup_path"]))
+            self.assertTrue(receipt["recovery_required"])
+            self.assertFalse(receipt["rollback_available"])
+            self.assertTrue(backup.is_file())
+            self.assertEqual(verification["runtime_backup_sha256"], sha256(backup.read_bytes()).hexdigest())
+
+    def test_post_commit_drift_failures_and_interrupts_require_recovery(self):
+        for failure in (OSError("forced drift failure"), KeyboardInterrupt()):
+            with self.subTest(failure=type(failure).__name__), TemporaryDirectory() as directory:
+                project, config, plan = self._project(Path(directory))
+                with patch("tasktra.upgrades.check_drift", side_effect=failure):
+                    with self.assertRaises(CommittedRuntimeRecoveryRequired) as raised:
+                        self._apply(project, config, plan)
+                self.assertTrue(raised.exception.verification["runtime_schema_changed"])
+                self.assertEqual(StateStore(config.database_path(project)).inspect_schema_version(), SCHEMA_VERSION)
+                receipt = next((project / ".tasktra" / "upgrades").glob("*/receipt.json"))
+                self.assertTrue(json.loads(receipt.read_text(encoding="utf-8"))["recovery_required"])
+
+    def test_commit_return_interrupt_uses_prepared_backup_evidence_without_file_rollback(self):
+        with TemporaryDirectory() as directory:
+            project, config, plan = self._project(Path(directory))
+            original = StateStore.migrate_with_evidence
+
+            def commit_then_interrupt(store: StateStore, *args: object, **kwargs: object) -> dict[str, object]:
+                original(store, *args, **kwargs)
+                raise KeyboardInterrupt()
+
+            with patch.object(StateStore, "migrate_with_evidence", new=commit_then_interrupt):
+                with self.assertRaises(CommittedRuntimeRecoveryRequired) as raised:
+                    self._apply(project, config, plan)
+
+            evidence = raised.exception.verification
+            backup = Path(str(evidence["runtime_backup_path"]))
+            self.assertTrue(backup.is_file())
+            self.assertEqual(evidence["runtime_backup_sha256"], sha256(backup.read_bytes()).hexdigest())
+            prepared = next((project / ".tasktra" / "upgrades").glob("*/prepared-*.json"))
+            journal = json.loads(prepared.read_text(encoding="utf-8"))
+            self.assertEqual(journal["phase"], "prepared")
+            self.assertEqual(journal["runtime_schema_before"], 8)
+            self.assertEqual(journal["runtime_schema_target"], SCHEMA_VERSION)
+            self.assertEqual(StateStore(config.database_path(project)).inspect_schema_version(), SCHEMA_VERSION)
+
+    def test_prepared_journal_failure_aborts_runtime_commit(self):
+        with TemporaryDirectory() as directory:
+            project, config, plan = self._project(Path(directory))
+            with patch("tasktra.upgrades.write_prepared_runtime_recovery", side_effect=OSError("journal unavailable")):
+                with self.assertRaisesRegex(MigrationError, "rollback completed"):
+                    self._apply(project, config, plan)
+            self.assertEqual(StateStore(config.database_path(project)).inspect_schema_version(), 8)
+
+    def test_concurrent_runtime_advance_uses_preview_schema_as_the_recovery_baseline(self):
+        with TemporaryDirectory() as directory:
+            project, config, plan = self._project(Path(directory))
+            before_lock = self._bytes(project, ".tasktra/tasktra.lock")
+            original = StateStore.migrate_with_evidence
+            advanced = False
+
+            def advance_then_retry(store: StateStore, *args: object, **kwargs: object) -> dict[str, object]:
+                nonlocal advanced
+                if not advanced:
+                    advanced = True
+                    original(store)
+                return original(store, *args, **kwargs)
+
+            with patch.object(StateStore, "migrate_with_evidence", new=advance_then_retry):
+                with self.assertRaises(CommittedRuntimeRecoveryRequired) as raised:
+                    self._apply(project, config, plan)
+
+            evidence = raised.exception.verification
+            self.assertEqual(evidence["runtime_schema_before"], 8)
+            self.assertEqual(evidence["runtime_schema_observed"], SCHEMA_VERSION)
+            self.assertIsNone(evidence["runtime_backup_path"])
+            self.assertEqual(StateStore(config.database_path(project)).inspect_schema_version(), SCHEMA_VERSION)
+            self.assertNotEqual(self._bytes(project, ".tasktra/tasktra.lock"), before_lock)
+
+    def test_prepared_journal_and_database_links_are_rejected_before_reading(self):
+        with TemporaryDirectory() as directory:
+            project = Path(directory) / "project"
+            project.mkdir()
+            verification = {
+                "runtime_schema_before": 8,
+                "runtime_schema_after": SCHEMA_VERSION,
+                "runtime_schema_changed": True,
+                "runtime_backup_path": str(project / ".tasktra/runtime/backup.sqlite"),
+                "runtime_backup_sha256": "a" * 64,
+            }
+            import tasktra.upgrades as upgrades
+
+            def linked(link: Path, target: Path) -> None:
+                if os.name == "nt":
+                    command = subprocess.run(
+                        ["cmd.exe", "/d", "/c", "mklink", "/J", str(link), str(target)],
+                        capture_output=True, text=True, check=False,
+                    )
+                    if command.returncode != 0:
+                        raise OSError(command.stderr or command.stdout)
+                else:
+                    link.symlink_to(target, target_is_directory=True)
+
+            try:
+                journal_plan = "b" * 64
+                journal = write_prepared_runtime_recovery(
+                    project, migration_plan_sha256=journal_plan, upgrade_plan_sha256="c" * 64,
+                    attempt_id="d" * 32, database_path=str(project / ".tasktra/runtime/tasktra.sqlite"),
+                    verification=verification,
+                )
+                outside = project.parent / "outside-journal"
+                outside.mkdir()
+                shutil.rmtree(journal.parent)
+                linked(journal.parent, outside)
+                with self.assertRaisesRegex(UpgradeError, "unresolved"):
+                    upgrades._assert_prepared_recovery_is_uncommitted(project, journal_plan)
+                self.assertFalse(any(outside.iterdir()))
+                journal.parent.unlink()
+
+                database_plan = "e" * 64
+                write_prepared_runtime_recovery(
+                    project, migration_plan_sha256=database_plan, upgrade_plan_sha256="f" * 64,
+                    attempt_id="1" * 32, database_path=str(project / ".tasktra/link-runtime/tasktra.sqlite"),
+                    verification=verification,
+                )
+                outside_database = project.parent / "outside-database"
+                outside_database.mkdir()
+                linked(project / ".tasktra/link-runtime", outside_database)
+                with self.assertRaisesRegex(UpgradeError, "unresolved"):
+                    upgrades._assert_prepared_recovery_is_uncommitted(project, database_plan)
+            except OSError as error:
+                self.skipTest(f"link or junction creation is unavailable: {error}")
+            finally:
+                for path in (project / ".tasktra/upgrades" / ("b" * 64), project / ".tasktra/link-runtime"):
+                    if path.is_symlink() or bool(getattr(path, "is_junction", lambda: False)()):
+                        path.unlink()
 
     def test_apply_rejects_runtime_schema_changed_after_preview(self):
         with TemporaryDirectory() as directory:

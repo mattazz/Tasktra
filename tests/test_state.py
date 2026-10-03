@@ -118,6 +118,28 @@ class StateTests(unittest.TestCase):
             finally:
                 connection.close()
 
+    def test_migration_before_commit_callback_can_abort_without_committing(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "state.sqlite"
+            StateStore(path).migrate()
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute("PRAGMA user_version = 9")
+                connection.commit()
+            finally:
+                connection.close()
+            captured: list[dict[str, object]] = []
+
+            def abort(evidence: dict[str, object]) -> None:
+                captured.append(evidence)
+                raise RuntimeError("prepared journal unavailable")
+
+            with self.assertRaisesRegex(RuntimeError, "prepared journal"):
+                StateStore(path).migrate_with_evidence(before_commit=abort)
+            self.assertEqual(captured[0]["before_schema"], 9)
+            self.assertEqual(captured[0]["after_schema"], SCHEMA_VERSION)
+            self.assertEqual(StateStore(path).inspect_schema_version(), 9)
+
     def test_unknown_goal_is_rejected(self):
         with TemporaryDirectory() as directory:
             store = StateStore(Path(directory) / "state.sqlite")

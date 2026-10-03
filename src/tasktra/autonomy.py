@@ -126,6 +126,25 @@ def _scope_covers(approval_scope: Mapping[str, Any], requested_scope: Mapping[st
     )
 
 
+def _git_commit_request_scope(descriptor: OperationDescriptor, request: Mapping[str, Any]) -> dict[str, list[str]] | None:
+    """Return the target path scope for a Git commit without granting authority.
+
+    Commit paths are untrusted request data.  They identify targets that must
+    fit within already-authorized scopes; they can never expand those scopes.
+    """
+    if descriptor.provider != "git" or descriptor.capability != "git-commit":
+        return None
+    paths = request.get("paths")
+    if not isinstance(paths, list) or not paths:
+        raise AutonomyError("Git commit request requires non-empty paths")
+    validated_paths, _ = _scope_paths(
+        {"paths": paths, "exclusions": []},
+        label="Git commit request",
+        permit_empty=False,
+    )
+    return {"paths": validated_paths, "exclusions": []}
+
+
 def _bound_intent_request(request: Mapping[str, Any], performer_id: str) -> tuple[str, str]:
     """Store request attribution in the canonical payload without changing its digest."""
     request_json, request_hash = _json_hash(request)
@@ -143,6 +162,18 @@ def _intent_performer(intent: Any) -> str:
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
         raise AutonomyError("effect intent lacks a valid authorized performer binding") from error
     return performer
+
+
+def _intent_request(intent: Any) -> dict[str, Any]:
+    """Restore the immutable, performer-bound request stored with an intent."""
+    try:
+        payload = json.loads(intent["request_json"])
+        request = payload["request"]
+        if not isinstance(payload["authorized_performer_id"], str) or not isinstance(request, dict):
+            raise ValueError
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise AutonomyError("effect intent lacks a valid bound request") from error
+    return request
 
 
 def _provider_descriptor(value: Mapping[str, Any] | OperationDescriptor) -> OperationDescriptor:
@@ -1019,7 +1050,8 @@ class AutonomyStore(StateStore):
     def _provider_authorize(connection: Any, *, goal_id: str, work_unit_id: str,
                             descriptor: Mapping[str, Any], envelope_sha256: str,
                             performer_id: str, work_attempt_id: str, lease_token: str,
-                            timestamp: str, expected_approval_id: str | None = None) -> dict[str, Any]:
+                            timestamp: str, request: Mapping[str, Any],
+                            expected_approval_id: str | None = None) -> dict[str, Any]:
         """Re-check every mutable authorization fact immediately before dispatch."""
         if connection.execute("SELECT emergency_stopped FROM runtime_control WHERE id=1").fetchone()[0]:
             raise AutonomyError("runtime is emergency-stopped")
@@ -1052,6 +1084,12 @@ class AutonomyStore(StateStore):
             raise AutonomyError("provider dispatch requires a valid work-unit scope")
         if not _scope_covers(envelope["scope"], unit_scope):
             raise AutonomyError("work unit scope is outside the authority envelope")
+        request_path_scope = _git_commit_request_scope(descriptor, request)
+        if request_path_scope is not None:
+            if not _scope_covers(envelope["scope"], request_path_scope):
+                raise AutonomyError("Git commit paths are outside the authority envelope scope")
+            if not _scope_covers(unit_scope, request_path_scope):
+                raise AutonomyError("Git commit paths are outside the work-unit scope")
         attempt = connection.execute(
             """SELECT a.*,u.goal_id FROM work_attempts a JOIN work_units u ON u.id=a.work_unit_id
                WHERE a.id=?""", (work_attempt_id,)
@@ -1089,6 +1127,7 @@ class AutonomyStore(StateStore):
             if (
                 _scope_covers(approval_path_scope, unit_scope)
                 and _resource_scope_within(descriptor.resource_scope.to_dict(), approval_scope)
+                and (request_path_scope is None or _scope_covers(approval_path_scope, request_path_scope))
             ):
                 return dict(row)
         raise AutonomyError("no current human-bound approval with verified evidence binds this provider effect")
@@ -1117,7 +1156,7 @@ class AutonomyStore(StateStore):
                 return dict(existing)
             approval = self._provider_authorize(connection, goal_id=goal_id, work_unit_id=work_unit_id,
                 descriptor=descriptor, envelope_sha256=envelope_sha256, performer_id=performer_id,
-                work_attempt_id=work_attempt_id, lease_token=lease_token, timestamp=timestamp)
+                work_attempt_id=work_attempt_id, lease_token=lease_token, timestamp=timestamp, request=request)
             connection.execute(
                 """INSERT INTO effect_intents(idempotency_key,goal_id,work_unit_id,effect_class,operation,request_sha256,request_json,status,created_at,
                    protocol_version,provider,capability,envelope_sha256,approval_id,resource_scope,work_attempt_id,updated_at)
@@ -1155,7 +1194,7 @@ class AutonomyStore(StateStore):
             descriptor = _intent_descriptor(intent)
             self._provider_authorize(connection, goal_id=intent["goal_id"], work_unit_id=intent["work_unit_id"], descriptor=descriptor,
                 envelope_sha256=intent["envelope_sha256"], performer_id=performer_id, work_attempt_id=intent["work_attempt_id"],
-                lease_token=lease_token, timestamp=timestamp, expected_approval_id=intent["approval_id"])
+                lease_token=lease_token, timestamp=timestamp, request=_intent_request(intent), expected_approval_id=intent["approval_id"])
             next_no = connection.execute("SELECT COALESCE(MAX(attempt_no),0)+1 FROM effect_attempts WHERE intent_key=?", (idempotency_key,)).fetchone()[0]
             attempt_id = _identifier(f"effect-attempt-{uuid4().hex}", label="effect_attempt_id")
             lease_generation = connection.execute("SELECT lease_generation FROM work_attempts WHERE id=?", (intent["work_attempt_id"],)).fetchone()[0]
@@ -1338,7 +1377,7 @@ class AutonomyStore(StateStore):
             descriptor = _intent_descriptor(intent)
             approval = self._provider_authorize(connection, goal_id=intent["goal_id"], work_unit_id=intent["work_unit_id"], descriptor=descriptor,
                 envelope_sha256=intent["envelope_sha256"], performer_id=performer_id, work_attempt_id=work_attempt_id,
-                lease_token=lease_token, timestamp=timestamp)
+                lease_token=lease_token, timestamp=timestamp, request=_intent_request(intent))
             connection.execute("UPDATE effect_intents SET status='pending',approval_id=?,work_attempt_id=?,updated_at=? WHERE idempotency_key=?", (approval["id"], work_attempt_id, timestamp, idempotency_key))
             self._append(connection, "provider_effect.retry_authorized", goal_id=intent["goal_id"], work_unit_id=intent["work_unit_id"], payload={"idempotency_key": idempotency_key, "approval_id": approval["id"], "work_attempt_id": work_attempt_id})
         return self.inspect_effect(idempotency_key) or {}

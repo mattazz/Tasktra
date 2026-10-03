@@ -12,6 +12,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path, PurePosixPath
+import stat
 import tempfile
 from typing import Mapping
 
@@ -320,14 +321,28 @@ def _reject_symlink_ancestors(path: Path) -> None:
     if metadata is None:
         raise ManifestError(f"Tasktra metadata path must be below .tasktra: {path}")
     root = metadata.parent
-    if root.is_symlink():
-        raise ManifestError(f"Tasktra root cannot be a symlink: {root}")
+    if _is_linklike(root):
+        raise ManifestError(f"Tasktra root cannot be a link or reparse point: {root}")
     relative = path.relative_to(root)
     cursor = root
     for part in relative.parts:
         cursor = cursor / part
-        if cursor.is_symlink():
-            raise ManifestError(f"Tasktra metadata path crosses a symlink: {relative.as_posix()}")
+        if _is_linklike(cursor):
+            raise ManifestError(
+                f"Tasktra metadata path crosses a link or reparse point: {relative.as_posix()}"
+            )
+
+
+def _is_linklike(path: Path) -> bool:
+    """Recognize POSIX links and Windows junctions/reparse points."""
+    is_junction = getattr(path, "is_junction", None)
+    if path.is_symlink() or bool(is_junction and is_junction()):
+        return True
+    try:
+        attributes = os.stat(path, follow_symlinks=False).st_file_attributes
+    except (AttributeError, OSError):
+        return False
+    return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
 
 
 def _read_json(path: Path) -> object:

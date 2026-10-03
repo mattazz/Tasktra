@@ -207,6 +207,14 @@ python -m tasktra upgrade --root . preview
 
 Apply or roll back only through the authority-gated commands printed by the preview. Retain snapshot and receipt files. If the runtime schema changes, Tasktra disables automatic file rollback and reports the exact database backup and SHA-256. Stop active work and obtain a human recovery decision before restoring that backup.
 
+Runtime upgrades also retain a prepared migration journal before committing the
+database change. Keep this journal even if an interruption prevents the final
+receipt from being written. Prepared evidence identifies the exact backup; it
+does not assert that the database committed. Recovery checks the on-disk schema
+before permitting file rollback and fails closed if that schema is unavailable.
+When recovery is required, CLI error output includes a structured `recovery`
+object with the available backup path and SHA-256.
+
 Explicitly trusted executable packs are full-host code execution. Checksums, environment scrubbing, and declared effects improve reviewability but do not create an operating-system sandbox.
 
 For a general runtime backup, first prevent new work and verify the ledger:

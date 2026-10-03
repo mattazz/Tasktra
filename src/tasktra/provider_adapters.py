@@ -468,12 +468,12 @@ class GitAdapter:
             if base is None and head is None:
                 if scope.ref is not None:
                     raise ProviderError("Git working-tree diff requires a repository scope without a ref")
-                result = self._run(["diff", "--no-ext-diff", "--", path])
+                result = self._run(["diff", "--no-ext-diff", "--no-textconv", "--", path])
             elif base is not None and head is not None:
                 base_oid, head_oid = _full_oid(base), _full_oid(head)
                 if scope.ref != head_oid:
                     raise ProviderError("Git object diff head differs from the authorized scope ref")
-                result = self._run(["diff", "--no-ext-diff", base_oid, head_oid, "--", path])
+                result = self._run(["diff", "--no-ext-diff", "--no-textconv", base_oid, head_oid, "--", path])
             else:
                 raise ProviderError("Git diff requires both base and head object ids")
         elif descriptor.request_kind == "git-log":

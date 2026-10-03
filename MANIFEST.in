@@ -5,3 +5,4 @@ recursive-include catalog *.toml *.md
 recursive-include docs *.md
 recursive-include examples *.md *.toml *.json *.py *.ts *.tsx *.js *.jsx
 recursive-include src/tasktra/schemas *.json
+recursive-include src/tasktra/portal_static *.html *.css *.js

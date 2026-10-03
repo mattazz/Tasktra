@@ -1,7 +1,8 @@
 from pathlib import Path
+import os
 import sys
 from tempfile import TemporaryDirectory
-from time import sleep
+from time import monotonic, sleep
 import unittest
 
 from tasktra.validation import MAX_CAPTURE_CHARS, ValidationError, parse_command, run_validations, validation_plan
@@ -102,6 +103,42 @@ class ValidationTests(unittest.TestCase):
             self.assertLessEqual(len(result.stderr), MAX_CAPTURE_CHARS)
             self.assertIn("bytes omitted", result.stdout)
             self.assertIn("bytes omitted", result.stderr)
+
+    def test_exited_parent_does_not_leave_descendants_holding_output_pipes(self):
+        with TemporaryDirectory() as directory:
+            marker = Path(directory) / "descendant-marker"
+            child = (
+                "import time; time.sleep(3); "
+                f"open({str(marker)!r}, 'w').write('survived')"
+            )
+            parent = (
+                "import subprocess, sys; "
+                f"subprocess.Popen([sys.executable, '-c', {child!r}])"
+            )
+            started = monotonic()
+            result = run_validations(directory, [python_argv(parent)], timeout_seconds=1)[0]
+            self.assertEqual(result.status, "passed", result.stderr)
+            self.assertLess(monotonic() - started, 2.5)
+            sleep(3.2)
+            self.assertFalse(marker.exists(), "exited validation parent left a descendant running")
+
+    @unittest.skipIf(os.name == "nt", "POSIX process group signal handling")
+    def test_timeout_kills_child_that_ignores_sigterm_when_parent_exits(self):
+        with TemporaryDirectory() as directory:
+            marker = Path(directory) / "descendant-marker"
+            child = (
+                "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "time.sleep(3); "
+                f"open({str(marker)!r}, 'w').write('survived')"
+            )
+            parent = (
+                "import subprocess, sys, time; "
+                f"subprocess.Popen([sys.executable, '-c', {child!r}]); time.sleep(10)"
+            )
+            result = run_validations(directory, [python_argv(parent)], timeout_seconds=1)[0]
+            self.assertEqual(result.status, "timed_out")
+            sleep(3.2)
+            self.assertFalse(marker.exists(), "SIGTERM-resistant descendant survived cleanup")
 
 
 if __name__ == "__main__":

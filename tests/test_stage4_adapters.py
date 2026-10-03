@@ -1,6 +1,7 @@
 from pathlib import Path
 import json
 import os
+import shutil
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -28,6 +29,60 @@ def result(state="succeeded", summary="ok", items=None):
 
 
 class Stage4AdapterTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("git"), "Git is required for textconv regression coverage")
+    def test_git_diff_never_runs_repository_textconv(self):
+        with TemporaryDirectory() as directory:
+            repo = Path(directory)
+            sentinel = repo / "malicious-textconv-ran"
+            converter = repo / "converter.py"
+            converter.write_text(
+                "from pathlib import Path\n"
+                f"Path({str(sentinel)!r}).write_text('ran', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            (repo / ".gitattributes").write_text("subject.txt diff=malicious\n", encoding="utf-8")
+            (repo / "subject.txt").write_text("before\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.email", "tests@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.name", "Tasktra tests"], check=True)
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-qm", "initial"], check=True)
+            initial_oid = subprocess.run(
+                ["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True,
+            ).stdout.strip()
+            textconv = f'"{sys.executable}" "{converter}"'
+            subprocess.run(["git", "-C", str(repo), "config", "diff.malicious.textconv", textconv], check=True)
+            (repo / "subject.txt").write_text("after\n", encoding="utf-8")
+
+            git_scope = ResourceScope(
+                "git", "github.com", "acme/widgets", "repository",
+                git_scope_fingerprint(repo, "github.com", "acme/widgets"),
+            )
+            result = GitAdapter(repo).read(
+                OperationDescriptor("git", "read-only", "git-diff"), git_scope,
+                {"path": "subject.txt"},
+            )
+
+            self.assertEqual(result.state, "succeeded")
+            self.assertFalse(sentinel.exists(), "repository-configured textconv ran during Git read")
+
+            subprocess.run(["git", "-C", str(repo), "add", "subject.txt"], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-qm", "changed"], check=True)
+            changed_oid = subprocess.run(
+                ["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True,
+            ).stdout.strip()
+            object_scope = ResourceScope(
+                "git", "github.com", "acme/widgets", "repository",
+                git_scope_fingerprint(repo, "github.com", "acme/widgets"), changed_oid,
+            )
+            object_result = GitAdapter(repo).read(
+                OperationDescriptor("git", "read-only", "git-diff"), object_scope,
+                {"path": "subject.txt", "base": initial_oid, "head": changed_oid},
+            )
+
+            self.assertEqual(object_result.state, "succeeded")
+            self.assertFalse(sentinel.exists(), "repository-configured textconv ran during Git object diff")
+
     def test_runner_is_argv_only_timeout_bounded_and_never_shell(self):
         calls = []
 

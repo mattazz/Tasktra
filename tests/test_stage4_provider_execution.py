@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -19,6 +20,17 @@ DESCRIPTOR = OperationDescriptor(
     "github", "external-communication", capability="issue-comment", action="remote-comment",
     resource_scope=SCOPE,
 )
+
+GIT_SCOPE = {
+    "provider": "git", "host": "github.com", "container": "acme/widgets",
+    "resource_kind": "repository", "resource": "a" * 64, "ref": "refs/heads/main",
+}
+GIT_DESCRIPTOR = OperationDescriptor(
+    "git", "repository-history", capability="git-commit", action="git-commit",
+    resource_scope=GIT_SCOPE,
+)
+
+
 def envelope():
     return {
         "kind": "tasktra.authority-envelope", "version": 2, "goal_id": "goal-one",
@@ -191,6 +203,89 @@ class ProviderEffectExecutionTests(unittest.TestCase):
 
         self.assertEqual(self.store.inspect_effect("active-dispatch")["status"], "executing")
         self.assertEqual(self.fake.calls, [])
+
+
+class GitCommitScopeAuthorizationTests(unittest.TestCase):
+    def setUp(self):
+        self.now = datetime.now(timezone.utc)
+        self.directory = TemporaryDirectory()
+        path = Path(self.directory.name) / "state.sqlite3"
+        StateStore(path).migrate()
+        self.store = AutonomyStore(path)
+        self.store.create_goal(goal_id="goal-one", title="Goal", description="Goal", acceptance=["Done"])
+        self.contract = {
+            "kind": "tasktra.authority-envelope", "version": 2, "goal_id": "goal-one",
+            "outcome": "Commit one scoped change", "motivation": "Scope regression", "author_id": "owner",
+            "acceptance_criteria": [{"id": "done", "statement": "Done"}],
+            "scope": {"paths": ["src"], "exclusions": ["src/envelope-denied"]},
+            "resource_scopes": [GIT_SCOPE],
+            "allowed_actions": ["goal-activate", "work-claim", "git-commit"],
+            "allowed_effects": ["local-reversible-write", "repository-history"],
+            "prohibited_actions": [], "quality_requirements": [],
+            "budgets": {"tokens": 20, "attempts": 3, "elapsed_seconds": 600, "concurrency": 1},
+            "dependencies": [], "checkpoints": [], "stop_conditions": [], "escalation_conditions": [],
+        }
+        self.digest = authority_envelope_sha256(self.contract)
+        self.store.define_goal_contract("goal-one", self.contract, actor_id="owner", at=self.now)
+        expiry = self.now + timedelta(minutes=10)
+        self.store.record_transition_approval(goal_id="goal-one", action="goal-activate", effect="local-reversible-write", envelope_sha256=self.digest, approver_id="human", performer_id="owner", valid_until=expiry, at=self.now)
+        self.store.activate_goal("goal-one", actor_id="owner", envelope_sha256=self.digest, at=self.now)
+        self.scope = {
+            "paths": ["src"],
+            "exclusions": ["src/envelope-denied", "src/unit-denied", "src/approval-denied"],
+        }
+        self.store.create_work_unit(goal_id="goal-one", work_unit_id="unit-one", title="Unit", scope=self.scope)
+        self.store.record_transition_approval(goal_id="goal-one", work_unit_id="unit-one", action="work-claim", effect="local-reversible-write", envelope_sha256=self.digest, approver_id="human", performer_id="worker", valid_until=expiry, at=self.now)
+        approval_kwargs = v3_approval_kwargs(
+            approval_id="git-commit-v3", goal_id="goal-one", work_unit_id="unit-one",
+            action="git-commit", effect="repository-history", scope=self.scope, resource_scope=GIT_SCOPE,
+            envelope_sha256=self.digest, approver_id="human", performer_id="worker",
+            valid_until=expiry, attested_at=self.now,
+        )
+        self.store.record_transition_approval(goal_id="goal-one", work_unit_id="unit-one", action="git-commit", effect="repository-history", envelope_sha256=self.digest, approver_id="human", performer_id="worker", scope=self.scope, resource_scope=GIT_SCOPE, valid_until=expiry, at=self.now, **approval_kwargs)
+        self.claim = self.store.claim_next_work(goal_id="goal-one", performer_id="worker", envelope_sha256=self.digest, lease_seconds=600, repository="repo", revision="abc", branch="main", workspace="work", at=self.now)
+        self.fake = FakeProvider(ProviderHealth("git", "available", "Git is available"))
+        self.registry = ProviderRegistry()
+        self.registry.register_provider("git", discovery=self.fake, operations={GIT_DESCRIPTOR: self.fake})
+        self.executor = ProviderEffectExecutor(self.store, self.registry)
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def _prepare(self, key, path):
+        return self.store.prepare_provider_effect(
+            idempotency_key=key, goal_id="goal-one", work_unit_id="unit-one",
+            operation_descriptor=GIT_DESCRIPTOR,
+            request={"paths": [path], "message": "Scoped commit", "expected_parent_oid": "0" * 40},
+            envelope_sha256=self.digest, performer_id="worker", work_attempt_id=self.claim["attempt_id"],
+            lease_token=self.claim["lease_token"], at=self.now,
+        )
+
+    def test_git_commit_paths_are_checked_before_prepare_and_dispatch(self):
+        with self.assertRaisesRegex(AutonomyError, "authority envelope scope"):
+            self._prepare("outside-envelope", "outside.txt")
+        with self.assertRaisesRegex(AutonomyError, "work-unit scope"):
+            self._prepare("outside-unit", "src/unit-denied/change.txt")
+        self.assertEqual(self.fake.calls, [])
+
+        self._prepare("dispatch-denied", "src/allowed.txt")
+        tampered_request = {
+            "authorized_performer_id": "worker",
+            "request": {"paths": ["src/unit-denied/change.txt"], "message": "Scoped commit", "expected_parent_oid": "0" * 40},
+        }
+        with self.store._connection() as connection:
+            connection.execute("UPDATE effect_intents SET request_json=? WHERE idempotency_key=?", (json.dumps(tampered_request), "dispatch-denied"))
+            StateStore._seal_current_state_in_transaction(connection, self.now.isoformat().replace("+00:00", "Z"))
+        with self.assertRaisesRegex(AutonomyError, "work-unit scope"):
+            self.executor.execute(idempotency_key="dispatch-denied", operation_descriptor=GIT_DESCRIPTOR,
+                                  performer_id="worker", lease_token=self.claim["lease_token"], at=self.now)
+        self.assertEqual(self.fake.calls, [])
+
+        self._prepare("scoped-success", "src/allowed.txt")
+        completed = self.executor.execute(idempotency_key="scoped-success", operation_descriptor=GIT_DESCRIPTOR,
+                                          performer_id="worker", lease_token=self.claim["lease_token"], at=self.now)
+        self.assertEqual(completed["outcome"], "succeeded")
+        self.assertEqual([call[0] for call in self.fake.calls], ["effect"])
 
 
 if __name__ == "__main__":

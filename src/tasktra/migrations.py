@@ -23,11 +23,20 @@ from typing import Callable, Mapping, Sequence
 MAX_MIGRATION_FILES = 512
 MAX_MIGRATION_BYTES = 16 * 1024 * 1024
 MAX_MIGRATION_OUTPUT = 64 * 1024
+MAX_PREPARED_RECOVERY_BYTES = 64 * 1024
 SNAPSHOT_SCHEMA_VERSION = 1
 
 
 class MigrationError(ValueError):
     """Raised when migration execution cannot remain bounded and recoverable."""
+
+
+class CommittedRuntimeRecoveryRequired(MigrationError):
+    """A database commit completed, so automatic file rollback is unsafe."""
+
+    def __init__(self, message: str, verification: Mapping[str, object]):
+        self.verification = dict(verification)
+        super().__init__(message)
 
 
 @dataclass(frozen=True)
@@ -88,6 +97,7 @@ def apply_migration_plan(
     allow_network: bool = False,
     timeout_seconds: int = 300,
     verifier: Callable[[], Mapping[str, object]] | None = None,
+    recovery_probe: Callable[[], Mapping[str, object] | None] | None = None,
 ) -> MigrationExecution:
     """Apply an exact preview with automatic rollback on every failure.
 
@@ -110,6 +120,7 @@ def apply_migration_plan(
     before_sha256 = sha256(_canonical(entries)).hexdigest()
     snapshot = _write_snapshot(project, plan_sha256, write_paths, entries, before_sha256)
     command_results: list[dict[str, object]] = []
+    verification: dict[str, object] = {}
     try:
         with tempfile.TemporaryDirectory(prefix="tasktra-upgrade-") as staging_directory:
             staging = Path(staging_directory)
@@ -193,10 +204,45 @@ def apply_migration_plan(
             verification,
         )
     except BaseException as error:
-        restored = rollback_migration(project, plan_sha256, expected_before_sha256=before_sha256)
-        raise MigrationError(
-            f"migration failed and snapshot rollback completed ({restored['restored_sha256']}): {error}"
-        ) from error
+        probe_evidence: dict[str, object] = {}
+        if recovery_probe is not None:
+            try:
+                result = recovery_probe()
+                if result is not None:
+                    probe_evidence = dict(result)
+            except BaseException as probe_error:
+                probe_evidence = {
+                    "runtime_schema_changed": True,
+                    "runtime_schema_indeterminate": True,
+                    "recovery_probe_error": str(probe_error),
+                }
+        if _requires_runtime_recovery(probe_evidence):
+            recovery = CommittedRuntimeRecoveryRequired(
+                "runtime schema migration outcome is changed or indeterminate; recovery is required "
+                "using the retained database backup "
+                f"{probe_evidence.get('runtime_backup_path')}: {error}",
+                probe_evidence,
+            )
+        elif isinstance(error, CommittedRuntimeRecoveryRequired):
+            recovery = error
+        elif _requires_runtime_recovery(verification):
+            recovery = CommittedRuntimeRecoveryRequired(
+                "runtime schema committed and a post-verification operation failed; recovery is "
+                "required using the retained database backup "
+                f"{verification.get('runtime_backup_path')}: {error}",
+                verification,
+            )
+        else:
+            restored = rollback_migration(
+                project, plan_sha256, expected_before_sha256=before_sha256, _allow_prepared=True,
+            )
+            raise MigrationError(
+                f"migration failed and snapshot rollback completed ({restored['restored_sha256']}): {error}"
+            ) from error
+        _write_runtime_recovery_receipt(
+            snapshot, plan_sha256, before_sha256, project, write_paths, command_results, recovery,
+        )
+        raise recovery
 
 
 def rollback_migration(
@@ -204,11 +250,14 @@ def rollback_migration(
     plan_sha256: str,
     *,
     expected_before_sha256: str,
+    _allow_prepared: bool = False,
 ) -> dict[str, object]:
     """Restore one immutable pre-mutation snapshot and verify its digest."""
     _require_sha256(plan_sha256, "plan_sha256")
     project = Path(root).resolve()
     snapshot = _snapshot_path(project, plan_sha256)
+    if not _allow_prepared and any(snapshot.parent.glob("prepared-*.json")):
+        raise MigrationError("prepared runtime recovery evidence requires upgrade-aware rollback")
     data = _read_snapshot(snapshot)
     if data["plan_sha256"] != plan_sha256:
         raise MigrationError("snapshot plan digest does not match its directory")
@@ -528,10 +577,201 @@ def _file_entry(path: str, raw: bytes) -> dict[str, object]:
 
 
 def _write_json(path: Path, value: Mapping[str, object]) -> None:
+    _reject_metadata_link_ancestors(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    if _is_linklike(path.parent) or _is_linklike(path):
-        raise MigrationError(f"migration journal path crosses a link or reparse point: {path}")
+    _reject_metadata_link_ancestors(path)
     _atomic_bytes(path, json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n")
+
+
+def _write_runtime_recovery_receipt(
+    snapshot: Path,
+    plan_sha256: str,
+    before_sha256: str,
+    project: Path,
+    write_paths: Sequence[str],
+    command_results: Sequence[Mapping[str, object]],
+    recovery: CommittedRuntimeRecoveryRequired,
+) -> None:
+    """Record recovery evidence without ever converting a committed DB state into rollback."""
+    try:
+        after_entries = _capture_entries(project, write_paths)
+        receipt = {
+            "schema_version": SNAPSHOT_SCHEMA_VERSION,
+            "plan_sha256": plan_sha256,
+            "before_sha256": before_sha256,
+            "after_sha256": sha256(_canonical(after_entries)).hexdigest(),
+            "commands": [dict(item) for item in command_results],
+            "verification": dict(recovery.verification),
+            "rollback_available": False,
+            "recovery_required": True,
+            "failure": str(recovery),
+        }
+        _write_json(snapshot.parent / "receipt.json", receipt)
+    except BaseException as receipt_error:
+        raise CommittedRuntimeRecoveryRequired(
+            f"{recovery}; recovery receipt could not be written: {receipt_error}",
+            recovery.verification,
+        ) from receipt_error
+
+
+def write_prepared_runtime_recovery(
+    root: Path | str,
+    *,
+    migration_plan_sha256: str,
+    upgrade_plan_sha256: str,
+    attempt_id: str,
+    database_path: str,
+    verification: Mapping[str, object],
+) -> Path:
+    """Persist exact, plan-bound runtime recovery evidence before commit."""
+    _require_sha256(migration_plan_sha256, "migration_plan_sha256")
+    _require_sha256(upgrade_plan_sha256, "upgrade_plan_sha256")
+    backup_sha256 = verification.get("runtime_backup_sha256")
+    _require_sha256(backup_sha256, "runtime_backup_sha256")
+    backup_path = verification.get("runtime_backup_path")
+    if not isinstance(backup_path, str) or not backup_path:
+        raise MigrationError("runtime_backup_path must be a non-empty path")
+    if len(attempt_id) != 32 or any(character not in "0123456789abcdef" for character in attempt_id):
+        raise MigrationError("runtime recovery attempt_id must be a UUID hex value")
+    if not database_path:
+        raise MigrationError("runtime recovery database_path must be non-empty")
+    project = Path(root).resolve()
+    path = _snapshot_path(project, migration_plan_sha256).parent / f"prepared-{attempt_id}.json"
+    prepared_verification = {
+        key: verification[key]
+        for key in (
+            "runtime_schema_before", "runtime_schema_after", "runtime_schema_changed",
+            "runtime_backup_path", "runtime_backup_sha256",
+        )
+    }
+    payload = {
+        "schema_version": SNAPSHOT_SCHEMA_VERSION,
+        "kind": "runtime-recovery-prepared",
+        "phase": "prepared",
+        "attempt_id": attempt_id,
+        "migration_plan_sha256": migration_plan_sha256,
+        "upgrade_plan_sha256": upgrade_plan_sha256,
+        "database_path": database_path,
+        "runtime_schema_before": verification.get("runtime_schema_before"),
+        "runtime_schema_target": verification.get("runtime_schema_after"),
+        "verification": prepared_verification,
+    }
+    _write_json(path, payload)
+    return path
+
+
+def read_prepared_runtime_recoveries(
+    root: Path | str, *, migration_plan_sha256: str,
+) -> tuple[dict[str, object], ...]:
+    """Read bounded, non-redirected prepared journals for one migration plan."""
+    _require_sha256(migration_plan_sha256, "migration_plan_sha256")
+    project = Path(root).resolve()
+    directory = _snapshot_path(project, migration_plan_sha256).parent
+    _reject_metadata_link_ancestors(directory / "prepared-placeholder.json")
+    prepared: list[dict[str, object]] = []
+    for path in sorted(directory.glob("prepared-*.json")):
+        _reject_metadata_link_ancestors(path)
+        try:
+            with path.open("rb") as stream:
+                raw = stream.read(MAX_PREPARED_RECOVERY_BYTES + 1)
+        except OSError as error:
+            raise MigrationError(f"prepared runtime recovery evidence is unreadable: {path}") from error
+        if len(raw) > MAX_PREPARED_RECOVERY_BYTES:
+            raise MigrationError("prepared runtime recovery evidence exceeds its byte bound")
+        try:
+            value = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise MigrationError("prepared runtime recovery evidence is invalid JSON") from error
+        prepared.append(_validated_prepared_runtime_recovery(project, value, migration_plan_sha256))
+    return tuple(prepared)
+
+
+def _validated_prepared_runtime_recovery(
+    project: Path, value: object, migration_plan_sha256: str,
+) -> dict[str, object]:
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version", "kind", "phase", "attempt_id", "migration_plan_sha256",
+        "upgrade_plan_sha256", "database_path", "runtime_schema_before",
+        "runtime_schema_target", "verification",
+    }:
+        raise MigrationError("prepared runtime recovery evidence has missing or unknown fields")
+    if value["schema_version"] != SNAPSHOT_SCHEMA_VERSION or value["kind"] != "runtime-recovery-prepared" or value["phase"] != "prepared":
+        raise MigrationError("prepared runtime recovery evidence has an invalid identity")
+    if value["migration_plan_sha256"] != migration_plan_sha256:
+        raise MigrationError("prepared runtime recovery evidence is bound to another migration plan")
+    _require_sha256(value["upgrade_plan_sha256"], "prepared upgrade_plan_sha256")
+    attempt_id = value["attempt_id"]
+    if not isinstance(attempt_id, str) or len(attempt_id) != 32 or any(char not in "0123456789abcdef" for char in attempt_id):
+        raise MigrationError("prepared runtime recovery attempt_id is invalid")
+    before, target = value["runtime_schema_before"], value["runtime_schema_target"]
+    if not isinstance(before, int) or isinstance(before, bool) or not isinstance(target, int) or isinstance(target, bool):
+        raise MigrationError("prepared runtime recovery schema values are invalid")
+    verification = value["verification"]
+    if not isinstance(verification, dict) or set(verification) != {
+        "runtime_schema_before", "runtime_schema_after", "runtime_schema_changed",
+        "runtime_backup_path", "runtime_backup_sha256",
+    }:
+        raise MigrationError("prepared runtime recovery verification has missing or unknown fields")
+    if verification["runtime_schema_before"] != before or verification["runtime_schema_after"] != target or verification["runtime_schema_changed"] is not True:
+        raise MigrationError("prepared runtime recovery verification does not match its schema transition")
+    backup_path, backup_sha256 = verification["runtime_backup_path"], verification["runtime_backup_sha256"]
+    if not isinstance(backup_path, str) or not backup_path:
+        raise MigrationError("prepared runtime recovery backup path is invalid")
+    _require_sha256(backup_sha256, "prepared runtime backup sha256")
+    database_path = value["database_path"]
+    if not isinstance(database_path, str) or not database_path:
+        raise MigrationError("prepared runtime recovery database path is invalid")
+    _safe_project_database_path(project, database_path)
+    return dict(value)
+
+
+def _safe_project_database_path(project: Path, raw: str) -> Path:
+    candidate = Path(raw)
+    try:
+        relative = candidate.relative_to(project)
+    except ValueError as error:
+        raise MigrationError("prepared runtime database path escapes the project") from error
+    cursor = project
+    if _is_linklike(cursor):
+        raise MigrationError("prepared runtime project root is a link or reparse point")
+    for part in relative.parts:
+        cursor = cursor / part
+        if _is_linklike(cursor):
+            raise MigrationError("prepared runtime database path crosses a link or reparse point")
+    try:
+        resolved = candidate.resolve(strict=False)
+        resolved.relative_to(project.resolve(strict=False))
+    except (OSError, ValueError) as error:
+        raise MigrationError("prepared runtime database path escapes the project") from error
+    return resolved
+
+
+def _requires_runtime_recovery(evidence: Mapping[str, object]) -> bool:
+    return (
+        evidence.get("runtime_schema_changed") is True
+        or evidence.get("runtime_schema_indeterminate") is True
+    )
+
+
+def _reject_metadata_link_ancestors(path: Path) -> None:
+    """Reject metadata paths redirected by POSIX links or Windows reparse points."""
+    metadata = next((parent for parent in (path.parent, *path.parents) if parent.name == ".tasktra"), None)
+    if metadata is None:
+        raise MigrationError(f"migration journal path must be below .tasktra: {path}")
+    project = metadata.parent
+    if _is_linklike(project):
+        raise MigrationError(f"migration project root is a link or reparse point: {project}")
+    try:
+        relative = path.relative_to(project)
+    except ValueError as error:
+        raise MigrationError(f"migration journal path escapes project: {path}") from error
+    cursor = project
+    for part in relative.parts:
+        cursor = cursor / part
+        if _is_linklike(cursor):
+            raise MigrationError(
+                f"migration journal path crosses a link or reparse point: {relative.as_posix()}"
+            )
 
 
 def _atomic_bytes(path: Path, raw: bytes) -> None:

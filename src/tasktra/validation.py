@@ -118,7 +118,14 @@ class _WindowsJob:
             ]
 
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
         kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
         handle = kernel32.CreateJobObjectW(None, None)
         if not handle:
             raise ctypes.WinError(ctypes.get_last_error())
@@ -140,8 +147,13 @@ class _WindowsJob:
         if self._handle is None:
             return
         import ctypes
+        from ctypes import wintypes
 
-        ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(self._handle)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        if not kernel32.CloseHandle(self._handle):
+            raise ctypes.WinError(ctypes.get_last_error())
         self._handle = None
 
 
@@ -217,7 +229,11 @@ def _run_one(project: Path, argv: ValidationArgv, timeout_seconds: int) -> Valid
         status = "timed_out"
         _terminate_process_tree(running)
     finally:
-        _finish_readers(running, readers)
+        try:
+            _finish_readers(running, readers)
+        except ValidationError as error:
+            status = "failed"
+            stderr.append(f"\n{error}".encode())
 
     return ValidationResult(
         argv,
@@ -276,27 +292,30 @@ def _drain(stream: object, capture: _BoundedCapture) -> None:
 
 
 def _finish_readers(running: _RunningProcess, readers: tuple[Thread, Thread]) -> None:
-    # A descendant intentionally detached from the group can retain a pipe.
-    # Never let that keep the coordinator blocked; normal group termination
-    # closes both streams before this short join expires.
+    # The parent can exit before a descendant releases inherited pipes. Clean
+    # up the owned process boundary before closing a reader's buffered stream:
+    # close() otherwise blocks on the lock held by its pending read().
+    if running.windows_job is not None:
+        running.windows_job.close()
+    elif os.name != "nt":
+        _terminate_posix_group(running.process)
     for reader in readers:
         reader.join(timeout=1)
     process = running.process
-    if process.stdout is not None:
-        process.stdout.close()
-    if process.stderr is not None:
-        process.stderr.close()
-    if running.windows_job is not None:
-        running.windows_job.close()
+    for stream, reader in zip((process.stdout, process.stderr), readers):
+        if stream is not None and not reader.is_alive():
+            stream.close()
+    if any(reader.is_alive() for reader in readers):
+        raise ValidationError("validation descendants retained output pipes; process cleanup could not be verified")
 
 
 def _terminate_process_tree(running: _RunningProcess) -> None:
     """Terminate a timed-out command and ordinary descendants before returning."""
     process = running.process
-    if process.poll() is not None:
-        return
     if os.name != "nt":
         _terminate_posix_group(process)
+        return
+    if process.poll() is not None and running.windows_job is None:
         return
     _terminate_windows_tree(process, running.windows_job)
 
@@ -309,11 +328,14 @@ def _terminate_posix_group(process: subprocess.Popen[bytes]) -> None:
     try:
         process.wait(timeout=_TERMINATION_GRACE_SECONDS)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait(timeout=_TERMINATION_GRACE_SECONDS)
+        pass
+    # A parent may exit on SIGTERM while a descendant ignores it. The group,
+    # rather than the parent's return code, is the cleanup boundary.
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait(timeout=_TERMINATION_GRACE_SECONDS)
 
 
 def _terminate_windows_tree(process: subprocess.Popen[bytes], job: _WindowsJob | None) -> None:

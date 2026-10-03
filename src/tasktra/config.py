@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 import os
 from pathlib import Path
 import re
@@ -10,6 +11,7 @@ import stat
 import tomllib
 from types import MappingProxyType
 from typing import Mapping
+from uuid import uuid4
 
 from .contracts import ContractError, validate_named
 from .identifiers import IdentifierError, require_identifier
@@ -89,10 +91,11 @@ def _is_linklike(path: Path) -> bool:
 
 
 def default_config_text(name: str) -> str:
-    safe_name = name.replace('"', "'") or "tasktra-project"
+    # JSON and TOML share these escapes, except TOML also forbids literal DEL.
+    safe_name = json.dumps(name or "tasktra-project", ensure_ascii=False).replace("\x7f", "\\u007f")
     return f'''# Tasktra project profile. Project-owned settings belong here.
 [project]
-name = "{safe_name}"
+name = {safe_name}
 config_version = 1
 
 [runtime]
@@ -113,11 +116,36 @@ commands = []
 
 def initialize_project(root: Path, *, name: str | None = None) -> Path:
     """Create only the project definition; never overwrite an existing one."""
+    if _is_linklike(root):
+        raise ConfigError("project root crosses a symbolic link or reparse point")
+    project = root.resolve(strict=False)
+    root.mkdir(parents=True, exist_ok=True)
     destination = config_path(root)
-    if destination.exists():
-        raise FileExistsError(f"Tasktra configuration already exists: {destination}")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(default_config_text(name or root.name), encoding="utf-8")
+
+    def check_destination() -> None:
+        for path in (root, destination.parent, destination):
+            if _is_linklike(path):
+                raise ConfigError(f"configuration crosses a symbolic link or reparse point: {path}")
+        if destination.parent.resolve(strict=False).parent != project:
+            raise ConfigError("configuration must remain inside the project root")
+        if destination.exists():
+            raise FileExistsError(f"Tasktra configuration already exists: {destination}")
+
+    check_destination()
+    destination.parent.mkdir(exist_ok=True)
+    check_destination()
+    temporary = destination.with_name(f".{CONFIG_FILENAME}.{uuid4().hex}.tmp")
+    try:
+        with temporary.open("x", encoding="utf-8", newline="\n") as handle:
+            handle.write(default_config_text(name or root.name))
+            handle.flush()
+            os.fsync(handle.fileno())
+        check_destination()
+        # Publish complete bytes without replacing a profile created concurrently.
+        os.link(temporary, destination)
+    finally:
+        if not _is_linklike(destination.parent):
+            temporary.unlink(missing_ok=True)
     return destination
 
 

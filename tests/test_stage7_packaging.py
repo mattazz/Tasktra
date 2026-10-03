@@ -71,6 +71,9 @@ class PackagingTests(unittest.TestCase):
                 "tasktra/catalog/roles/scout.md",
                 "tasktra/catalog/packs/core/pack.toml",
                 "tasktra/schemas/project.json",
+                "tasktra/portal_static/index.html",
+                "tasktra/portal_static/styles.css",
+                "tasktra/portal_static/app.js",
             ):
                 self.assertIn(required, names)
 

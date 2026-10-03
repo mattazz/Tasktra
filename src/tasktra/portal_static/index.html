@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Tasktra · Mission control</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <style>
+      [hidden] {
+        display: none !important;
+      }
+      .hero {
+        border-radius: 0 0 1.1rem 1.1rem;
+      }
+      .scope-bar {
+        display: flex;
+        align-items: center;
+        gap: 0.45rem;
+        padding: 0.55rem 0.75rem;
+        margin-top: 0.75rem;
+        border: 1px solid #ff8a6555;
+        background: #ff8a6512;
+        border-radius: 0.55rem;
+        color: #ffd3c3;
+        font-size: 0.75rem;
+      }
+      .scope-bar strong {
+        color: var(--ink);
+      }
+      .overview-agents {
+        display: flex;
+        gap: 0.6rem;
+        align-items: center;
+        margin-top: 1.15rem;
+        padding-top: 0.9rem;
+        border-top: 1px solid #ffffff0d;
+        overflow: auto;
+      }
+      .station-label {
+        font-size: 0.66rem;
+        color: var(--muted);
+        white-space: nowrap;
+        margin-right: 0.15rem;
+      }
+      .station-agent {
+        display: flex;
+        align-items: center;
+        gap: 0.45rem;
+        border: 1px solid #ffffff10;
+        background: #0c1728a8;
+        border-radius: 0.55rem;
+        padding: 0.38rem 0.5rem;
+        min-width: 0;
+      }
+      .station-agent-name {
+        font-size: 0.68rem;
+        font-weight: 760;
+        white-space: nowrap;
+      }
+      .station-agent .status {
+        font-size: 0.56rem;
+        padding: 0.18rem 0.35rem;
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <div class="app-shell">
+      <header class="topbar">
+        <a
+          class="brand"
+          href="#overview"
+          aria-label="Tasktra mission control, overview"
+        >
+          <span class="brand-mark" aria-hidden="true"
+            ><i></i><i></i><i></i
+          ></span>
+          <span>tasktra</span><em>/ mission control</em>
+        </a>
+        <div class="header-actions">
+          <div
+            class="connection"
+            id="connection-status"
+            role="status"
+            aria-live="polite"
+          >
+            <span class="signal"></span><span>Connecting</span>
+          </div>
+          <button
+            class="icon-button"
+            id="motion-toggle"
+            type="button"
+            aria-pressed="true"
+            title="Toggle ambient motion"
+          >
+            <span aria-hidden="true">✦</span
+            ><span class="sr-only">Toggle ambient motion</span>
+          </button>
+          <button
+            class="button button-quiet"
+            id="demo-header-button"
+            type="button"
+          >
+            Demo
+          </button>
+          <button class="button button-quiet" id="refresh-button" type="button">
+            Refresh
+          </button>
+          <button
+            class="button button-quiet"
+            id="live-toggle"
+            type="button"
+            aria-pressed="true"
+          >
+            Live: on
+          </button>
+        </div>
+      </header>
+
+      <div
+        class="notice-bar"
+        id="notice-bar"
+        hidden
+        role="status"
+        aria-live="polite"
+      ></div>
+
+      <main id="main-content">
+        <section class="hero" aria-labelledby="page-title">
+          <div class="hero-copy">
+            <p class="eyebrow">Mission control</p>
+            <h1 id="page-title">Tasktra</h1>
+            <p class="subhead" id="project-summary">
+              Loading your workspace signal…
+            </p>
+            <div class="hero-meta">
+              <span id="last-updated">Waiting for the first snapshot</span
+              ><span aria-hidden="true">·</span
+              ><span id="mode-label">Live workspace</span>
+            </div>
+          </div>
+          <div
+            class="mission-scene"
+            aria-label="Illustration of Tasktra agents coordinating work"
+          >
+            <div class="orb orb-one"></div>
+            <div class="orb orb-two"></div>
+            <div class="orbit orbit-a"></div>
+            <div class="orbit orbit-b"></div>
+            <div class="station station-left">
+              <span class="screen"><b></b><b></b></span>
+            </div>
+            <div class="station station-right">
+              <span class="screen"><b></b><b></b></span>
+            </div>
+            <div class="bot bot-main">
+              <span class="antenna"></span
+              ><span class="face"><i></i><i></i></span
+              ><span class="bot-body"></span>
+            </div>
+            <div class="bot bot-mini">
+              <span class="face"><i></i><i></i></span>
+            </div>
+            <span class="scene-caption">agent constellation</span>
+          </div>
+        </section>
+
+        <nav class="view-tabs" aria-label="Portal views" role="tablist">
+          <button
+            role="tab"
+            id="tab-overview"
+            aria-selected="true"
+            aria-controls="view-overview"
+            data-view="overview"
+          >
+            Overview
+          </button>
+          <button
+            role="tab"
+            id="tab-goals"
+            aria-selected="false"
+            aria-controls="view-goals"
+            data-view="goals"
+          >
+            Goals <span id="goal-tab-count">0</span>
+          </button>
+          <button
+            role="tab"
+            id="tab-jobs"
+            aria-selected="false"
+            aria-controls="view-jobs"
+            data-view="jobs"
+          >
+            Jobs <span id="job-tab-count">0</span>
+          </button>
+          <button
+            role="tab"
+            id="tab-agents"
+            aria-selected="false"
+            aria-controls="view-agents"
+            data-view="agents"
+          >
+            Agents <span id="agent-tab-count">0</span>
+          </button>
+        </nav>
+        <div class="scope-bar" id="scope-bar" hidden aria-live="polite">
+          <span>Showing goal: <strong id="scope-goal-title"></strong></span
+          ><button class="text-button" id="clear-goal-scope" type="button">
+            Clear goal filter
+          </button>
+        </div>
+
+        <section
+          class="metrics"
+          aria-label="Global workspace summary"
+          id="metrics"
+        ></section>
+
+        <section class="dashboard-grid">
+          <div
+            class="panel primary-panel"
+            id="view-overview"
+            role="tabpanel"
+            aria-labelledby="tab-overview"
+          >
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Work in orbit</p>
+                <h2>Goal progress</h2>
+              </div>
+              <button
+                class="text-button"
+                type="button"
+                data-switch-view="goals"
+              >
+                See all goals <span aria-hidden="true">→</span>
+              </button>
+            </div>
+            <div id="overview-goals"></div>
+            <div
+              class="overview-agents"
+              id="overview-agents"
+              aria-label="Live agent station"
+            ></div>
+          </div>
+          <aside
+            class="panel activity-panel"
+            aria-labelledby="activity-heading"
+          >
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Recent signal</p>
+                <h2 id="activity-heading">Activity</h2>
+              </div>
+            </div>
+            <ol class="activity-feed" id="activity-feed"></ol>
+          </aside>
+        </section>
+
+        <section
+          class="view-section"
+          id="view-goals"
+          role="tabpanel"
+          aria-labelledby="tab-goals"
+          hidden
+        >
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Intent map</p>
+              <h2>Goals</h2>
+            </div>
+            <p id="goals-caption">Select a goal to trace its work.</p>
+          </div>
+          <div class="goal-grid" id="goals-grid"></div>
+        </section>
+
+        <section
+          class="view-section"
+          id="view-jobs"
+          role="tabpanel"
+          aria-labelledby="tab-jobs"
+          hidden
+        >
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Execution queue</p>
+              <h2>Jobs</h2>
+            </div>
+            <p id="jobs-caption">Every job is shown with its recorded state.</p>
+          </div>
+          <div class="toolbar" aria-label="Filter jobs">
+            <label class="search"
+              ><span class="sr-only">Search jobs</span
+              ><input
+                id="job-search"
+                type="search"
+                placeholder="Search jobs or owners" /></label
+            ><label class="select-label"
+              >Status
+              <select id="job-status-filter">
+                <option value="all">All states</option>
+              </select></label
+            ><button class="text-button" id="clear-job-filters" type="button">
+              Clear filters
+            </button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Job</th>
+                  <th scope="col">State</th>
+                  <th scope="col">Owner</th>
+                  <th scope="col">Heartbeat</th>
+                  <th scope="col">Attempts</th>
+                  <th scope="col"><span class="sr-only">Details</span></th>
+                </tr>
+              </thead>
+              <tbody id="jobs-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section
+          class="view-section"
+          id="view-agents"
+          role="tabpanel"
+          aria-labelledby="tab-agents"
+          hidden
+        >
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Agent roster</p>
+              <h2>Agents</h2>
+            </div>
+            <p>Recorded agents and their last known state.</p>
+          </div>
+          <div class="agent-grid" id="agents-grid"></div>
+        </section>
+
+        <section
+          class="panel detail-panel"
+          id="detail-panel"
+          aria-labelledby="detail-title"
+          hidden
+        >
+          <div class="detail-heading">
+            <div>
+              <p class="eyebrow" id="detail-kind">Selected record</p>
+              <h2 id="detail-title" tabindex="-1">Details</h2>
+            </div>
+            <button
+              class="icon-button"
+              id="close-detail"
+              type="button"
+              aria-label="Close detail panel"
+            >
+              ×
+            </button>
+          </div>
+          <div id="detail-content"></div>
+        </section>
+
+        <section class="empty-state" id="empty-state" hidden>
+          <div class="empty-orbit" aria-hidden="true"><span></span><i></i></div>
+          <p class="eyebrow">Awaiting a mission</p>
+          <h2>No tracked work yet</h2>
+          <p>
+            Start Tasktra’s local workflow to record a goal and its work units.
+            This dashboard will show only recorded project state.
+          </p>
+          <div class="empty-actions">
+            <button class="button button-accent" id="demo-button" type="button">
+              Explore demo</button
+            ><span>Client-only representative data</span>
+          </div>
+        </section>
+      </main>
+      <footer>
+        Tasktra local portal <span aria-hidden="true">·</span>
+        <span id="footer-state">Awaiting workspace state</span>
+      </footer>
+    </div>
+    <script src="/app.js" defer></script>
+  </body>
+</html>

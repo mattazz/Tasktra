@@ -8,8 +8,10 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import stat
 import sys
 import sysconfig
+import tempfile
 import tomllib
 from typing import Any, Sequence
 
@@ -35,7 +37,7 @@ from .manifest import (
     write_manifest,
 )
 from .operations import MAX_AUDIT_EXPORT, MAX_DETAIL_LIMIT, export_audit, operational_status
-from .migrations import MigrationError
+from .migrations import CommittedRuntimeRecoveryRequired, MigrationError
 from .contracts import validate_named
 from .providers import (
     MAX_PROVIDER_JSON_BYTES,
@@ -129,6 +131,11 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--root", default=".")
     status.add_argument("--goal-id")
     status.add_argument("--detail-limit", type=int, default=0)
+
+    portal = subcommands.add_parser("portal", help="Open a read-only local progress dashboard")
+    portal.add_argument("--root", default=".")
+    portal.add_argument("--port", type=int, default=8765, help="Loopback port (0 selects an available port)")
+    portal.add_argument("--open", action="store_true", help="Open the portal in the default browser")
 
     doctor = subcommands.add_parser("doctor", help="Inspect configuration and local runtime availability")
     doctor.add_argument("--root", default=".")
@@ -987,12 +994,25 @@ def _compile(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             "stale managed output remains; review it and rerun with --prune-stale "
             "to delete only files unchanged since the prior manifest"
         )
-    if drift.stale:
-        _prune_stale_managed_outputs(root, drift.stale, previous_manifest)
-
-    written = write_projection(root, projection)
-    write_manifest(root, desired_manifest)
-    write_lockfile(root, desired_lock)
+    affected_paths = {
+        root.joinpath(*relative.parts)
+        for relative in projection.files
+    }
+    affected_paths.update(root.joinpath(*relative.parts) for relative in drift.stale)
+    affected_paths.update({
+        root / ".tasktra" / "generated" / "manifest.json",
+        root / ".tasktra" / "tasktra.lock",
+    })
+    before_write = _snapshot_compile_outputs(root, affected_paths)
+    try:
+        if drift.stale:
+            _prune_stale_managed_outputs(root, drift.stale, previous_manifest)
+        written = write_projection(root, projection)
+        write_manifest(root, desired_manifest)
+        write_lockfile(root, desired_lock)
+    except BaseException:
+        _restore_compile_outputs(root, before_write)
+        raise
     return {
         "ok": True,
         "action": "compile",
@@ -1000,6 +1020,89 @@ def _compile(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         "manifest_sha256": desired_manifest.digest,
         **report,
     }, 0
+
+
+def _snapshot_compile_outputs(root: Path, paths: set[Path]) -> tuple[tuple[int, int], dict[Path, bytes | None]]:
+    """Capture only generated and metadata files that this compile may change."""
+    root_identity = _compile_root_identity(root)
+    snapshot: dict[Path, bytes | None] = {}
+    for path in sorted(paths):
+        _validate_compile_output_path(root, root_identity, path)
+        if not path.exists():
+            snapshot[path] = None
+        elif path.is_file():
+            snapshot[path] = path.read_bytes()
+        else:
+            raise ManifestError(f"compile output is not a regular file: {path}")
+    return root_identity, snapshot
+
+
+def _restore_compile_outputs(root: Path, captured: tuple[tuple[int, int], dict[Path, bytes | None]]) -> None:
+    """Restore the bounded pre-compile state after any fallible write fails."""
+    root_identity, snapshot = captured
+    for path, raw in snapshot.items():
+        _validate_compile_output_path(root, root_identity, path)
+        if raw is None:
+            if path.is_file():
+                _validate_compile_output_path(root, root_identity, path)
+                path.unlink()
+            continue
+        _validate_compile_output_path(root, root_identity, path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _validate_compile_output_path(root, root_identity, path)
+        descriptor, temporary_name = tempfile.mkstemp(prefix=".tasktra-compile-", suffix=".tmp", dir=path.parent)
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(raw)
+                handle.flush()
+                os.fsync(handle.fileno())
+            _validate_compile_output_path(root, root_identity, path)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def _compile_root_identity(root: Path) -> tuple[int, int]:
+    if _is_linklike(root):
+        raise ManifestError(f"compile root cannot be a link or reparse point: {root}")
+    try:
+        status = os.stat(root, follow_symlinks=False)
+    except OSError as error:
+        raise ManifestError(f"compile root is unavailable: {root}") from error
+    if not stat.S_ISDIR(status.st_mode):
+        raise ManifestError(f"compile root is not a directory: {root}")
+    return status.st_dev, status.st_ino
+
+
+def _validate_compile_output_path(root: Path, root_identity: tuple[int, int], path: Path) -> None:
+    """Bind rollback writes to the original root and reject redirected ancestors."""
+    if _compile_root_identity(root) != root_identity:
+        raise ManifestError("compile root changed while restoring generated output")
+    try:
+        relative = path.relative_to(root)
+    except ValueError as error:
+        raise ManifestError(f"compile output escapes the project root: {path}") from error
+    cursor = root
+    for part in relative.parts:
+        cursor = cursor / part
+        if _is_linklike(cursor):
+            raise ManifestError(f"compile output crosses a link or reparse point: {relative.as_posix()}")
+    try:
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
+    except (OSError, ValueError) as error:
+        raise ManifestError(f"compile output escapes the project root: {relative.as_posix()}") from error
+
+
+def _is_linklike(path: Path) -> bool:
+    is_junction = getattr(path, "is_junction", None)
+    if path.is_symlink() or bool(is_junction and is_junction()):
+        return True
+    try:
+        attributes = os.stat(path, follow_symlinks=False).st_file_attributes
+    except (AttributeError, OSError):
+        return False
+    return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
 
 
 def _packs(args: argparse.Namespace) -> dict[str, Any]:
@@ -1710,10 +1813,36 @@ def _effect(args: argparse.Namespace) -> dict[str, Any]:
     return {"ok": True, "effect": item}
 
 
+def _portal(args: argparse.Namespace) -> int:
+    # Import lazily so ordinary CLI commands do not load the HTTP server.
+    from .portal import make_portal_server
+
+    with make_portal_server(_root(args.root), port=args.port) as server:
+        url = f"http://127.0.0.1:{server.server_address[1]}/"
+        _emit({"ok": True, "url": url, "read_only": True, "message": "Press Ctrl+C to stop the portal."})
+        sys.stdout.flush()
+        if args.open:
+            import webbrowser
+
+            try:
+                opened = webbrowser.open(url)
+            except webbrowser.Error:
+                opened = False
+            if not opened:
+                print(f"Open {url} in your browser.", file=sys.stderr)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "portal":
+            return _portal(args)
         if args.command == "init":
             output, code = _init(args), 0
         elif args.command == "bootstrap":
@@ -1779,6 +1908,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             output, code = _effect(args), 0
         else:
             raise AssertionError(f"Unhandled command: {args.command}")
+    except CommittedRuntimeRecoveryRequired as error:
+        recovery = {
+            key: error.verification.get(key)
+            for key in (
+                "runtime_schema_before",
+                "runtime_schema_after",
+                "runtime_schema_observed",
+                "runtime_schema_changed",
+                "runtime_schema_indeterminate",
+                "runtime_backup_path",
+                "runtime_backup_sha256",
+            )
+            if key in error.verification
+        }
+        _emit(
+            {"ok": False, "error": str(error), "recovery_required": True, "recovery": recovery},
+            stream=sys.stderr,
+        )
+        return 2
     except (CatalogError, ConfigError, ExecutionError, FileExistsError, FileNotFoundError, HandoffError, LessonError, LifecycleError, ManifestError, MigrationError, SchedulerError, StateError, TelemetryError, UpgradeError, ValidationError, WorkflowError, WorkItemError, OSError, ValueError) as error:
         _emit({"ok": False, "error": str(error)}, stream=sys.stderr)
         return 2

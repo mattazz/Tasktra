@@ -29,7 +29,7 @@ include-package-data = true
 where = ["src"]
 
 [tool.setuptools.package-data]
-tasktra = ["schemas/*.json", "catalog/*.toml", "catalog/**/*.toml", "catalog/**/*.md"]
+tasktra = ["schemas/*.json", "catalog/*.toml", "catalog/**/*.toml", "catalog/**/*.md", "portal_static/*.html", "portal_static/*.css", "portal_static/*.js"]
 
 [tool.unittest]
 start-directory = "tests"

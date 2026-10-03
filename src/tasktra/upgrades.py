@@ -3,7 +3,9 @@
 Callers must authorize the local effect before entering this module.  The
 module binds the complete lifecycle preview to a digest, snapshots every
 managed/runtime write, applies bounded pack migrations, regenerates canonical
-projections, validates them, and rolls the snapshot back on any failure.
+projections, validates them, and rolls the snapshot back on failures before a
+runtime commit.  When a runtime schema commit may have occurred, it preserves prepared
+backup evidence and requires explicit recovery.
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ from hashlib import sha256
 import json
 from pathlib import Path, PurePosixPath
 from typing import Mapping
+from uuid import uuid4
 
 from . import __version__
 from .compiler import Catalog, check_drift, compile_catalog, write_projection
@@ -28,10 +31,13 @@ from .manifest import (
     write_manifest,
 )
 from .migrations import (
+    CommittedRuntimeRecoveryRequired,
     MigrationExecution,
     apply_migration_plan,
     migration_plan_digest,
+    read_prepared_runtime_recoveries,
     rollback_migration,
+    write_prepared_runtime_recovery,
 )
 from .state import StateStore
 from .validation import run_validations
@@ -87,6 +93,59 @@ def apply_upgrade(
     snapshot_paths = _snapshot_paths(project, normalized, projection.files, prior_manifest)
     migration_preview = _migration_preview(normalized, snapshot_paths)
     migration_sha256 = migration_plan_digest(migration_preview)
+    prepared_runtime: dict[str, object] = {}
+
+    def runtime_recovery_probe() -> Mapping[str, object] | None:
+        """Fail closed after any interrupted runtime migration boundary."""
+        evidence = dict(prepared_runtime)
+        try:
+            observed = StateStore(config.database_path(project)).inspect_schema_version()
+        except BaseException as error:
+            return {
+                **evidence,
+                "runtime_schema_changed": True,
+                "runtime_schema_indeterminate": True,
+                "runtime_inspection_error": str(error),
+            }
+        if observed != runtime_from:
+            return {
+                **evidence,
+                "runtime_schema_before": runtime_from,
+                "runtime_schema_observed": observed,
+                "runtime_schema_changed": True,
+            }
+        return None
+
+    runtime_attempt_id = uuid4().hex
+
+    def prepare_runtime_recovery(evidence: Mapping[str, object]) -> None:
+        """Capture exact recovery evidence and journal it before SQLite commits."""
+        before = evidence.get("before_schema")
+        after = evidence.get("after_schema")
+        backup_path = evidence.get("backup_path")
+        backup_sha256 = evidence.get("backup_sha256")
+        prepared_runtime.update({
+            "runtime_attempted_before": before,
+            "runtime_attempted_after": after,
+            "runtime_schema_before": runtime_from,
+            "runtime_schema_after": runtime_to,
+            "runtime_schema_changed": before != after,
+            "runtime_backup_path": backup_path,
+            "runtime_backup_sha256": backup_sha256,
+        })
+        if before != runtime_from or after != runtime_to:
+            raise UpgradeError(
+                f"runtime migration did not match the exact previewed transition: expected {runtime_from}->{runtime_to}, got {before}->{after}"
+            )
+        if before != after:
+            write_prepared_runtime_recovery(
+                project,
+                migration_plan_sha256=migration_sha256,
+                upgrade_plan_sha256=actual_plan_sha256,
+                attempt_id=runtime_attempt_id,
+                database_path=str(config.database_path(project)),
+                verification=prepared_runtime,
+            )
 
     def verify() -> Mapping[str, object]:
         state = StateStore(config.database_path(project))
@@ -113,45 +172,72 @@ def apply_upgrade(
         failed = [item.as_dict() for item in validation_results if item.status != "passed"]
         if failed:
             raise UpgradeError(f"configured validation failed: {failed}")
-        runtime_evidence = state.migrate_with_evidence()
+        runtime_evidence = state.migrate_with_evidence(before_commit=prepare_runtime_recovery)
         runtime_after = int(runtime_evidence["after_schema"])
-        if int(runtime_evidence["before_schema"]) != runtime_from or runtime_after != runtime_to:
-            raise UpgradeError(
-                "runtime migration did not match the exact previewed transition: "
-                f"expected {runtime_from}->{runtime_to}, got "
-                f"{runtime_evidence['before_schema']}->{runtime_after}"
-            )
         runtime_changed = runtime_after != runtime_before
-        if runtime_changed:
-            try:
-                _write_canonical_projection(
-                    project, catalog_root, catalog, config, projection, read_manifest(project), set(),
-                )
-            except Exception as error:
-                raise UpgradeError(
-                    "runtime schema migrated but lock finalization failed; use the exact retained "
-                    f"database backup {runtime_evidence['backup_path']}: {error}"
-                ) from error
-        drift = check_drift(project, projection, managed_paths=set(projection.files))
-        if not drift.clean:
-            raise UpgradeError("post-upgrade projection drift remains")
-        return {
-            "ok": True,
-            "compile_check": "clean",
-            "validation": [
-                *[item.as_dict() for item in validation_results],
-                *(
-                    [{"argv": list(command), "status": "passed", "source": "internal-compile-check"}
-                     for command in declared_commands if _is_compile_check(command)]
-                ),
-            ],
-            "project_owned_preserved": True,
+        recovery_evidence = {
             "runtime_schema_before": runtime_before,
             "runtime_schema_after": runtime_after,
             "runtime_schema_changed": runtime_changed,
             "runtime_backup_path": runtime_evidence["backup_path"],
             "runtime_backup_sha256": runtime_evidence["backup_sha256"],
         }
+
+        def successful_verification() -> dict[str, object]:
+            return {
+                "ok": True,
+                "compile_check": "clean",
+                "validation": [
+                    *[item.as_dict() for item in validation_results],
+                    *(
+                        [{"argv": list(command), "status": "passed", "source": "internal-compile-check"}
+                         for command in declared_commands if _is_compile_check(command)]
+                    ),
+                ],
+                "project_owned_preserved": True,
+                "runtime_schema_before": runtime_before,
+                "runtime_schema_after": runtime_after,
+                "runtime_schema_changed": runtime_changed,
+                "runtime_backup_path": runtime_evidence["backup_path"],
+                "runtime_backup_sha256": runtime_evidence["backup_sha256"],
+            }
+
+        if not runtime_changed:
+            if int(runtime_evidence["before_schema"]) != runtime_from or runtime_after != runtime_to:
+                raise UpgradeError(
+                    "runtime migration did not match the exact previewed transition: "
+                    f"expected {runtime_from}->{runtime_to}, got "
+                    f"{runtime_evidence['before_schema']}->{runtime_after}"
+                )
+        else:
+            try:
+                if int(runtime_evidence["before_schema"]) != runtime_from or runtime_after != runtime_to:
+                    raise UpgradeError(
+                        "runtime migration did not match the exact previewed transition: "
+                        f"expected {runtime_from}->{runtime_to}, got "
+                        f"{runtime_evidence['before_schema']}->{runtime_after}"
+                    )
+                _write_canonical_projection(
+                    project, catalog_root, catalog, config, projection, read_manifest(project), set(),
+                )
+                drift = check_drift(project, projection, managed_paths=set(projection.files))
+                if not drift.clean:
+                    raise UpgradeError("post-upgrade projection drift remains")
+                return successful_verification()
+            except CommittedRuntimeRecoveryRequired:
+                raise
+            except BaseException as error:
+                raise CommittedRuntimeRecoveryRequired(
+                    "runtime schema committed but post-commit finalization failed; recovery is required "
+                    "using the retained database backup "
+                    f"{runtime_evidence['backup_path']}: {error}",
+                    recovery_evidence,
+                ) from error
+        if not runtime_changed:
+            drift = check_drift(project, projection, managed_paths=set(projection.files))
+            if not drift.clean:
+                raise UpgradeError("post-upgrade projection drift remains")
+        return successful_verification()
 
     execution = apply_migration_plan(
         project,
@@ -162,6 +248,7 @@ def apply_upgrade(
         allow_network=allow_network,
         timeout_seconds=timeout_seconds,
         verifier=verify,
+        recovery_probe=runtime_recovery_probe,
     )
     return {
         "ok": True,
@@ -191,11 +278,38 @@ def rollback_upgrade(
             f"restore the exact retained database backup {backup} (sha256 {digest}) "
             "with explicit human recovery"
         )
+    _assert_prepared_recovery_is_uncommitted(Path(root).resolve(), snapshot_plan_sha256)
     return rollback_migration(
         root,
         snapshot_plan_sha256,
         expected_before_sha256=expected_before_sha256,
+        _allow_prepared=True,
     )
+
+
+def _assert_prepared_recovery_is_uncommitted(project: Path, migration_plan_sha256: str) -> None:
+    """Permit explicit file rollback only when every prepared runtime attempt stayed uncommitted."""
+    try:
+        prepared_records = read_prepared_runtime_recoveries(
+            project, migration_plan_sha256=migration_plan_sha256,
+        )
+    except ValueError as error:
+        raise UpgradeError("prepared runtime recovery evidence is unresolved; do not roll back automatically") from error
+    for prepared in prepared_records:
+        try:
+            database_path = prepared["database_path"]
+            before = prepared["runtime_schema_before"]
+            database = Path(database_path).resolve()
+            observed = StateStore(database).inspect_schema_version()
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
+            raise UpgradeError(
+                "prepared runtime recovery evidence is unresolved; do not roll back automatically"
+            ) from error
+        if observed != before:
+            raise UpgradeError(
+                "automatic rollback is unavailable after a prepared runtime migration; "
+                f"observed schema {observed}, prepared schema {before}"
+            )
 
 
 def _validated_plan(plan: Mapping[str, object]) -> dict[str, object]:

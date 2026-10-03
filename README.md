@@ -77,6 +77,23 @@ tasktra lesson --root . list
 
 Configured validation commands execute as direct argument lists, not through a shell. Work-item updates require the current item version, and workspace inspection never creates branches or worktrees. Optional provider health can be supplied by a Codex or connector host for one invocation with `tasktra capabilities --root . --provider-health report.json`; the report is diagnostic and grants no authority.
 
+### Local progress portal
+
+Start a visual, read-only dashboard for an adopted project:
+
+```powershell
+python -m tasktra portal --root . --open
+```
+
+The portal runs at `http://127.0.0.1:8765/` and shows recorded goals, jobs,
+agent activity, token budgets, and recent events. Animated agent stations make
+the activity easy to follow. Search jobs, filter by goal, and inspect details
+without leaving the dashboard. No web build step or extra dependencies are
+required. Use **Explore demo** to view clearly labeled sample data without
+changing project records. Press Ctrl+C in the terminal to stop the server.
+
+See the [portal guide](docs/PORTAL.md) for tracking semantics and launch options.
+
 ### Optional Jira status synchronization
 
 Jira is not part of the default project context. A project that wants one-way Tasktra-to-Jira status updates can explicitly enable the `jira-sync` pack and add a policy such as:

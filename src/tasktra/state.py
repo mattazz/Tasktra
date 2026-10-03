@@ -14,7 +14,7 @@ import hashlib
 from pathlib import Path
 import re
 import sqlite3
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator, Mapping
 from urllib.parse import parse_qsl, urlparse
 from uuid import uuid4
 
@@ -644,8 +644,10 @@ class StateStore:
     def migrate(self) -> int:
         return int(self.migrate_with_evidence()["after_schema"])
 
-    def migrate_with_evidence(self) -> dict[str, object]:
-        """Migrate while returning the exact durable recovery evidence."""
+    def migrate_with_evidence(
+        self, *, before_commit: Callable[[Mapping[str, object]], None] | None = None,
+    ) -> dict[str, object]:
+        """Migrate while returning recovery evidence, optionally preparing it before commit."""
         with self._connection() as connection:
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
             has_tables = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1").fetchone() is not None
@@ -672,12 +674,18 @@ class StateStore:
                 # and may add an empty authoritative table. Bind that exact
                 # deterministic result in the same migration transaction.
                 self._seal_current_state_in_transaction(connection, _now())
-            return {
+            evidence = {
                 "before_schema": version,
                 "after_schema": result,
                 "backup_path": str(backup) if backup is not None else None,
                 "backup_sha256": _sha256_file(backup) if backup is not None else None,
             }
+            # The callback runs while the transaction remains open.  A
+            # journal failure therefore aborts the schema change instead of
+            # leaving a committed runtime without durable recovery evidence.
+            if before_commit is not None:
+                before_commit(dict(evidence))
+            return evidence
 
     def inspect_schema_version(self) -> int:
         """Read the on-disk schema without creating or migrating the database."""

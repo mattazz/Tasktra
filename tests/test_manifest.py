@@ -1,5 +1,7 @@
 import json
+import os
 from pathlib import Path
+import subprocess
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -52,3 +54,39 @@ class ManifestTests(unittest.TestCase):
                 "schema_version": 3, "tasktra_version": "1", "catalog_version": "1", "catalog_source_sha256": "b" * 64, "packs": [], "pack_versions": {}, "pack_contracts": {},
                 "generated_manifest_sha256": "a" * 64, "schema_versions": {}, "surprise": True,
             })
+
+    def test_metadata_write_rejects_symlinked_tasktra_directory(self):
+        manifest = build_generated_manifest(
+            {"AGENTS.md": "entrypoint\n"}, tasktra_version="0.1.0", catalog_version="1", packs=[]
+        )
+        with TemporaryDirectory() as directory:
+            base = Path(directory)
+            project, outside = base / "project", base / "outside"
+            project.mkdir()
+            outside.mkdir()
+            try:
+                (project / ".tasktra").symlink_to(outside, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"symlink creation is unavailable: {error}")
+            with self.assertRaisesRegex(ManifestError, "link or reparse point"):
+                write_manifest(project, manifest)
+            self.assertFalse((outside / "generated" / "manifest.json").exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction behavior only")
+    def test_metadata_write_rejects_junctioned_tasktra_directory(self):
+        manifest = build_generated_manifest(
+            {"AGENTS.md": "entrypoint\n"}, tasktra_version="0.1.0", catalog_version="1", packs=[]
+        )
+        with TemporaryDirectory() as directory, TemporaryDirectory() as outside_directory:
+            project, outside = Path(directory), Path(outside_directory)
+            junction = project / ".tasktra"
+            command = subprocess.run(
+                ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(outside)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(command.returncode, 0, command.stderr or command.stdout)
+            with self.assertRaisesRegex(ManifestError, "link or reparse point"):
+                write_manifest(project, manifest)
+            self.assertFalse((outside / "generated" / "manifest.json").exists())

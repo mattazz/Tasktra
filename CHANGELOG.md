@@ -2,6 +2,36 @@
 
 All notable changes to Tasktra are documented here. Dates use ISO 8601.
 
+## Unreleased
+
+### Added
+
+- A bundled, read-only local web portal for goals, jobs, agent records, budgets,
+  and recent activity, with responsive layouts, animated robot avatars, and a
+  clearly labeled browser-only demo.
+
+### Corrected
+
+- Git commit requests must remain within the approved envelope, work-unit, and
+  human-approval file scopes. Previously accepted out-of-scope requests now fail
+  closed; obtain appropriately scoped authorization before preparing new work.
+- Read-only Git diffs disable repository-configured text converters.
+- Initialization and metadata/journal writes reject symbolic-link and Windows
+  reparse-point redirection. Keep these Tasktra directories inside the project
+  rather than linking them to another location.
+- New project profiles are published without replacing a concurrent file, and
+  names containing quotes, backslashes, controls, or emoji round-trip correctly.
+- Compile failures restore affected generated files and metadata. Upgrade
+  failures after a database migration retain explicit recovery evidence instead
+  of falsely reporting a file rollback; follow the recorded database backup and
+  recovery guidance before further work.
+- Validation cleans up owned descendants before closing output streams, including
+  children that outlive their parent or ignore POSIX termination signals.
+- An unavailable optional execution ledger no longer hides workers recorded by
+  runtime leases.
+- Configured validation discovers every test instead of relying on a manually
+  maintained module list.
+
 ## 1.0.0 — 2026-09-20
 
 Initial release candidate of the generic Codex-first, runtime-neutral orchestration foundation.
