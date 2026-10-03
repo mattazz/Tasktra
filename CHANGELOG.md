@@ -28,6 +28,8 @@ All notable changes to Tasktra are documented here. Dates use ISO 8601.
 - Concurrent telemetry appends preserve events, and OS-owned file locks release
   automatically after crashes. Benchmark verdicts prioritize verified quality
   and reject unverified efficiency claims.
+- Locking and isolated workspaces handle macOS temporary-directory aliases and
+  Windows short paths while retaining checks against links inside the project.
 - Git commit requests must remain within the approved envelope, work-unit, and
   human-approval file scopes. Previously accepted out-of-scope requests now fail
   closed; obtain appropriately scoped authorization before preparing new work.

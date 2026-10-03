@@ -51,6 +51,34 @@ class RunWorkspaceTests(unittest.TestCase):
             self.assertTrue(workspace.published)
         self.assertEqual((self.root / "tracked.txt").read_text(encoding="utf-8"), "after\n")
 
+    def test_root_alias_ancestor_can_capture_and_publish(self) -> None:
+        """A real symlink/junction ancestor models macOS and Windows aliases."""
+        with TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            physical = base / "physical"
+            physical.mkdir()
+            project = physical / "project"
+            _git(self.root, "clone", "--no-local", str(self.root), str(project))
+            alias = base / "alias"
+            if os.name == "nt":
+                result = subprocess.run(
+                    ["cmd.exe", "/d", "/c", "mklink", "/J", str(alias), str(physical)],
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+            else:
+                try:
+                    alias.symlink_to(physical, target_is_directory=True)
+                except OSError as error:
+                    self.skipTest(f"directory aliases are unavailable: {error}")
+            aliased_root = alias / "project"
+            with RunWorkspace(aliased_root, "attempt-root-alias") as workspace:
+                assert workspace.path is not None
+                (workspace.path / "tracked.txt").write_text("after\n", encoding="utf-8")
+                workspace.capture()
+                workspace.publish()
+            self.assertEqual((project / "tracked.txt").read_text(encoding="utf-8"), "after\n")
+
     def test_capture_and_publish_handles_binary_untracked_and_deleted_files(self) -> None:
         with RunWorkspace(self.root, "attempt-mixed") as workspace:
             assert workspace.path is not None

@@ -79,10 +79,17 @@ def _open_posix(path: Path, root: Path) -> int:
             )
             os.close(directory)
             directory = next_directory
-        return os.open(
-            parts[-1], os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC,
-            0o600, dir_fd=directory,
-        )
+        flags = os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC
+        try:
+            return os.open(parts[-1], flags, dir_fd=directory)
+        except FileNotFoundError:
+            # Create is explicitly exclusive, then retry an existing lock if
+            # another contender won first creation.  macOS otherwise exposes
+            # a transient ENOENT when concurrent first writers use O_CREAT.
+            try:
+                return os.open(parts[-1], flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory)
+            except FileExistsError:
+                return os.open(parts[-1], flags, dir_fd=directory)
     finally:
         os.close(directory)
 
@@ -99,6 +106,31 @@ def _try_acquire(descriptor: int) -> None:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
+def _normalise_root_and_target(path: Path | str, root: Path | str) -> tuple[Path, Path]:
+    """Resolve the declared root after deriving a lexical in-root relative path.
+
+    macOS ``/var`` and Windows 8.3 paths can name the same root differently.
+    Deriving the relative path first lets the root normalize to its canonical
+    spelling without resolving a target that might cross an in-root link.
+    """
+    supplied_root = Path(root).absolute()
+    supplied_target = Path(path)
+    if supplied_target.is_absolute():
+        try:
+            parts = supplied_target.relative_to(supplied_root).parts
+        except ValueError as error:
+            raise FileLockError("lock path escapes the project root") from error
+    else:
+        parts = supplied_target.parts
+    if not parts or any(part in {".", ".."} for part in parts):
+        raise FileLockError("lock path must name a file inside the project root")
+    try:
+        anchor = supplied_root.resolve(strict=True)
+    except OSError as error:
+        raise FileLockError("project root is unavailable") from error
+    return anchor, anchor.joinpath(*parts)
+
+
 @contextmanager
 def exclusive_file_lock(
     path: Path | str, *, root: Path | str, timeout_seconds: float = 0.0,
@@ -111,10 +143,7 @@ zero timeout preserves optimistic stores' immediate conflict behavior.
     if (not isinstance(timeout_seconds, (int, float)) or isinstance(timeout_seconds, bool)
             or not math.isfinite(timeout_seconds) or not 0 <= timeout_seconds <= 60):
         raise FileLockError("lock timeout must be between 0 and 60 seconds")
-    anchor = Path(root).resolve(strict=True)
-    target = Path(path)
-    if not target.is_absolute():
-        target = anchor / target
+    anchor, target = _normalise_root_and_target(path, root)
     descriptor = None
     try:
         _check_path(target, anchor)

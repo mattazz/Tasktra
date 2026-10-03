@@ -7,8 +7,9 @@ import subprocess
 from tempfile import TemporaryDirectory
 import time
 import unittest
+from unittest.mock import patch
 
-from tasktra.filelocks import FileLockBusyError, FileLockError, exclusive_file_lock
+from tasktra.filelocks import FileLockBusyError, FileLockError, _open_posix, exclusive_file_lock
 
 
 def hold_lock(root, ready):
@@ -56,6 +57,56 @@ class FileLockTests(unittest.TestCase):
             with exclusive_file_lock(path, root=root):
                 pass
             self.assertEqual(path.read_text(encoding="utf-8"), "legacy marker")
+
+    def test_root_alias_does_not_make_a_lexically_contained_lock_escape(self):
+        """A symlink or junction ancestor models macOS /var and Windows 8.3 aliases."""
+        with TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            physical = parent / "physical"
+            project = physical / "project"
+            physical.mkdir()
+            project.mkdir()
+            alias = parent / "alias"
+            if os.name == "nt":
+                result = subprocess.run(
+                    ["cmd.exe", "/d", "/c", "mklink", "/J", str(alias), str(physical)],
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+            else:
+                try:
+                    alias.symlink_to(physical, target_is_directory=True)
+                except OSError as error:
+                    self.skipTest(f"directory aliases are unavailable: {error}")
+            aliased_root = alias / "project"
+            path = aliased_root / ".store.lock"
+            with exclusive_file_lock(path, root=aliased_root):
+                pass
+            self.assertTrue((project / ".store.lock").is_file())
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory-descriptor behavior")
+    def test_posix_first_creator_race_reopens_the_contender_lock(self):
+        """A contender winning O_EXCL after a missing read is safe to reopen."""
+        calls: list[tuple[object, int, int | None]] = []
+
+        def fake_open(path, flags, mode=0o777, *, dir_fd=None):
+            calls.append((path, flags, dir_fd))
+            if len(calls) == 1:
+                return 10  # root directory descriptor
+            if len(calls) == 2:
+                raise FileNotFoundError()
+            if len(calls) == 3:
+                self.assertTrue(flags & os.O_CREAT)
+                self.assertTrue(flags & os.O_EXCL)
+                raise FileExistsError()
+            self.assertEqual(path, ".store.lock")
+            self.assertFalse(flags & os.O_CREAT)
+            return 11
+
+        with patch("tasktra.filelocks.os.open", side_effect=fake_open), patch("tasktra.filelocks.os.close") as close:
+            descriptor = _open_posix(Path("/project/.store.lock"), Path("/project"))
+        self.assertEqual(descriptor, 11)
+        close.assert_called_once_with(10)
 
     def test_bounds_traversal_directories_and_hardlinks_are_rejected(self):
         with TemporaryDirectory() as root, TemporaryDirectory() as other:

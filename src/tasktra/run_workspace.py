@@ -69,7 +69,6 @@ class RunWorkspace(AbstractContextManager["RunWorkspace"]):
         if not isinstance(attempt_id, str) or not _ATTEMPT_ID.fullmatch(attempt_id):
             raise ValueError("attempt_id must be a short filesystem-safe identifier")
         supplied_root = Path(root).absolute()
-        self._reject_link_ancestors(supplied_root, "workspace root")
         self.root = supplied_root.resolve(strict=True)
         if not self.root.is_dir():
             raise RunWorkspaceError("workspace root must be a directory")
@@ -328,14 +327,6 @@ class RunWorkspace(AbstractContextManager["RunWorkspace"]):
         if sha256(patch).hexdigest() != self._captured["patch_sha256"]:
             raise RunWorkspaceError("retained worker patch no longer matches captured evidence")
         return patch
-
-    @staticmethod
-    def _reject_link_ancestors(path: Path, label: str) -> None:
-        current = Path(path.anchor)
-        for part in path.parts[1:]:
-            current = current / part
-            if _is_link_or_reparse(current):
-                raise RunWorkspaceError(f"{label} crosses a symlink or reparse point")
 
     def _validate_artifact_path(self, destination: Path) -> None:
         try:
