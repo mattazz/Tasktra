@@ -46,6 +46,7 @@ without evidence of a scale requirement.
 | Hosted Windows/macOS paths differed from their canonical root spelling. | Lock containment accepts targets beneath the supplied or canonical root without resolving project-controlled target components. Workspace setup accepts aliases above that root while retaining checks on project-controlled paths. Real alias fixtures cover this boundary. |
 | A worker could affect later review through runtime state, instruction changes, or ignored files. | Workers use detached clones without a remote. Reserved control paths are rejected, later stages receive only the retained patch, and publication checks the original baseline. |
 | Over-budget host turns and missing usage could corrupt accounting. | Known overage is reconciled against host receipts and charged as budget debt; missing usage is explicitly labelled and conservatively charged. Configured model pins remain requests, not falsely observed models. |
+| Live reviewers could put successful observations in the findings array, blocking correct work. | The stage prompt and result schema explicitly reserve findings for unresolved defects; successful checks belong in the summary. Nonempty reviewer findings still block publication. |
 
 ## Usefulness and product boundaries
 

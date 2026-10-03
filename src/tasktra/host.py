@@ -24,8 +24,10 @@ STAGE_SCHEMA = {
     "required": ["status", "summary", "findings", "changed_paths"],
     "properties": {
         "status": {"type": "string", "enum": ["completed", "blocked", "failed"]},
-        "summary": {"type": "string", "minLength": 1, "maxLength": 2000},
-        "findings": {"type": "array", "maxItems": 32, "items": {"type": "string", "maxLength": 1000}},
+        "summary": {"type": "string", "minLength": 1, "maxLength": 2000,
+                    "description": "Stage verdict and evidence, including successful checks and observations."},
+        "findings": {"type": "array", "maxItems": 32, "items": {"type": "string", "maxLength": 1000},
+                     "description": "Unresolved defects or blockers only. Empty when there are none; never include successful checks or informational observations."},
         "changed_paths": {"type": "array", "maxItems": 128, "items": {"type": "string", "maxLength": 240}},
     },
 }
