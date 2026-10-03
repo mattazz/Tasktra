@@ -57,6 +57,7 @@ from .telemetry import TelemetryError, TelemetryStore
 from .upgrades import UpgradeError, apply_upgrade, rollback_upgrade, upgrade_plan_digest
 from .autonomy import AutonomyStore
 from .authority import (
+    VERIFICATION_POLICIES,
     load_authority_envelope,
     load_transition_approval,
     transition_approval_subject_sha256,
@@ -184,6 +185,7 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_create = workflow_commands.add_parser("create", help="Print a new implementation workflow state")
     workflow_create.add_argument("--goal-id", required=True)
     workflow_create.add_argument("--work-unit-id")
+    workflow_create.add_argument("--verification-policy", choices=sorted(VERIFICATION_POLICIES), default="implementation-review")
     workflow_validate = workflow_commands.add_parser("validate", help="Validate a workflow JSON file")
     workflow_validate.add_argument("path")
     workflow_accept = workflow_commands.add_parser("accept", help="Accept one validated handoff into a workflow")
@@ -448,6 +450,7 @@ def build_parser() -> argparse.ArgumentParser:
     work = subcommands.add_parser("work", help="Create and safely execute work units")
     work.add_argument("--root", default="."); work_commands = work.add_subparsers(dest="work_command", required=True)
     work_create = work_commands.add_parser("create"); work_create.add_argument("goal_id"); work_create.add_argument("title"); work_create.add_argument("--id"); work_create.add_argument("--scope", required=True, help="bounded closed JSON scope file"); work_create.add_argument("--checkpoint", help="contract checkpoint identifier")
+    work_create.add_argument("--verification-policy", choices=sorted(VERIFICATION_POLICIES), default="implementation-review")
     assign_checkpoint = work_commands.add_parser("assign-checkpoint", help="Explicitly bind an unleased legacy work unit to a contract checkpoint")
     assign_checkpoint.add_argument("work_unit_id"); assign_checkpoint.add_argument("checkpoint_id"); assign_checkpoint.add_argument("--human-actor", required=True)
     claim = work_commands.add_parser("claim"); claim.add_argument("goal_id"); claim.add_argument("--actor", required=True); claim.add_argument("--envelope-sha256", required=True); claim.add_argument("--lease-seconds", type=int, default=300); claim.add_argument("--token-reservation", type=int, default=0); claim.add_argument("--repository", required=True); claim.add_argument("--revision", required=True); claim.add_argument("--branch", required=True); claim.add_argument("--workspace", required=True); claim.add_argument("--lease-token-env", default="TASKTRA_LEASE_TOKEN")
@@ -465,12 +468,27 @@ def build_parser() -> argparse.ArgumentParser:
     prepare = effect_commands.add_parser("prepare"); prepare.add_argument("key"); prepare.add_argument("goal_id"); prepare.add_argument("--work-unit-id"); prepare.add_argument("--class", dest="effect_class", required=True); prepare.add_argument("--operation", required=True); prepare.add_argument("--request", required=True); prepare.add_argument("--envelope-sha256", required=True); prepare.add_argument("--actor", required=True)
     receipt = effect_commands.add_parser("receipt"); receipt.add_argument("key"); receipt.add_argument("--outcome", required=True); receipt.add_argument("--evidence", required=True); receipt.add_argument("--actor", required=True); receipt.add_argument("--before-sha256"); receipt.add_argument("--after-sha256")
     inspect = effect_commands.add_parser("inspect"); inspect.add_argument("key")
+    resolve_recovery = effect_commands.add_parser("resolve-recovery", help="Resolve a local effect after independently authorized recovery")
+    resolve_recovery.add_argument("key")
+    resolve_recovery.add_argument("--resolution", choices=("applied", "failed-before-effect"), required=True)
+    resolve_recovery.add_argument("--evidence", required=True, help="bounded recovery evidence JSON file")
+    resolve_recovery.add_argument("--actor", required=True)
+    resolve_recovery.add_argument("--envelope-sha256", required=True)
     provider_prepare = effect_commands.add_parser("provider-prepare", help="Durably prepare a protocol-v2 provider effect; does not invoke a provider")
     provider_prepare.add_argument("key"); provider_prepare.add_argument("--goal-id", required=True); provider_prepare.add_argument("--work-unit-id", required=True); provider_prepare.add_argument("--descriptor", required=True, help="closed protocol-v2 operation descriptor JSON file"); provider_prepare.add_argument("--request", required=True, help="bounded provider request JSON file"); provider_prepare.add_argument("--work-attempt-id", required=True); provider_prepare.add_argument("--envelope-sha256", required=True); provider_prepare.add_argument("--actor", required=True); provider_prepare.add_argument("--lease-token-env", default="TASKTRA_LEASE_TOKEN")
     provider_execute = effect_commands.add_parser("provider-execute", help="Execute one prepared provider effect through a ledger-backed configured adapter")
     provider_execute.add_argument("key"); provider_execute.add_argument("--descriptor", required=True, help="the exact prepared protocol-v2 operation descriptor JSON file"); provider_execute.add_argument("--actor", required=True); provider_execute.add_argument("--lease-token-env", default="TASKTRA_LEASE_TOKEN")
     provider_reconcile = effect_commands.add_parser("provider-reconcile", help="Record a bounded provider reconciliation observation")
     provider_reconcile.add_argument("key"); provider_reconcile.add_argument("--resolution", choices=("applied", "conflict"), required=True); provider_reconcile.add_argument("--observation", required=True, help="bounded reconciliation observation JSON file"); provider_reconcile.add_argument("--actor", required=True)
+    run = subcommands.add_parser("run", help="Preview or execute one authorized work unit through Codex")
+    run.add_argument("--root", default=".")
+    run.add_argument("--goal-id", required=True)
+    run.add_argument("--work-unit-id", required=True)
+    run.add_argument("--actor", required=True)
+    run.add_argument("--envelope-sha256", required=True)
+    run.add_argument("--token-reservation", type=int, default=100_000)
+    run.add_argument("--timeout", type=int, default=900)
+    run.add_argument("--apply", action="store_true", help="Execute the reviewed bounded run; default is preview")
     audit = subcommands.add_parser("audit", help="Verify or export the runtime audit chain")
     audit.add_argument("--root", default=".")
     audit_commands = audit.add_subparsers(dest="audit_command", required=True)
@@ -701,7 +719,7 @@ def _workflow_result(action: str, workflow: dict[str, Any], **extra: Any) -> dic
 
 def _workflow(args: argparse.Namespace) -> dict[str, Any]:
     if args.workflow_command == "create":
-        workflow = new_workflow({"goal_id": args.goal_id, "work_unit_id": args.work_unit_id})
+        workflow = new_workflow({"goal_id": args.goal_id, "work_unit_id": args.work_unit_id}, verification_policy=args.verification_policy)
         return _workflow_result("workflow-create", workflow)
     if args.workflow_command == "validate":
         path = Path(args.path).expanduser().resolve()
@@ -1280,10 +1298,17 @@ def _upgrade(args: argparse.Namespace) -> dict[str, Any]:
                 args.snapshot_plan_sha256,
                 expected_before_sha256=args.before_sha256,
             )
+        except CommittedRuntimeRecoveryRequired as error:
+            store.record_effect_receipt(
+                idempotency_key=args.idempotency_key, outcome="recovery-required",
+                evidence={"action": "upgrade-rollback", "error": str(error), "verification": error.verification},
+                performer_id=args.actor,
+            )
+            raise
         except Exception as error:
             store.record_effect_receipt(
                 idempotency_key=args.idempotency_key,
-                outcome="failed",
+                outcome="indeterminate",
                 evidence={"action": "upgrade-rollback", "error": str(error), "restored": False},
                 performer_id=args.actor,
             )
@@ -1332,10 +1357,17 @@ def _upgrade(args: argparse.Namespace) -> dict[str, Any]:
             allow_network=args.allow_network,
             timeout_seconds=args.timeout,
         )
+    except CommittedRuntimeRecoveryRequired as error:
+        store.record_effect_receipt(
+            idempotency_key=args.idempotency_key, outcome="recovery-required",
+            evidence={"action": "upgrade-apply", "plan_sha256": plan_sha256, "error": str(error), "verification": error.verification},
+            performer_id=args.actor,
+        )
+        raise
     except Exception as error:
         store.record_effect_receipt(
             idempotency_key=args.idempotency_key,
-            outcome="failed",
+            outcome="indeterminate",
             evidence={"action": "upgrade-apply", "plan_sha256": plan_sha256, "error": str(error)},
             performer_id=args.actor,
         )
@@ -1455,7 +1487,8 @@ def _benchmark(args: argparse.Namespace) -> dict[str, Any]:
     plan = BenchmarkPlan(tuple(args.scenario)) if args.scenario else None
     report = compare_observations(baseline, candidate, plan=plan)
     return {
-        "ok": not report.has_regressions,
+        "ok": report.is_acceptable,
+        "has_unverified_quality": report.has_unverified_quality,
         "action": "benchmark-compare",
         "compared_scenarios": list(report.compared_scenarios),
         "findings": [
@@ -1746,16 +1779,15 @@ def _approval(args: argparse.Namespace) -> dict[str, Any]:
         message = args.codex_user_message
         if not isinstance(message, str) or not message.strip():
             raise StateError("v4 Codex approval import requires an explicit --codex-user-message")
-        normalized_message = message.casefold()
-        if len(message) > 2_000 or not any(term in normalized_message for term in ("approve", "authorize")):
-            raise StateError("Codex approval message must be a short explicit approval or authorization")
+        if len(message) > 2_000:
+            raise StateError("Codex approval message must contain at most 2000 characters")
         subject_sha256 = transition_approval_subject_sha256(value)
         provenance = {
             "kind": "codex-user-message",
             "attester_id": args.human_actor,
             "subject_sha256": subject_sha256,
             "attested_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
-            "message_sha256": sha256(message.strip().encode("utf-8")).hexdigest(),
+            "message_sha256": sha256(message.encode("utf-8")).hexdigest(),
         }
     approval = store.record_transition_approval(goal_id=value["goal_id"], work_unit_id=value["work_unit_id"], action=value["action"], effect=value["effect"], scope=value["scope"], envelope_sha256=value["envelope_sha256"], decision=value["decision"], approver_id=value["approver"]["id"], approver_kind=value["approver"]["kind"], performer_id=value["performer_id"], authority_clause=value["authority_clause"], evidence=value["evidence"], valid_until=value["valid_until"], approval_id=value["approval_id"], resource_scope=value.get("resource_scope"), provenance=provenance)
     return {"ok": True, "approval": approval}
@@ -1765,7 +1797,7 @@ def _work(args: argparse.Namespace) -> dict[str, Any]:
     root = _root(args.root); store = _autonomy(root)
     if args.work_command == "create":
         scope = _runtime_json(args.scope) if args.scope else {}
-        return {"ok": True, "work_unit": store.create_work_unit(goal_id=args.goal_id, title=args.title, work_unit_id=args.id, scope=scope, checkpoint_id=args.checkpoint)}
+        return {"ok": True, "work_unit": store.create_work_unit(goal_id=args.goal_id, title=args.title, work_unit_id=args.id, scope=scope, checkpoint_id=args.checkpoint, verification_policy=args.verification_policy)}
     if args.work_command == "assign-checkpoint":
         return {"ok": True, "work_unit": store.assign_work_unit_checkpoint(args.work_unit_id, args.checkpoint_id, actor_id=args.human_actor, actor_kind="human")}
     if args.work_command == "claim":
@@ -1792,6 +1824,8 @@ def _effect(args: argparse.Namespace) -> dict[str, Any]:
         item = store.prepare_effect(idempotency_key=args.key, goal_id=args.goal_id, work_unit_id=args.work_unit_id, effect_class=args.effect_class, operation=args.operation, request=_runtime_json(args.request), envelope_sha256=args.envelope_sha256, performer_id=args.actor)
     elif args.effect_command == "receipt":
         item = store.record_effect_receipt(idempotency_key=args.key, outcome=args.outcome, evidence=_runtime_json(args.evidence), performer_id=args.actor, before_sha256=args.before_sha256, after_sha256=args.after_sha256)
+    elif args.effect_command == "resolve-recovery":
+        item = store.resolve_effect_recovery(idempotency_key=args.key, resolution=args.resolution, evidence=_runtime_json(args.evidence), performer_id=args.actor, envelope_sha256=args.envelope_sha256)
     elif args.effect_command == "provider-prepare":
         descriptor = OperationDescriptor.from_mapping(_runtime_json(args.descriptor))
         item = store.prepare_provider_effect(idempotency_key=args.key, goal_id=args.goal_id, work_unit_id=args.work_unit_id, operation_descriptor=descriptor, request=_runtime_json(args.request), envelope_sha256=args.envelope_sha256, performer_id=args.actor, work_attempt_id=args.work_attempt_id, lease_token=_lease_token(args.lease_token_env))
@@ -1811,6 +1845,18 @@ def _effect(args: argparse.Namespace) -> dict[str, Any]:
     else:
         item = store.inspect_effect(args.key)
     return {"ok": True, "effect": item}
+
+
+def _run(args: argparse.Namespace) -> dict[str, Any]:
+    from .supervisor import run_work
+
+    root = _root(args.root)
+    return run_work(
+        root, goal_id=args.goal_id, work_unit_id=args.work_unit_id, performer_id=args.actor,
+        envelope_sha256=args.envelope_sha256, token_reservation=args.token_reservation,
+        timeout_seconds=args.timeout, apply=args.apply,
+        profile_for_role=lambda role: _execution_profile(root, role),
+    )
 
 
 def _portal(args: argparse.Namespace) -> int:
@@ -1900,6 +1946,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             output, code = _approval(args), 0
         elif args.command == "work":
             output, code = _work(args), 0
+        elif args.command == "run":
+            output = _run(args)
+            code = 0 if output["ok"] else 1
         elif args.command == "audit":
             output, code = _audit(args), 0
         elif args.command == "acceptance-evidence":

@@ -7,6 +7,7 @@ not part of the record format.  Export is an explicit local filesystem action.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
@@ -14,9 +15,10 @@ import os
 from pathlib import Path
 import re
 import stat
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Iterator, Mapping
 from uuid import uuid4
 
+from .filelocks import FileLockError, exclusive_file_lock
 
 TELEMETRY_SCHEMA_VERSION = 1
 DEFAULT_MAX_RECORDS = 128
@@ -226,6 +228,7 @@ class TelemetryStore:
         self.max_file_bytes = max_file_bytes
         self.directory = self.project_root / ".tasktra" / "telemetry"
         self.path = self.directory / "records-v1.jsonl"
+        self.lock_path = self.directory / ".records-v1.jsonl.lock"
 
     @staticmethod
     def _is_reparse_point(path: Path) -> bool:
@@ -270,8 +273,17 @@ class TelemetryStore:
                 if not directory.is_dir():
                     raise TelemetryError(f"telemetry directory is not a directory: {directory}")
                 continue
-            directory.mkdir()
+            directory.mkdir(exist_ok=True)
             self._assert_safe_path(directory, must_exist=True)
+
+    @contextmanager
+    def _lock(self) -> Iterator[None]:
+        self._assert_safe_path(self.lock_path)
+        try:
+            with exclusive_file_lock(self.lock_path, root=self.project_root, timeout_seconds=10):
+                yield
+        except FileLockError as error:
+            raise TelemetryError(str(error)) from error
 
     def _read_records(self) -> tuple[TelemetryRecord, ...]:
         self._assert_safe_path(self.path)
@@ -309,7 +321,11 @@ class TelemetryStore:
 
     def records(self) -> tuple[TelemetryRecord, ...]:
         """Read persisted local records.  This never enables collection or exports data."""
-        return self._read_records()
+        self._assert_safe_path(self.directory)
+        if not self.directory.exists():
+            return self._read_records()
+        with self._lock():
+            return self._read_records()
 
     def _write_records(self, records: Iterable[TelemetryRecord]) -> None:
         retained = list(records)[-self.max_records:]
@@ -338,11 +354,23 @@ class TelemetryStore:
             temporary.unlink(missing_ok=True)
 
     def append(self, record: TelemetryRecord | Mapping[str, Any]) -> bool:
-        """Validate and persist one record when enabled; return whether it was stored."""
+        """Persist a new enabled event; identical retained event IDs are idempotent.
+
+        Reusing a retained ID with different measurements is an error. Retention
+        bounds also bound this duplicate memory; no unbounded ID ledger is kept.
+        """
         normalized = record if isinstance(record, TelemetryRecord) else TelemetryRecord.from_mapping(record)
         if not self.enabled:
             return False
-        self._write_records((*self._read_records(), normalized))
+        self._ensure_directory()
+        with self._lock():
+            existing = self._read_records()
+            duplicates = [item for item in existing if item.event_id == normalized.event_id]
+            if duplicates:
+                if any(item != normalized for item in duplicates):
+                    raise TelemetryError("event_id already exists with different measurements")
+                return False
+            self._write_records((*existing, normalized))
         return True
 
     def capture(self, **fields: Any) -> TelemetryRecord:
@@ -357,9 +385,9 @@ class TelemetryStore:
         if not target.is_absolute():
             target = self.project_root / target
         self._assert_safe_path(target)
-        if target == self.path:
+        if target.resolve(strict=False) in {self.path, self.lock_path}:
             raise TelemetryError("export destination must differ from telemetry storage")
-        records = self._read_records()
+        records = self.records()
         payload = _canonical_json({
             "schema_version": TELEMETRY_SCHEMA_VERSION,
             "records": [record.as_dict() for record in records],

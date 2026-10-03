@@ -27,7 +27,10 @@ _SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 _LOCK_PATH = PurePosixPath(".tasktra/tasktra.lock")
 _MANIFEST_PATH = PurePosixPath(".tasktra/generated/manifest.json")
 _DECLARED_MAJOR_COMPATIBILITY_EDGES = frozenset({("0.6.0", "1.0.0")})
-_DECLARED_RUNTIME_COMPATIBILITY_EDGES = frozenset({(8, 10)})
+# Runtime 11 adds a deterministic, sealed work-unit verification policy.  The
+# historical 8/9 ledgers have explicit, audited migration steps through 10;
+# accept only those reviewed compound paths plus the immediate 10 -> 11 edge.
+_DECLARED_RUNTIME_COMPATIBILITY_EDGES = frozenset({(8, 11), (9, 11)})
 
 
 class LifecycleError(ValueError):

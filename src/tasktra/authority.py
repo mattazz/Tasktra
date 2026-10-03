@@ -79,6 +79,25 @@ class AuthorityError(ContractError):
     """Raised when authority data is malformed, unsafe, or internally inconsistent."""
 
 
+VERIFICATION_POLICIES = frozenset({
+    "implementation-review", "research-review", "documentation-review", "deterministic-direct",
+})
+
+
+def verification_policy_allowed(envelope: Mapping[str, Any], policy: str) -> bool:
+    """Return whether a closed verification policy is explicitly authorized.
+
+    Legacy envelopes retain only the published implementer/tester/reviewer
+    route.  Other routes need a named, non-prohibited envelope action.
+    """
+    if policy not in VERIFICATION_POLICIES:
+        return False
+    if policy == "implementation-review":
+        return True
+    action = f"verify-{policy}"
+    return action in envelope.get("allowed_actions", ()) and action not in envelope.get("prohibited_actions", ())
+
+
 def _identifier(value: Any, *, label: str) -> str:
     try:
         return require_identifier(value, label=label)

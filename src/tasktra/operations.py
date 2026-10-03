@@ -184,6 +184,29 @@ def operational_status(
                 "SELECT count(*) FROM acceptance_evidence WHERE goal_id=?", (goal_id,)
             ).fetchone()[0],
         }
+        # Aggregate in the current snapshot; don't materialize per-unit health
+        # or open one extra ledger connection for every historical work unit.
+        execution_states: dict[str, int] = {}
+        verification_policies: dict[str, int] = {}
+        unresolved = 0
+        for row in connection.execute(
+            "SELECT status,verification_policy,count(*) AS count FROM work_units WHERE goal_id=? GROUP BY status,verification_policy",
+            (goal_id,),
+        ):
+            count = int(row["count"])
+            policy = str(row["verification_policy"])
+            verification_policies[policy] = verification_policies.get(policy, 0) + count
+            state = "needs-authority" if row["status"] in {"blocked", "approval-required", "failed", "exhausted"} else (
+                "healthy" if row["status"] in {"planned", "eligible", "retry-wait", "leased", "complete"} else "inactive"
+            )
+            execution_states[state] = execution_states.get(state, 0) + count
+            if state == "needs-authority":
+                unresolved += count
+        goal_view["execution_health"] = {
+            "unresolved_work_units": unresolved,
+            "states": execution_states,
+            "verification_policies": verification_policies,
+        }
         result["goal"] = goal_view
         if detail_limit:
             goal_view["units"] = [

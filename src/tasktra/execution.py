@@ -195,7 +195,8 @@ class ExecutionStore:
             """)
             columns = {item[1] for item in connection.execute("PRAGMA table_info(execution)")}
             additions = {"start_provenance": "TEXT", "finish_provenance": "TEXT", "usage_provenance": "TEXT",
-                         "response_fingerprints_json": "TEXT", "source_bytes": "INTEGER"}
+                         "response_fingerprints_json": "TEXT", "source_bytes": "INTEGER", "host_result_json": "TEXT",
+                         "host_result_sha256": "TEXT"}
             for name, field_type in additions.items():
                 if name not in columns:
                     connection.execute(f"ALTER TABLE execution ADD COLUMN {name} {field_type}")
@@ -213,6 +214,8 @@ class ExecutionStore:
         value = dict(row)
         usage_json = value.pop("usage_json", None)
         fingerprints_json = value.pop("response_fingerprints_json", None)
+        host_result_json = value.pop("host_result_json", None)
+        value["host_result"] = json.loads(host_result_json) if host_result_json is not None else None
         value["usage"] = json.loads(usage_json) if usage_json is not None else None
         value["response_fingerprints"] = json.loads(fingerprints_json) if fingerprints_json is not None else []
         host_model, host_effort = value["observed_model"], value["observed_effort"]
@@ -416,6 +419,8 @@ class ExecutionStore:
         if not old_fingerprints.issubset(fingerprints):
             raise ExecutionError("rollout refresh removed or changed prior responses")
         old_usage = json.loads(row["usage_json"]) if row["usage_json"] else None
+        if row["usage_provenance"] == "host-callback":
+            raise ExecutionError("host-observed usage cannot be replaced by a rollout import")
         if schema == "event_msg/token_count" and old_usage is not None and usage is not None and any(usage[key] < old_usage[key] for key in _COUNTERS):
             raise ExecutionError("legacy rollout usage cannot decrease during refresh")
         unknown_reason = None if row["state"] in _TERMINAL and usage is not None else row["unknown_reason"]
@@ -443,6 +448,80 @@ class ExecutionStore:
         self._require_database()
         with self._connection() as connection:
             return self._import_in_connection(connection, work_id, path, fallback_reason)
+
+    def usage_attestation(self, work_ids: list[str], *, parent_work_id: str) -> dict[str, Any]:
+        """Check exact host receipts before attesting observed spend to the core ledger."""
+        parent_work_id = _identifier(parent_work_id, "parent_work_id")
+        if (not isinstance(work_ids, list) or not 1 <= len(work_ids) <= 32
+                or any(not isinstance(value, str) or not value for value in work_ids)
+                or len(set(work_ids)) != len(work_ids)):
+            raise ExecutionError("usage attestation requires distinct bounded execution IDs")
+        self._require_database()
+        total = 0
+        with self._connection() as connection:
+            for work_id in work_ids:
+                row = self._row(connection, _identifier(work_id, "work_id"))
+                if (row["parent_work_id"] != parent_work_id or row["start_provenance"] != "host-callback"
+                        or row["usage_provenance"] != "host-callback" or row["usage_json"] is None):
+                    raise ExecutionError("usage attestation lacks matching host-observed receipts")
+                usage = json.loads(row["usage_json"])
+                count = usage.get("total_tokens")
+                if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                    raise ExecutionError("usage attestation contains invalid counters")
+                total += count
+        # Core state validates this attestation's shape. The coordinator owns
+        # the observation boundary; this is not a cryptographic host signature.
+        return {"source": "coordinator-attested", "execution_ids": list(work_ids), "total_tokens": total}
+
+    def record_host_result(self, work_id: str, *, thread_id: str, response: dict[str, Any]) -> dict[str, Any]:
+        """Retain bounded, untrusted host output with a content-bound fingerprint."""
+        work_id = _identifier(work_id, "work_id")
+        thread_id = _identifier(thread_id, "thread_id")
+        encoded = _json(response)
+        if not isinstance(response, dict) or len(encoded.encode("utf-8")) > 64 * 1024:
+            raise ExecutionError("host result must be a bounded JSON object")
+        digest = sha256(encoded.encode("utf-8")).hexdigest()
+        self._require_database()
+        with self._connection() as connection:
+            row = self._row(connection, work_id)
+            if row["thread_id"] != thread_id or row["start_provenance"] != "host-callback":
+                raise ExecutionError("host result does not match the observed thread")
+            if row["host_result_json"] is not None:
+                if row["host_result_json"] == encoded:
+                    return self._public(row)
+                raise ExecutionError("host result conflicts with existing evidence")
+            if row["state"] != "started":
+                raise ExecutionError("host result requires a started execution")
+            connection.execute("UPDATE execution SET host_result_json=?,host_result_sha256=? WHERE work_id=?", (encoded, digest, work_id))
+            return self._public(self._row(connection, work_id))
+
+    def record_host_usage(self, work_id: str, *, thread_id: str, usage: dict[str, int | None]) -> dict[str, Any]:
+        """Bind observed CLI counters to one started thread without inventing details."""
+        work_id = _identifier(work_id, "work_id")
+        thread_id = _identifier(thread_id, "thread_id")
+        if not isinstance(usage, dict) or set(usage) != set(_COUNTERS):
+            raise ExecutionError("host usage requires the six supported counters")
+        for key, value in usage.items():
+            if value is None and key in {"cached_input_tokens", "cache_write_input_tokens", "reasoning_output_tokens"}:
+                continue
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ExecutionError("host usage counters must be non-negative or explicitly unavailable")
+        if usage["total_tokens"] != usage["input_tokens"] + usage["output_tokens"]:
+            raise ExecutionError("host total must equal observed input plus output tokens")
+        encoded = _json(usage)
+        self._require_database()
+        with self._connection() as connection:
+            row = self._row(connection, work_id)
+            if row["thread_id"] != thread_id or row["start_provenance"] != "host-callback":
+                raise ExecutionError("host usage does not match the observed thread")
+            if row["usage_json"] is not None:
+                if row["usage_json"] == encoded and row["usage_provenance"] == "host-callback":
+                    return self._public(row)
+                raise ExecutionError("host usage conflicts with existing evidence")
+            if row["state"] != "started":
+                raise ExecutionError("host usage requires a started execution")
+            connection.execute("UPDATE execution SET usage_json=?,usage_provenance='host-callback' WHERE work_id=?", (encoded, work_id))
+            return self._public(self._row(connection, work_id))
 
     def finish(self, work_id: str, outcome: str, unknown_reason: str | None = None,
                rollout_path: Path | str | None = None, fallback_reason: str | None = None,

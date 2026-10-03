@@ -15,9 +15,10 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import stat
-import subprocess
 import tempfile
 from typing import Callable, Mapping, Sequence
+
+from .processes import ArgvProcessRunner, ProcessError
 
 
 MAX_MIGRATION_FILES = 512
@@ -154,26 +155,24 @@ def apply_migration_plan(
                 environment["TASKTRA_NETWORK_ALLOWED"] = "1" if effects["network"] else "0"
                 environment["PYTHONNOUSERSITE"] = "1"
                 try:
-                    completed = subprocess.run(
-                        list(effects["argv"]),
-                        cwd=staged_pack,
-                        env=environment,
-                        shell=False,
-                        capture_output=True,
-                        text=True,
-                        timeout=timeout_seconds,
-                        check=False,
-                    )
-                except (OSError, subprocess.TimeoutExpired) as error:
-                    raise MigrationError(f"migration command failed to launch or timed out for {change['pack']}: {error}") from error
+                    completed = ArgvProcessRunner(
+                        timeout=timeout_seconds, output_limit=MAX_MIGRATION_OUTPUT,
+                        terminate_on_output_limit=False,
+                    ).run(list(effects["argv"]), cwd=staged_pack, env=environment)
+                except ProcessError as error:
+                    raise MigrationError(f"migration command cleanup failed for {change['pack']}: {error}") from error
+                if not completed.dispatched:
+                    raise MigrationError(f"migration command failed to launch for {change['pack']}")
+                if completed.timed_out:
+                    raise MigrationError(f"migration command timed out for {change['pack']}")
                 result = {
                     "pack": change["pack"],
                     "argv": list(effects["argv"]),
                     "exit_code": completed.returncode,
-                    "stdout": completed.stdout[:MAX_MIGRATION_OUTPUT],
-                    "stderr": completed.stderr[:MAX_MIGRATION_OUTPUT],
-                    "stdout_truncated": len(completed.stdout) > MAX_MIGRATION_OUTPUT,
-                    "stderr_truncated": len(completed.stderr) > MAX_MIGRATION_OUTPUT,
+                    "stdout": completed.stdout.decode(errors="replace"),
+                    "stderr": completed.stderr.decode(errors="replace"),
+                    "stdout_truncated": completed.stdout_limited,
+                    "stderr_truncated": completed.stderr_limited,
                 }
                 command_results.append(result)
                 if completed.returncode != 0:

@@ -1,7 +1,8 @@
-# Tasktra program review — 2026-10-02
+# Tasktra program review — 2026-10-03
 
-This review covers the program at baseline `7fe095e`, the local progress portal,
-and the corrections recorded in the Unreleased changelog. It combines the full
+This review covers the program, the local progress portal, and the corrections
+recorded in the Unreleased changelog. The first correctness review used baseline
+`7fe095e`; the architecture and execution follow-up used `6e90251`. It combines the full
 discovered test suite with independent source review, isolated Git reproductions,
 failure injection, and browser checks. A passing review is evidence for the
 tested behavior, not proof that every possible program state is defect-free.
@@ -25,6 +26,40 @@ The security, configuration/validation/portal, and lifecycle corrections receive
 independent re-review. Follow-up recovery findings were corrected before the
 final verification run.
 
+## Architecture and execution follow-up
+
+The architecture remains a modular Python/SQLite application. That is a useful
+fit for a local control plane: authority, work ownership, budgets, and audit
+evidence can commit together without introducing a distributed transaction.
+Pure workflow rules, host execution, process cleanup, and patch transport now
+have separate interfaces. A service split would add operational complexity
+without evidence of a scale requirement.
+
+| Finding | Resolution |
+| --- | --- |
+| Work plans and receipts did not dispatch actual agents. | `tasktra run` previews or executes one approved unit through the installed Codex CLI, with fresh stage threads, persisted host results, validation, and reviewed patch publication. |
+| All successful work required a software implementation pipeline. | Immutable implementation, research, documentation, and deterministic verification policies preserve review appropriate to each work type. Non-default policies need explicit envelope permission. |
+| Contract replacement and terminal work could strand a goal. | Replacement validates existing scopes, checkpoints, and policy permissions. Failed/exhausted work can be requeued with current authority and remaining budgets. Status separates lifecycle from execution health. |
+| Ambiguous upgrade/local effects could look terminal. | Indeterminate and recovery-required effects remain outstanding until an exact, evidence-backed recovery decision is recorded; original receipts remain available. |
+| Process supervision was duplicated and could miss descendants. | A shared argv runner owns bounded output, cancellation, Job/process-group cleanup, and failure reporting for providers, migrations, validation, and Codex execution. |
+| Concurrent telemetry could lose writes; benchmark verdicts could punish improved correctness. | OS-owned locks serialize complete read/update/write operations and release on crash. Benchmark comparison gates efficiency on verified quality. |
+| A worker could affect later review through runtime state, instruction changes, or ignored files. | Workers use detached clones without a remote. Reserved control paths are rejected, later stages receive only the retained patch, and publication checks the original baseline. |
+| Over-budget host turns and missing usage could corrupt accounting. | Known overage is reconciled against host receipts and charged as budget debt; missing usage is explicitly labelled and conservatively charged. Configured model pins remain requests, not falsely observed models. |
+
+## Usefulness and product boundaries
+
+Tasktra is most useful for consequential, multi-session agent work that benefits
+from explicit authority, durable ownership, independent review, and recovery.
+The single-unit runner removes manual stage dispatch and evidence plumbing, but
+initial goal/envelope approval still requires deliberate setup. A short solo
+edit may not justify that overhead. There is no paired benchmark demonstrating
+a general token, cost, or wall-time advantage over ordinary Codex use.
+
+The implemented runner is explicit and bounded. It does not supply an unattended
+multi-project daemon. Jira and scheduler discovery/planning are not claims of
+live mutations or schedule creation. See [execution](EXECUTION.md) for the exact
+supported checkout, scope, approval, and recovery contract.
+
 ## Verification scope
 
 - `python -m tasktra validate --root . --run --timeout 300` runs the complete
@@ -39,15 +74,18 @@ final verification run.
 - The CI matrix runs Windows, macOS, and Linux on Python 3.11, 3.12, and 3.13.
   Consult the commit's GitHub Actions run for hosted execution results; the
   workflow definition alone is not a test result.
+- Real Codex CLI smoke execution verified fresh thread events, a schema-bound
+  response, and observed usage against a temporary read-only Git fixture. The
+  multi-stage integration tests use controlled hosts and real Git clones;
+  they are not presented as live model-quality benchmarks.
 
 ## Boundaries and remaining limitations
 
 - Platform-specific skips are reported explicitly. Local execution used Windows
   and Python 3.11; hosted CI supplies the other platform/version results.
-- When a managed Windows host denies Job Object assignment and a parent exits
-  early, fallback process-tree discovery cannot reliably find every descendant.
-  Retained output pipes cause validation to fail instead of claiming verified
-  cleanup. Trusted validation commands are not an operating-system sandbox.
+- Windows processes are assigned to an owned Job before execution is resumed;
+  assignment or cleanup failures fail the invocation. Trusted project validation
+  commands are full-host code, not an operating-system sandbox.
 - Provider behavior is tested with isolated Git repositories and provider
   fixtures. This review does not perform live Jira mutations or deploy software.
 - Portal states are recorded observations. A started receipt without a linked

@@ -68,8 +68,8 @@ class LifecyclePlanningTests(unittest.TestCase):
     def test_upgrade_composes_exact_pack_and_immediately_preceding_runtime_previews(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            self._runtime_schema(root, 9)
-            plan = preview_upgrade(root, self.catalog, current_lock=self._lock("0.6.0", runtime=9)).as_dict()
+            self._runtime_schema(root, 10)
+            plan = preview_upgrade(root, self.catalog, current_lock=self._lock("0.6.0", runtime=10)).as_dict()
             self.assertTrue(plan["ok"])
             self.assertEqual([item["order"] for item in plan["migration_steps"]], [1, 2])
             self.assertEqual([item["kind"] for item in plan["migration_steps"]], ["runtime-schema", "pack"])
@@ -83,13 +83,13 @@ class LifecyclePlanningTests(unittest.TestCase):
             root = Path(directory)
             StateStore(root / ".tasktra/runtime/tasktra.sqlite").migrate()
 
-            plan = preview_upgrade(root, self.catalog, current_lock=self._lock("0.6.0", runtime=9)).as_dict()
+            plan = preview_upgrade(root, self.catalog, current_lock=self._lock("0.6.0", runtime=10)).as_dict()
 
             self.assertFalse(plan["ok"])
             self.assertTrue(any(
                 item.get("component") == "runtime-state"
-                and item.get("lock_schema") == 9
-                and item.get("on_disk_schema") == 10
+                and item.get("lock_schema") == 10
+                and item.get("on_disk_schema") == 11
                 for item in plan["conflicts"]
             ))
 
@@ -138,7 +138,7 @@ class LifecyclePlanningTests(unittest.TestCase):
 
             self.assertTrue(plan["ok"], plan["conflicts"])
             edge = next(item for item in plan["compatibility"] if item["component"] == "runtime-schema")
-            self.assertEqual((edge["from"], edge["to"]), (8, 10))
+            self.assertEqual((edge["from"], edge["to"]), (8, 11))
             self.assertIn("compound", edge["reason"])
 
     def test_upgrade_fails_visibly_for_unsupported_pack_runtime_and_major_edges(self):

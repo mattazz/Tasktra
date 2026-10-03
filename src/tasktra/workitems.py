@@ -22,6 +22,7 @@ from typing import Any, Iterator
 from uuid import uuid4
 
 from .contracts import ContractError, validate_named
+from .filelocks import FileLockBusyError, FileLockError, exclusive_file_lock
 from .identifiers import IdentifierError, MAX_IDENTIFIER_CHARS as _MAX_IDENTIFIER_CHARS, is_identifier, require_identifier, require_optional_identifier
 from .workflow import WorkflowError, workflow_completion_token
 
@@ -440,16 +441,12 @@ class WorkItemStore:
         lock_path = path.with_name(f".{path.name}.lock")
         self._assert_safe_path(lock_path)
         try:
-            self._assert_safe_path(lock_path)
-            descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError as error:
+            with exclusive_file_lock(lock_path, root=self.project_root):
+                yield
+        except FileLockBusyError as error:
             raise WorkItemConflictError(f"Work item is already being updated: {path.stem}") from error
-        try:
-            os.close(descriptor)
-            yield
-        finally:
-            self._assert_safe_path(lock_path)
-            lock_path.unlink(missing_ok=True)
+        except FileLockError as error:
+            raise WorkItemError(str(error)) from error
 
     def _replace(self, path: Path, content: str) -> None:
         self._assert_safe_path(path, must_exist=True)

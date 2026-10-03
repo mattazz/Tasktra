@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
@@ -200,7 +201,10 @@ class Stage3LedgerTests(unittest.TestCase):
             self.assertEqual(attempt[1], "2026-01-01T00:00:10Z")
             self.assertEqual(attempt[2], "paused")
             self.assertIn("safety", attempt[3])
-            self.assertEqual(attempt[4], 0)
+            self.assertEqual(attempt[4], 3)  # Historical reservation survives settlement.
+            self.assertEqual(store.budget_summary("goal-one")["reserved_tokens"], 0)
+            self.assertEqual(store.budget_summary("goal-one")["consumed_tokens"], 3)
+            self.assertEqual(json.loads(attempt[3])["unmeasured_usage"]["state"], "unmeasured")
 
     def test_migrated_v3_authority_rows_require_human_attestation(self):
         with TemporaryDirectory() as directory:

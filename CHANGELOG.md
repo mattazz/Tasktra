@@ -6,12 +6,28 @@ All notable changes to Tasktra are documented here. Dates use ISO 8601.
 
 ### Added
 
+- An explicit `tasktra run` preview/apply path for one approved work unit, with
+  isolated Codex checkouts, fresh verification stages, attributable receipts,
+  bounded patch publication, cancellation, and observed token accounting.
+- Immutable research, documentation, and deterministic verification policies,
+  gated by explicit envelope permissions; existing work keeps its default policy.
+- Derived execution health and parent-linked agent stages in status and the portal.
 - A bundled, read-only local web portal for goals, jobs, agent records, budgets,
   and recent activity, with responsive layouts, animated robot avatars, and a
   clearly labeled browser-only demo.
 
 ### Corrected
 
+- Goal-contract changes cannot strand existing scopes, checkpoints, or policies;
+  failed work can be requeued with current authority and remaining budgets.
+- Interrupted reservations remain explicitly unmeasured budget charges, and
+  verified soft token overruns remain visible as debt instead of lost spend.
+- Ambiguous local effects remain outstanding until an evidence-backed human
+  recovery decision is recorded. Upgrade CLI failures preserve that distinction.
+- Provider, validation, migration, and host processes use one supervised runner.
+- Concurrent telemetry appends preserve events, and OS-owned file locks release
+  automatically after crashes. Benchmark verdicts prioritize verified quality
+  and reject unverified efficiency claims.
 - Git commit requests must remain within the approved envelope, work-unit, and
   human-approval file scopes. Previously accepted out-of-scope requests now fail
   closed; obtain appropriately scoped authorization before preparing new work.

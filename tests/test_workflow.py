@@ -9,6 +9,7 @@ from tasktra.workflow import (
     serialize_workflow,
     validate_workflow_completion_token,
     workflow_completion_token,
+    policy_roles,
 )
 
 
@@ -32,6 +33,26 @@ def handoff(identifier, *, status="completed", source=None, role="implementer", 
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_selected_author_reviewer_policy_requires_independent_reviewer(self):
+        state = new_workflow(SOURCE, verification_policy="research-review")
+        self.assertEqual(policy_roles("research-review"), ("author", "reviewer"))
+        state = accept_handoff(state, handoff("author-result", role="author", actor_id="writer-one"))
+        self.assertEqual(state["current_role"], "reviewer")
+        with self.assertRaisesRegex(WorkflowError, "prior workflow actor"):
+            accept_handoff(state, handoff("review-result", role="reviewer", actor_id="writer-one"))
+        completed = accept_handoff(state, handoff("review-result", role="reviewer", actor_id="reviewer-one"))
+        self.assertTrue(is_workflow_complete(completed))
+
+    def test_direct_policy_has_no_implicit_model_handoffs(self):
+        state = new_workflow(SOURCE, verification_policy="deterministic-direct")
+        self.assertEqual(policy_roles("deterministic-direct"), ())
+        self.assertTrue(is_workflow_complete(state))
+        token = workflow_completion_token(state)
+        self.assertEqual(token["terminal_handoff_id"], "deterministic-direct")
+        self.assertEqual(validate_workflow_completion_token(state, token), token)
+        with self.assertRaisesRegex(WorkflowError, "not ready"):
+            accept_handoff(state, handoff("forged", role="author"))
+
     def test_completed_handoffs_advance_implement_test_review_and_finish(self):
         state = new_workflow(SOURCE)
         state = accept_handoff(state, handoff("implement-result"))

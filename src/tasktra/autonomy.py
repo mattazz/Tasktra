@@ -14,7 +14,10 @@ from typing import Any
 from urllib.parse import parse_qsl, urlparse
 from uuid import uuid4
 
-from .state import StateError, StateStore, _decode, _encode, _identifier, _optional_identifier, _row, _timestamp
+from .state import (
+    StateError, StateStore, _decode, _encode, _identifier, _optional_identifier,
+    _row, _timestamp, unmeasured_usage_evidence, validate_observed_usage_evidence,
+)
 from .authority import load_authority_envelope
 from .providers import OperationDescriptor, ProviderError, ResourceScope
 from .workflow import (
@@ -30,6 +33,7 @@ WORK_COMPLETE_ACTION = "work-complete"
 WORK_REQUEUE_ACTION = "work-requeue"
 LOCAL_REVERSIBLE_WRITE = "local-reversible-write"
 OUTCOMES = frozenset({"success", "transient", "permanent", "blocked", "approval-required", "exhausted"})
+LOCAL_EFFECT_RECEIPT_OUTCOMES = frozenset({"applied", "success", "failed-before-effect", "indeterminate", "recovery-required"})
 MAX_LEASE_SECONDS = 3_600
 MAX_CONTEXT_CHARS = 500
 MAX_CANONICAL_JSON_BYTES = 64 * 1024
@@ -462,11 +466,13 @@ class AutonomyStore(StateStore):
     def claim_next_work(self, *, goal_id: str, performer_id: str, envelope_sha256: str,
                         lease_seconds: int = 300, token_reservation: int = 0,
                         repository: str, revision: str, branch: str, workspace: str,
+                        work_unit_id: str | None = None,
                         lease_token: str | None = None,
                         at: str | datetime | None = None) -> dict[str, Any] | None:
         """Atomically claim work; caller-supplied tokens are never returned."""
         goal_id = _identifier(goal_id, label="goal_id")
         performer_id = _identifier(performer_id, label="performer_id")
+        work_unit_id = _optional_identifier(work_unit_id, label="work_unit_id")
         if not isinstance(token_reservation, int) or isinstance(token_reservation, bool) or token_reservation < 0:
             raise AutonomyError("token_reservation must be a non-negative integer")
         caller_supplied_token = lease_token is not None
@@ -520,6 +526,9 @@ class AutonomyStore(StateStore):
             query = """SELECT * FROM work_units WHERE goal_id=? AND current_attempt_id IS NULL
                    AND status IN ('eligible','retry-wait','planned') AND (retry_at IS NULL OR retry_at<=?)"""
             params: list[Any] = [goal_id, timestamp]
+            if work_unit_id is not None:
+                query += " AND id=?"
+                params.append(work_unit_id)
             if contract["checkpoints"]:
                 query += " AND checkpoint_id=?"
                 params.append(next_checkpoint)
@@ -568,7 +577,7 @@ class AutonomyStore(StateStore):
                          payload={"attempt_id": attempt_id, "performer_id": performer_id, "attempt_no": attempt_no})
         result = {"attempt_id": attempt_id, "work_unit_id": selected["id"], "goal_id": goal_id,
                   "lease_expires_at": expiry, "attempt_no": attempt_no,
-                  "work_unit": {"id": selected["id"], "title": selected["title"], "scope": json.loads(selected["scope"]), "checkpoint_id": selected["checkpoint_id"]},
+                  "work_unit": {"id": selected["id"], "title": selected["title"], "scope": json.loads(selected["scope"]), "checkpoint_id": selected["checkpoint_id"], "verification_policy": selected["verification_policy"]},
                   "context": context}
         if not caller_supplied_token:
             result["lease_token"] = token
@@ -640,13 +649,20 @@ class AutonomyStore(StateStore):
                         and attempt_budget["consumed_elapsed_ms"] + elapsed >= attempt_budget["total_elapsed_ms"]
                     )
                 ) else "retry"
+                recovery_evidence: dict[str, Any] = {"recovered": True}
+                if int(attempt["tokens_reserved"]):
+                    recovery_evidence["unmeasured_usage"] = unmeasured_usage_evidence(
+                        charged_tokens=int(attempt["tokens_reserved"]), reason="lease-expired",
+                    )
                 connection.execute(
-                    "UPDATE work_attempts SET status='expired',outcome_class=?,outcome_json=?,ended_at=?,elapsed_ms=? WHERE id=?",
-                    (terminal, _encode({"recovered": True}), timestamp, elapsed, attempt["id"]),
+                    """UPDATE work_attempts SET status='expired',outcome_class=?,outcome_json=?,ended_at=?,elapsed_ms=?,
+                       tokens_consumed=tokens_consumed+? WHERE id=?""",
+                    (terminal, _encode(recovery_evidence), timestamp, elapsed, attempt["tokens_reserved"], attempt["id"]),
                 )
                 connection.execute(
-                    "UPDATE budgets SET reserved_tokens=reserved_tokens-?,consumed_elapsed_ms=consumed_elapsed_ms+?,updated_at=? WHERE goal_id=?",
-                    (attempt["tokens_reserved"], elapsed, timestamp, goal_id),
+                    """UPDATE budgets SET reserved_tokens=reserved_tokens-?,consumed_tokens=consumed_tokens+?,
+                       consumed_elapsed_ms=consumed_elapsed_ms+?,updated_at=? WHERE goal_id=?""",
+                    (attempt["tokens_reserved"], attempt["tokens_reserved"], elapsed, timestamp, goal_id),
                 )
                 connection.execute(
                     "UPDATE work_units SET status=?,lease_holder=NULL,lease_expires_at=NULL,current_attempt_id=NULL,retry_at=?,last_outcome_class=?,updated_at=? WHERE id=? AND current_attempt_id=?",
@@ -741,12 +757,64 @@ class AutonomyStore(StateStore):
             self._append(connection, "work.heartbeat", goal_id=row["goal_id"], work_unit_id=row["work_unit_id"], payload={"attempt_id": attempt_id})
         return {"attempt_id": attempt_id, "lease_expires_at": expiry}
 
+    def validate_attempt(self, *, attempt_id: str, performer_id: str, lease_token: str,
+                         envelope_sha256: str | None = None,
+                         at: str | datetime | None = None) -> dict[str, Any]:
+        """Prove a host is still bound to its exact, live claim before a stage.
+
+        The result contains no lease secret and includes the immutable work-unit
+        selector and verification policy used by a host supervisor.
+        """
+        attempt_id = _identifier(attempt_id, label="attempt_id")
+        performer_id = _identifier(performer_id, label="performer_id")
+        timestamp, _ = _clock(at)
+        supplied_hash = sha256(lease_token.encode("utf-8")).hexdigest() if isinstance(lease_token, str) else ""
+        with self._connection(write=False) as connection:
+            row = connection.execute(
+                """SELECT a.*,u.goal_id,u.current_attempt_id,u.status AS work_unit_status,u.scope,u.checkpoint_id,u.verification_policy
+                   FROM work_attempts a JOIN work_units u ON u.id=a.work_unit_id WHERE a.id=?""",
+                (attempt_id,),
+            ).fetchone()
+            if row is None or row["status"] != "leased" or row["current_attempt_id"] != attempt_id:
+                raise AutonomyError("attempt is stale or no longer current")
+            if row["owner_id"] != performer_id or not hmac.compare_digest(row["lease_token_hash"], supplied_hash):
+                raise AutonomyError("attempt owner or lease token does not match")
+            if timestamp >= row["expires_at"]:
+                raise AutonomyError("lease is expired; recover it instead")
+            self._active_goal(connection, row["goal_id"])
+            if connection.execute("SELECT emergency_stopped FROM runtime_control WHERE id=1").fetchone()[0]:
+                raise AutonomyError("runtime is emergency-stopped")
+            if envelope_sha256 is not None:
+                # A host calls this between stages.  This rechecks both the
+                # immutable current envelope and the approval's expiry and
+                # revocation state, so a supervisor never relies on a claim
+                # ceremony that was later withdrawn.
+                self._authorize(
+                    connection, goal_id=row["goal_id"], work_unit_id=row["work_unit_id"],
+                    action=WORK_CLAIM_ACTION, envelope_sha256=envelope_sha256,
+                    performer_id=performer_id, effect=LOCAL_REVERSIBLE_WRITE,
+                    timestamp=timestamp,
+                )
+            return {
+                "attempt_id": attempt_id, "goal_id": row["goal_id"], "work_unit_id": row["work_unit_id"],
+                "verification_policy": row["verification_policy"], "checkpoint_id": row["checkpoint_id"],
+                "scope": json.loads(row["scope"]), "lease_expires_at": row["expires_at"],
+            }
+
+    def goal_run_health(self, goal_id: str) -> dict[str, Any]:
+        """Stable host-facing alias for the derived, non-lifecycle health view."""
+        return self.goal_execution_health(goal_id)
+
     @staticmethod
-    def _validate_completion(goal_id: str, work_unit_id: str, workflow: Mapping[str, Any], token: Mapping[str, Any] | None) -> tuple[str, str]:
+    def _validate_completion(goal_id: str, work_unit_id: str, verification_policy: str,
+                             workflow: Mapping[str, Any], token: Mapping[str, Any] | None) -> tuple[str, str]:
         try:
             completion = workflow_completion_token(workflow) if token is None else validate_workflow_completion_token(workflow, token)
             if completion["source"] != {"goal_id": goal_id, "work_unit_id": work_unit_id}:
                 raise AutonomyError("workflow completion belongs to a different goal or work unit")
+            workflow_policy = "implementation-review" if workflow.get("version") == 1 else workflow.get("verification_policy")
+            if workflow_policy != verification_policy:
+                raise AutonomyError("workflow verification policy does not match the immutable work unit policy")
             serialized = serialize_workflow(workflow)
         except WorkflowError as error:
             raise AutonomyError(f"success requires a complete Stage 2 workflow: {error}") from error
@@ -770,7 +838,10 @@ class AutonomyStore(StateStore):
                                    at: str | datetime | None = None) -> dict[str, Any]:
         goal_id = _identifier(goal_id, label="goal_id")
         work_unit_id = _identifier(work_unit_id, label="work_unit_id")
-        workflow_json, token_json = self._validate_completion(goal_id, work_unit_id, workflow, completion_token)
+        unit_policy = self.get_work_unit(work_unit_id)
+        if unit_policy is None:
+            raise AutonomyError("unknown work unit for goal")
+        workflow_json, token_json = self._validate_completion(goal_id, work_unit_id, unit_policy["verification_policy"], workflow, completion_token)
         timestamp, _ = _clock(at)
         with self._connection() as connection:
             self._prepare_write(connection)
@@ -852,6 +923,8 @@ class AutonomyStore(StateStore):
     def finish_attempt(self, *, attempt_id: str, performer_id: str, lease_token: str, outcome: str,
                        tokens_consumed: int = 0, elapsed_ms: int | None = None,
                        outcome_evidence: Mapping[str, Any] | None = None,
+                       observed_token_overrun: bool = False,
+                       observed_usage_evidence: Mapping[str, Any] | None = None,
                        workflow: Mapping[str, Any] | None = None, completion_token: Mapping[str, Any] | None = None,
                        at: str | datetime | None = None) -> dict[str, Any]:
         if outcome not in OUTCOMES:
@@ -860,11 +933,13 @@ class AutonomyStore(StateStore):
         performer_id = _identifier(performer_id, label="performer_id")
         if not isinstance(tokens_consumed, int) or isinstance(tokens_consumed, bool) or tokens_consumed < 0:
             raise AutonomyError("tokens_consumed must be a non-negative integer")
+        if not isinstance(observed_token_overrun, bool):
+            raise AutonomyError("observed_token_overrun must be a boolean")
         timestamp, now = _clock(at)
         supplied_hash = sha256(lease_token.encode("utf-8")).hexdigest() if isinstance(lease_token, str) else ""
         with self._connection() as connection:
             self._prepare_write(connection)
-            row = connection.execute("""SELECT a.*,u.goal_id,u.current_attempt_id,u.attempt_count,u.checkpoint_id FROM work_attempts a
+            row = connection.execute("""SELECT a.*,u.goal_id,u.current_attempt_id,u.attempt_count,u.checkpoint_id,u.verification_policy FROM work_attempts a
                                       JOIN work_units u ON u.id=a.work_unit_id WHERE a.id=?""", (attempt_id,)).fetchone()
             if row is None or row["status"] != "leased" or row["current_attempt_id"] != attempt_id:
                 raise AutonomyError("attempt is stale or no longer current")
@@ -888,9 +963,28 @@ class AutonomyStore(StateStore):
                 outcome_evidence = {}
             if not isinstance(outcome_evidence, Mapping):
                 raise AutonomyError("outcome_evidence must be an object")
-            outcome_json, _ = _json_hash(outcome_evidence)
-            if tokens_consumed > row["tokens_reserved"]:
+            if tokens_consumed > row["tokens_reserved"] and not observed_token_overrun:
                 raise AutonomyError("tokens_consumed exceeds the reservation")
+            if observed_token_overrun:
+                # This is an exceptional accounting settlement for a
+                # coordinator-attested usage total.  It cannot complete work
+                # or grant new budget; it releases the lease as exhausted.
+                if tokens_consumed <= row["tokens_reserved"]:
+                    raise AutonomyError("observed token overrun must exceed the reservation")
+                if outcome != "exhausted" or workflow is not None or completion_token is not None:
+                    raise AutonomyError("observed token overrun must settle an exhausted attempt without workflow")
+                if "observed_usage" in outcome_evidence:
+                    raise AutonomyError("outcome_evidence may not supply observed_usage")
+                try:
+                    observed_usage = validate_observed_usage_evidence(
+                        observed_usage_evidence, tokens_consumed=tokens_consumed,
+                    )
+                except StateError as error:
+                    raise AutonomyError(str(error)) from error
+                outcome_evidence = {**dict(outcome_evidence), "observed_usage": observed_usage}
+            elif observed_usage_evidence is not None:
+                raise AutonomyError("observed_usage_evidence requires observed_token_overrun")
+            outcome_json, _ = _json_hash(outcome_evidence)
             terminal = outcome
             workflow_json = token_json = None
             if outcome == "success":
@@ -899,7 +993,7 @@ class AutonomyStore(StateStore):
                 self._authorize(connection, goal_id=row["goal_id"], work_unit_id=row["work_unit_id"], action=WORK_COMPLETE_ACTION,
                                 envelope_sha256=connection.execute("SELECT envelope_sha256 FROM goal_contracts WHERE goal_id=?", (row["goal_id"],)).fetchone()[0],
                                 performer_id=performer_id, effect=LOCAL_REVERSIBLE_WRITE, timestamp=timestamp)
-                workflow_json, token_json = self._validate_completion(row["goal_id"], row["work_unit_id"], workflow, completion_token)
+                workflow_json, token_json = self._validate_completion(row["goal_id"], row["work_unit_id"], row["verification_policy"], workflow, completion_token)
             other_reservation = self._live_reservation_ms(connection, row["goal_id"], excluding_attempt_id=attempt_id)
             if (budget["total_elapsed_ms"] is not None and budget["consumed_elapsed_ms"] + other_reservation + measured_elapsed > budget["total_elapsed_ms"]):
                 terminal = "exhausted"
@@ -939,8 +1033,15 @@ class AutonomyStore(StateStore):
                 budget = connection.execute("SELECT * FROM budgets WHERE goal_id=?", (row["goal_id"],)).fetchone()
                 elapsed = min(self._attempt_elapsed(row, now), self._lease_reservation_ms(row))
                 terminal = "exhausted" if budget["consumed_attempts"] >= budget["total_attempts"] or (budget["total_elapsed_ms"] is not None and budget["consumed_elapsed_ms"] + elapsed >= budget["total_elapsed_ms"]) else "retry"
-                connection.execute("UPDATE work_attempts SET status='expired',outcome_class=?,outcome_json=?,ended_at=?,elapsed_ms=? WHERE id=?", (terminal, _encode({"recovered": True}), timestamp, elapsed, row["id"]))
-                connection.execute("UPDATE budgets SET reserved_tokens=reserved_tokens-?,consumed_elapsed_ms=consumed_elapsed_ms+?,updated_at=? WHERE goal_id=?", (row["tokens_reserved"], elapsed, timestamp, row["goal_id"]))
+                recovery_evidence: dict[str, Any] = {"recovered": True}
+                if int(row["tokens_reserved"]):
+                    recovery_evidence["unmeasured_usage"] = unmeasured_usage_evidence(
+                        charged_tokens=int(row["tokens_reserved"]), reason="lease-expired",
+                    )
+                connection.execute("""UPDATE work_attempts SET status='expired',outcome_class=?,outcome_json=?,ended_at=?,elapsed_ms=?,
+                                   tokens_consumed=tokens_consumed+? WHERE id=?""", (terminal, _encode(recovery_evidence), timestamp, elapsed, row["tokens_reserved"], row["id"]))
+                connection.execute("""UPDATE budgets SET reserved_tokens=reserved_tokens-?,consumed_tokens=consumed_tokens+?,
+                                   consumed_elapsed_ms=consumed_elapsed_ms+?,updated_at=? WHERE goal_id=?""", (row["tokens_reserved"], row["tokens_reserved"], elapsed, timestamp, row["goal_id"]))
                 connection.execute("UPDATE work_units SET status=?,lease_holder=NULL,lease_expires_at=NULL,current_attempt_id=NULL,retry_at=?,last_outcome_class=?,updated_at=? WHERE id=? AND current_attempt_id=?", ("retry-wait" if terminal == "retry" else terminal, timestamp if terminal == "retry" else None, terminal, timestamp, row["work_unit_id"], row["id"]))
                 self._append(connection, "work.lease_recovered", goal_id=row["goal_id"], work_unit_id=row["work_unit_id"], payload={"attempt_id": row["id"], "outcome": terminal})
                 recovered.append(row["id"])
@@ -962,9 +1063,18 @@ class AutonomyStore(StateStore):
             unit = connection.execute("SELECT * FROM work_units WHERE id=?", (work_unit_id,)).fetchone()
             if unit is None:
                 raise AutonomyError("unknown work unit")
-            if unit["status"] not in {"blocked", "approval-required"}:
-                raise AutonomyError("only blocked or approval-required work may be requeued")
+            if unit["status"] not in {"blocked", "approval-required", "failed", "exhausted"}:
+                raise AutonomyError("only blocked, approval-required, failed, or exhausted work may be requeued")
             self._active_goal(connection, unit["goal_id"])
+            budget = connection.execute("SELECT * FROM budgets WHERE goal_id=?", (unit["goal_id"],)).fetchone()
+            if budget is None or budget["total_attempts"] is None:
+                raise AutonomyError("goal lacks execution budgets")
+            if int(budget["consumed_attempts"]) >= int(budget["total_attempts"]):
+                raise AutonomyError("requeue cannot grant an exhausted attempt budget")
+            if int(unit["attempt_count"]) >= int(budget["total_attempts"]):
+                raise AutonomyError("requeue cannot grant an exhausted work-unit attempt allowance")
+            if budget["total_elapsed_ms"] is not None and int(budget["consumed_elapsed_ms"]) >= int(budget["total_elapsed_ms"]):
+                raise AutonomyError("requeue cannot grant an exhausted elapsed budget")
             self._authorize(
                 connection, goal_id=unit["goal_id"], work_unit_id=work_unit_id,
                 action=WORK_REQUEUE_ACTION, envelope_sha256=envelope_sha256,
@@ -1387,7 +1497,8 @@ class AutonomyStore(StateStore):
                               at: str | datetime | None = None) -> dict[str, Any]:
         idempotency_key = _identifier(idempotency_key, label="idempotency_key")
         performer_id = _identifier(performer_id, label="performer_id")
-        if not isinstance(outcome, str) or not outcome: raise AutonomyError("receipt outcome must be non-empty")
+        if outcome not in LOCAL_EFFECT_RECEIPT_OUTCOMES:
+            raise AutonomyError("receipt outcome must be one of applied, success, failed-before-effect, indeterminate, or recovery-required")
         for name, digest in (("before_sha256", before_sha256), ("after_sha256", after_sha256)):
             if digest is not None and (not isinstance(digest, str) or len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest)):
                 raise AutonomyError(f"{name} must be a lowercase SHA-256 digest or null")
@@ -1405,10 +1516,53 @@ class AutonomyStore(StateStore):
                     raise AutonomyError("effect receipt conflicts with the existing receipt")
                 return dict(existing)
             receipt_id = _identifier(f"receipt-{uuid4().hex}", label="receipt_id")
+            if outcome in {"indeterminate", "recovery-required"}:
+                intent_status = "recovery-required"
+            else:
+                intent_status = "received"
             connection.execute("INSERT INTO effect_receipts VALUES(?,?,?,?,?,?,?,?)", (receipt_id, idempotency_key, outcome, before_sha256, after_sha256, evidence_json, performer_id, timestamp))
-            connection.execute("UPDATE effect_intents SET status='received' WHERE idempotency_key=?", (idempotency_key,))
-            self._append(connection, "effect.receipt_recorded", goal_id=intent["goal_id"], work_unit_id=intent["work_unit_id"], payload={"idempotency_key": idempotency_key, "receipt_id": receipt_id})
+            connection.execute("UPDATE effect_intents SET status=? WHERE idempotency_key=?", (intent_status, idempotency_key))
+            self._append(connection, "effect.receipt_recorded", goal_id=intent["goal_id"], work_unit_id=intent["work_unit_id"], payload={"idempotency_key": idempotency_key, "receipt_id": receipt_id, "outcome": outcome, "recovery_required": intent_status == "recovery-required"})
             return dict(connection.execute("SELECT * FROM effect_receipts WHERE id=?", (receipt_id,)).fetchone())
+
+    def resolve_effect_recovery(
+        self, *, idempotency_key: str, resolution: str, evidence: Mapping[str, Any],
+        performer_id: str, envelope_sha256: str, at: str | datetime | None = None,
+    ) -> dict[str, Any]:
+        """Close an indeterminate local effect only through a fresh human approval.
+
+        This never rewrites the original receipt.  The resolution is an
+        additional audit event and only `applied` or `failed-before-effect`
+        can clear the outstanding recovery marker.
+        """
+        idempotency_key = _identifier(idempotency_key, label="idempotency_key")
+        performer_id = _identifier(performer_id, label="performer_id")
+        if resolution not in {"applied", "failed-before-effect"}:
+            raise AutonomyError("effect recovery resolution must be applied or failed-before-effect")
+        if not isinstance(evidence, Mapping) or not evidence:
+            raise AutonomyError("effect recovery evidence must be a nonempty object")
+        evidence_json, evidence_sha256 = _json_hash(evidence)
+        timestamp, _ = _clock(at)
+        with self._connection() as connection:
+            self._prepare_write(connection)
+            intent = connection.execute("SELECT * FROM effect_intents WHERE idempotency_key=?", (idempotency_key,)).fetchone()
+            if intent is None or int(intent["protocol_version"] or 1) != 1:
+                raise AutonomyError("local effect recovery requires a local effect intent")
+            if intent["status"] != "recovery-required":
+                raise AutonomyError("effect does not have outstanding recovery")
+            self._authorize(
+                connection, goal_id=intent["goal_id"], work_unit_id=intent["work_unit_id"],
+                action="effect-recovery-resolve", envelope_sha256=envelope_sha256,
+                performer_id=performer_id, effect=LOCAL_REVERSIBLE_WRITE,
+                timestamp=timestamp, require_human=True,
+            )
+            connection.execute("UPDATE effect_intents SET status='received' WHERE idempotency_key=?", (idempotency_key,))
+            self._append(connection, "effect.recovery_resolved", goal_id=intent["goal_id"], work_unit_id=intent["work_unit_id"], payload={
+                "idempotency_key": idempotency_key, "resolution": resolution,
+                "performer_id": performer_id, "evidence_sha256": evidence_sha256,
+                "evidence": json.loads(evidence_json),
+            })
+        return self.inspect_effect(idempotency_key) or {}
 
     def inspect_effect(self, idempotency_key: str) -> dict[str, Any] | None:
         idempotency_key = _identifier(idempotency_key, label="idempotency_key")
@@ -1497,11 +1651,15 @@ class AutonomyStore(StateStore):
             recorded = {row[0] for row in connection.execute("SELECT criterion_id FROM acceptance_evidence WHERE goal_id=?", (goal_id,))}
             missing_criteria = criteria - recorded
             from .workflow import load_workflow
-            for evidence in connection.execute("SELECT workflow_json,completion_token_json FROM workflow_evidence w JOIN work_units u ON u.id=w.work_unit_id WHERE u.goal_id=?", (goal_id,)):
+            for evidence in connection.execute("SELECT workflow_json,completion_token_json,u.verification_policy FROM workflow_evidence w JOIN work_units u ON u.id=w.work_unit_id WHERE u.goal_id=?", (goal_id,)):
                 try:
                     if evidence["completion_token_json"] is None:
                         raise WorkflowError("missing completion token")
-                    validate_workflow_completion_token(load_workflow(evidence["workflow_json"]), json.loads(evidence["completion_token_json"]))
+                    stored_workflow = load_workflow(evidence["workflow_json"])
+                    policy = "implementation-review" if stored_workflow.get("version") == 1 else stored_workflow.get("verification_policy")
+                    if policy != evidence["verification_policy"]:
+                        raise WorkflowError("workflow verification policy does not match its work unit")
+                    validate_workflow_completion_token(stored_workflow, json.loads(evidence["completion_token_json"]))
                 except (WorkflowError, ValueError, json.JSONDecodeError) as error:
                     raise AutonomyError(f"stored workflow evidence is invalid: {error}") from error
             unreached_checkpoints = sum(1 for row in checkpoints if row["status"] != "reached")

@@ -41,14 +41,16 @@ class ValidationTests(unittest.TestCase):
         process = Mock(pid=42)
         # Windows does not expose SIGKILL/killpg; the injected values exercise
         # this platform-independent control flow on every CI host.
-        with patch("tasktra.validation.os.killpg", create=True, side_effect=PermissionError) as killpg, patch(
-            "tasktra.validation.signal.SIGKILL", 9, create=True,
+        with patch("tasktra.processes.os.killpg", create=True, side_effect=PermissionError) as killpg, patch(
+            "tasktra.processes.signal.SIGKILL", 9, create=True,
         ), patch("tasktra.validation._posix_group_has_no_live_members", return_value=True) as probe:
             _terminate_posix_group(process)
         self.assertEqual(killpg.call_count, 2)
         self.assertEqual(probe.call_count, 2)
         process.wait.assert_called()
-        with patch("tasktra.validation.os.killpg", create=True, side_effect=PermissionError), patch(
+        with patch("tasktra.processes.os.killpg", create=True, side_effect=PermissionError), patch(
+            "tasktra.processes.signal.SIGKILL", 9, create=True,
+        ), patch(
             "tasktra.validation._posix_group_has_no_live_members", return_value=False,
         ):
             with self.assertRaisesRegex(ValidationError, "cleanup is unverified"):
@@ -56,13 +58,11 @@ class ValidationTests(unittest.TestCase):
 
     def test_cleanup_denial_fails_validation_and_stops_sequence(self):
         import tasktra.validation as validation
-        original = validation._finish_readers
+        from tasktra.processes import ProcessError
 
-        def deny_after_cleanup(*args):
-            original(*args)
-            raise PermissionError("cleanup denied")
-
-        with TemporaryDirectory() as directory, patch("tasktra.validation._finish_readers", side_effect=deny_after_cleanup):
+        with TemporaryDirectory() as directory, patch.object(
+            validation.ArgvProcessRunner, "run", side_effect=ProcessError("cleanup denied"),
+        ):
             results = run_validations(directory, [python_argv("pass"), python_argv("print('never')")])
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].status, "failed")
@@ -108,6 +108,24 @@ class ValidationTests(unittest.TestCase):
             self.assertEqual([item.status for item in results], ["passed", "failed"])
             self.assertEqual(results[1].exit_code, 3)
             self.assertNotIn("never", "".join(item.stdout for item in results))
+
+    def test_validation_forwards_periodic_host_tick(self):
+        ticks = []
+        with TemporaryDirectory() as directory:
+            result = run_validations(
+                directory, [python_argv("import time; time.sleep(.12)")],
+                on_tick=lambda: ticks.append("tick"),
+            )[0]
+        self.assertEqual(result.status, "passed")
+        self.assertTrue(ticks)
+
+    def test_validation_tick_exception_propagates_after_cleanup(self):
+        with TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(RuntimeError, "lease revoked"):
+                run_validations(
+                    directory, [python_argv("import time; time.sleep(10)")],
+                    on_tick=lambda: (_ for _ in ()).throw(RuntimeError("lease revoked")),
+                )
 
     def test_commands_are_not_interpreted_by_a_shell(self):
         with TemporaryDirectory() as directory:

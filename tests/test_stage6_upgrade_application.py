@@ -107,6 +107,59 @@ class UpgradeApplicationTests(unittest.TestCase):
             connection.close()
 
     @staticmethod
+    def _populated_schema_10(path: Path) -> StateStore:
+        """Build a sealed, populated v10-shaped ledger without inventing trust."""
+        store = StateStore(path)
+        store.create_goal(goal_id="legacy-goal", title="Legacy", description="Legacy", acceptance=["Done."])
+        store.create_work_unit(goal_id="legacy-goal", work_unit_id="legacy-unit", title="Legacy unit")
+        connection = sqlite3.connect(path, isolation_level=None)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("ALTER TABLE work_units DROP COLUMN verification_policy")
+            # The historical v10 seal hashes cover the historical row shape.
+            # Re-seal it here only to model a legitimate previously committed
+            # v10 ledger; the tamper case below deliberately does not do so.
+            StateStore._seal_current_state_in_transaction(connection, "2035-01-01T00:00:00Z")
+            connection.execute("PRAGMA user_version = 10")
+            connection.commit()
+        finally:
+            connection.close()
+        return store
+
+    def test_populated_sealed_v10_migrates_to_policy_default_with_backup(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "runtime.sqlite"
+            store = self._populated_schema_10(path)
+            evidence = store.migrate_with_evidence()
+            self.assertEqual((evidence["before_schema"], evidence["after_schema"]), (10, SCHEMA_VERSION))
+            backup = Path(str(evidence["backup_path"]))
+            self.assertTrue(backup.is_file())
+            self.assertEqual(evidence["backup_sha256"], sha256(backup.read_bytes()).hexdigest())
+            self.assertEqual(store.get_work_unit("legacy-unit")["verification_policy"], "implementation-review")
+            self.assertTrue(store.verify_audit()["ok"])
+
+    def test_tampered_v10_ledger_is_not_auto_attested_during_policy_migration(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "runtime.sqlite"
+            store = self._populated_schema_10(path)
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute("UPDATE work_units SET title='tampered' WHERE id='legacy-unit'")
+                connection.commit()
+            finally:
+                connection.close()
+            with self.assertRaisesRegex(Exception, "unsealed or tampered"):
+                store.migrate_with_evidence()
+            connection = sqlite3.connect(path)
+            try:
+                columns = {row[1] for row in connection.execute("PRAGMA table_info(work_units)")}
+                self.assertNotIn("verification_policy", columns)
+                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 10)
+            finally:
+                connection.close()
+
+    @staticmethod
     def _bytes(project: Path, relative: str) -> bytes:
         return (project / Path(relative)).read_bytes()
 

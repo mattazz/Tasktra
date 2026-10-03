@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 import re
 from typing import Any, Iterable, Mapping
@@ -48,7 +49,7 @@ class BenchmarkObservation:
         object.__setattr__(self, "escalation_count", _count(self.escalation_count, field="escalation_count"))
         object.__setattr__(self, "retry_count", _count(self.retry_count, field="retry_count"))
         object.__setattr__(self, "elapsed_ms", _count(self.elapsed_ms, field="elapsed_ms"))
-        if self.validation_outcome not in {"not-run", "passed", "failed"}:
+        if self.validation_outcome not in {"not-run", "unknown", "passed", "failed"}:
             raise BenchmarkError("validation_outcome is not supported")
         object.__setattr__(self, "human_interventions", _count(self.human_interventions, field="human_interventions"))
 
@@ -92,6 +93,20 @@ class BenchmarkReport:
     def has_regressions(self) -> bool:
         return bool(self.findings)
 
+    @property
+    def has_unverified_quality(self) -> bool:
+        return any(
+            item[side]["validation_outcome"] in {"not-run", "unknown"}
+            for item in self.measurements for side in ("baseline", "candidate")
+        )
+
+    @property
+    def is_acceptable(self) -> bool:
+        """A comparison needs verified candidate quality, not just fewer actions."""
+        return not self.has_regressions and not self.has_unverified_quality and all(
+            item["candidate"]["validation_outcome"] == "passed" for item in self.measurements
+        )
+
 @dataclass(frozen=True)
 class BenchmarkPlan:
     """A bounded declared scenario set that keeps comparisons representative."""
@@ -114,7 +129,12 @@ def _normalise(observations: Iterable[BenchmarkObservation | Mapping[str, Any]])
     return result
 
 def compare_observations(baseline: Iterable[BenchmarkObservation | Mapping[str, Any]], candidate: Iterable[BenchmarkObservation | Mapping[str, Any]], *, plan: BenchmarkPlan | None = None) -> BenchmarkReport:
-    """Compare supplied measurements without executing work or estimating savings."""
+    """Compare measured validation first, then cost for two passing observations.
+
+    Validation is the supplied quality signal, not proof that the observations
+    cover real acceptance criteria. Callers must choose representative scenarios
+    and checks. Unknown or unrun validation cannot establish a comparison win.
+    """
     previous, current = _normalise(baseline), _normalise(candidate)
     if set(previous) != set(current):
         raise BenchmarkError("baseline and candidate must cover the same representative scenarios")
@@ -125,23 +145,34 @@ def compare_observations(baseline: Iterable[BenchmarkObservation | Mapping[str, 
     measurements: list[Mapping[str, Any]] = []
     for scenario in scenarios:
         before, after = previous[scenario], current[scenario]
+        if before.validation_outcome == "passed" and after.validation_outcome != "passed":
+            quality = "regressed"
+        elif "not-run" in {before.validation_outcome, after.validation_outcome} or "unknown" in {before.validation_outcome, after.validation_outcome}:
+            quality = "unverified"
+        elif before.validation_outcome == "failed" and after.validation_outcome == "passed":
+            quality = "improved"
+        else:
+            quality = "equivalent"
         measurements.append({
             "scenario": scenario,
             "baseline": _measurement(before),
             "candidate": _measurement(after),
+            "quality_assessment": quality,
         })
-        seen: set[str] = set()
-        duplicates: list[str] = []
-        for retrieval in after.retrievals:
-            if retrieval in seen and retrieval not in duplicates:
-                duplicates.append(retrieval)
-            seen.add(retrieval)
+        if quality == "regressed":
+            findings.append(BenchmarkFinding("validation-regression", scenario, "candidate lost the baseline's passing validation outcome"))
+        # A successful recovery may legitimately need retries, escalation, or
+        # extra evidence. Failed or unverified work cannot establish efficiency.
+        if before.validation_outcome != "passed" or after.validation_outcome != "passed":
+            continue
+        previous_retrievals, current_retrievals = Counter(before.retrievals), Counter(after.retrievals)
+        duplicates = [item for item, count in current_retrievals.items() if count > max(1, previous_retrievals[item])]
         if duplicates:
             findings.append(BenchmarkFinding("duplicate-retrieval", scenario, f"candidate repeated retrieval(s): {', '.join(sorted(duplicates, key=str.casefold))}"))
         if before.context_tokens is not None and after.context_tokens is not None and after.context_tokens > before.context_tokens and set(after.retrievals).issubset(set(before.retrievals)):
             findings.append(BenchmarkFinding("avoidable-context-growth", scenario, "candidate context grew without any additional distinct retrieval"))
         if after.escalation_count > before.escalation_count:
-            findings.append(BenchmarkFinding("unnecessary-escalation", scenario, "candidate escalated more often than the representative baseline"))
+            findings.append(BenchmarkFinding("escalation-increase", scenario, "candidate escalated more often with the same passing validation outcome"))
         if after.retry_count > before.retry_count:
             findings.append(BenchmarkFinding("retry-regression", scenario, "candidate retried more often than the representative baseline"))
     return BenchmarkReport(tuple(findings), scenarios, tuple(measurements))

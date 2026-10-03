@@ -1,4 +1,5 @@
 import json
+from hashlib import sha256
 import sqlite3
 import os
 from pathlib import Path
@@ -52,6 +53,83 @@ class ExecutionStoreTests(unittest.TestCase):
         self.assertIsNone(record["observed_model"])
         self.assertEqual(self.store.report()["executions"][0]["outcome"], "succeeded")
         json.dumps(self.store.report())
+
+    def test_host_result_survives_reopen_with_stable_hash_and_idempotent_replay(self):
+        self.store.plan("work-one", "implementer", None, None)
+        self.store.start("work-one", "codex", "local-cli", "thread-one", provenance="host-callback")
+        response = {"status": "completed", "summary": "Reviewed output retained.", "findings": [], "changed_paths": ["result.txt"]}
+        first = self.store.record_host_result("work-one", thread_id="thread-one", response=response)
+        durable = ExecutionStore(self.root).get("work-one")
+        expected = sha256(json.dumps(response, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
+        self.assertEqual(durable["host_result"], response)
+        self.assertEqual(durable["host_result_sha256"], expected)
+        self.assertEqual(first["host_result_sha256"], durable["host_result_sha256"])
+        self.store.record_host_usage("work-one", thread_id="thread-one", usage=dict(USAGE))
+        self.store.finish("work-one", "succeeded", provenance="host-callback")
+        replay = ExecutionStore(self.root).record_host_result(
+            "work-one", thread_id="thread-one", response=dict(reversed(list(response.items()))),
+        )
+        self.assertEqual((replay["state"], replay["host_result_sha256"]), ("succeeded", expected))
+
+    def test_host_result_rejects_wrong_thread_conflicting_evidence_and_manual_identity(self):
+        self.store.plan("work-one", "implementer", None, None)
+        self.store.start("work-one", "codex", "local-cli", "thread-one", provenance="host-callback")
+        response = {"status": "blocked", "summary": "A concrete defect remains.", "findings": ["Missing output"], "changed_paths": []}
+        with self.assertRaisesRegex(ExecutionError, "does not match"):
+            self.store.record_host_result("work-one", thread_id="unrelated-thread", response=response)
+        self.assertIsNone(self.store.get("work-one")["host_result"])
+        accepted = self.store.record_host_result("work-one", thread_id="thread-one", response=response)
+        with self.assertRaisesRegex(ExecutionError, "conflicts"):
+            self.store.record_host_result("work-one", thread_id="thread-one", response={**response, "status": "completed"})
+        self.assertEqual(self.store.get("work-one")["host_result_sha256"], accepted["host_result_sha256"])
+        self.store.plan("manual-work", "reviewer", None, None)
+        self.store.start("manual-work", "codex", "local-cli", "manual-thread")
+        with self.assertRaisesRegex(ExecutionError, "does not match"):
+            self.store.record_host_result("manual-work", thread_id="manual-thread", response=response)
+
+    def host_usage(self, work_id, *, parent="unit-one", usage=USAGE):
+        self.store.plan(work_id, "implementer", None, None, parent_work_id=parent)
+        self.store.start(work_id, "codex", "local-cli", f"thread-{work_id}", provenance="host-callback")
+        if usage is not None:
+            self.store.record_host_usage(work_id, thread_id=f"thread-{work_id}", usage=dict(usage))
+
+    def test_usage_attestation_sums_only_distinct_matching_persisted_host_receipts(self):
+        self.store.plan("unit-one", "coordinator", None, None, attribution_reason="run-supervisor")
+        self.host_usage("first")
+        self.host_usage("second", usage={**USAGE, "input_tokens": 4, "output_tokens": 3, "total_tokens": 7})
+        self.host_usage("zero", usage={key: 0 for key in USAGE})
+        self.store.finish("first", "succeeded", provenance="host-callback")
+        self.host_usage("unselected", usage={**USAGE, "input_tokens": 95, "total_tokens": 100})
+        evidence = ExecutionStore(self.root).usage_attestation(["first", "zero", "second"], parent_work_id="unit-one")
+        self.assertEqual(evidence, {
+            "source": "coordinator-attested", "execution_ids": ["first", "zero", "second"], "total_tokens": 22,
+        })
+        self.assertEqual(self.store.get("first")["state"], "succeeded")
+
+    def test_usage_attestation_rejects_invalid_duplicate_and_nonexistent_ids(self):
+        self.store.plan("unit-one", "coordinator", None, None, attribution_reason="run-supervisor")
+        self.host_usage("first")
+        for identifiers in ([], ("first",), ["first", "first"], [""], [None], [["first"]], [f"work-{index}" for index in range(33)]):
+            with self.subTest(identifiers=identifiers), self.assertRaises(ExecutionError):
+                self.store.usage_attestation(identifiers, parent_work_id="unit-one")
+        with self.assertRaises(ExecutionError):
+            self.store.usage_attestation(["first", "missing"], parent_work_id="unit-one")
+        self.assertEqual(self.store.usage_attestation(["first"], parent_work_id="unit-one")["total_tokens"], 15)
+
+    def test_usage_attestation_rejects_other_parent_and_unobserved_usage(self):
+        self.store.plan("unit-one", "coordinator", None, None, attribution_reason="run-supervisor")
+        self.store.plan("unit-two", "coordinator", None, None, attribution_reason="run-supervisor")
+        self.host_usage("first")
+        self.host_usage("other-unit", parent="unit-two")
+        self.host_usage("missing-usage", usage=None)
+        self.store.plan("manual", "implementer", None, None, parent_work_id="unit-one")
+        self.store.start("manual", "codex", "local-cli", "thread-one")
+        self.store.import_codex_rollout("manual", self.rollout())
+        for work_id in ("other-unit", "missing-usage", "manual"):
+            with self.subTest(work_id=work_id), self.assertRaisesRegex(ExecutionError, "matching host-observed"):
+                self.store.usage_attestation(["first", work_id], parent_work_id="unit-one")
+        with self.assertRaisesRegex(ExecutionError, "matching host-observed"):
+            self.store.usage_attestation(["first"], parent_work_id="missing-parent")
 
     def test_start_is_idempotent_but_scope_is_exclusive(self):
         first = self.plan_and_start()

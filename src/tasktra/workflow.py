@@ -14,13 +14,31 @@ from .handoffs import HandoffError, validate_handoff
 from .identifiers import IdentifierError, require_identifier, require_optional_identifier
 
 
-_NEXT_ROLE = {"implementer": "tester", "tester": "reviewer", "reviewer": None}
-_WORKFLOW_COMPLETE = ("implementer", "tester", "reviewer")
+_POLICIES: dict[str, tuple[str, ...]] = {
+    # The published Stage 2 contract remains the default for old work units.
+    "implementation-review": ("implementer", "tester", "reviewer"),
+    "research-review": ("author", "reviewer"),
+    "documentation-review": ("author", "reviewer"),
+    # This is intentionally a separately selected and authority-gated policy;
+    # it is never inferred from a missing workflow.
+    "deterministic-direct": (),
+}
+_NEXT_ROLE = {role: roles[index + 1] if index + 1 < len(roles) else None
+              for roles in _POLICIES.values() for index, role in enumerate(roles)}
+_WORKFLOW_COMPLETE = _POLICIES["implementation-review"]
 MAX_WORKFLOW_BYTES = 256 * 1024
 
 
 class WorkflowError(ContractError):
     """Raised when a handoff cannot safely advance a workflow."""
+
+
+def policy_roles(verification_policy: str) -> tuple[str, ...]:
+    """Return the closed host stage sequence for an authorized policy."""
+    try:
+        return _POLICIES[verification_policy]
+    except KeyError as error:
+        raise WorkflowError("workflow verification policy is not supported") from error
 
 
 def _validate_source_identifiers(source: Mapping[str, Any]) -> None:
@@ -40,7 +58,8 @@ def _validate_workflow(value: Mapping[str, Any]) -> dict[str, Any]:
         raise WorkflowError("workflow state must be an object")
     copied = copy.deepcopy(dict(value))
     try:
-        validate_named(copied, "workflow-state")
+        schema = "workflow-state" if copied.get("version") == 1 else "workflow-state-v2"
+        validate_named(copied, schema)
         _validate_source_identifiers(copied["source"])
         for handoff in copied["accepted_handoffs"]:
             validate_handoff(handoff)
@@ -48,7 +67,19 @@ def _validate_workflow(value: Mapping[str, Any]) -> dict[str, Any]:
         raise WorkflowError(str(error)) from error
     if len(copied["transitions"]) != len(copied["accepted_handoffs"]):
         raise WorkflowError("workflow transitions and accepted handoffs must have equal length")
-    expected_role: str | None = "implementer"
+    policy = "implementation-review" if copied["version"] == 1 else copied["verification_policy"]
+    roles = _POLICIES.get(policy)
+    if roles is None:
+        raise WorkflowError("workflow verification policy is not supported")
+    if not roles:
+        # Direct verification has no delegated handoffs.  Its authority is
+        # checked by the durable work-unit completion path, not by omission.
+        if copied["transitions"] or copied["accepted_handoffs"]:
+            raise WorkflowError("deterministic direct workflow cannot contain handoffs")
+        if copied["status"] != "completed" or copied["current_role"] is not None:
+            raise WorkflowError("deterministic direct workflow must be completed")
+        return copied
+    expected_role: str | None = roles[0]
     terminal_status: str | None = None
     handoff_ids: set[str] = set()
     for transition, handoff in zip(copied["transitions"], copied["accepted_handoffs"]):
@@ -59,13 +90,14 @@ def _validate_workflow(value: Mapping[str, Any]) -> dict[str, Any]:
         if handoff["producer"]["role"] != expected_role:
             raise WorkflowError("accepted handoff producer does not match the required role")
         if expected_role == "reviewer":
-            implementation_actor = copied["accepted_handoffs"][0]["producer"]["actor_id"]
-            tester_actor = copied["accepted_handoffs"][1]["producer"]["actor_id"]
+            prior_actors = [item["producer"]["actor_id"] for item in copied["accepted_handoffs"][:-1]]
             reviewer_actor = handoff["producer"]["actor_id"]
-            if reviewer_actor == implementation_actor:
-                raise WorkflowError("reviewer actor must differ from the implementation actor")
-            if reviewer_actor == tester_actor:
-                raise WorkflowError("reviewer actor must differ from the tester actor")
+            if reviewer_actor in prior_actors:
+                if policy == "implementation-review":
+                    if reviewer_actor == prior_actors[0]:
+                        raise WorkflowError("reviewer actor must differ from the implementation actor")
+                    raise WorkflowError("reviewer actor must differ from the tester actor")
+                raise WorkflowError("reviewer actor must differ from every prior workflow actor")
         handoff_id = handoff["handoff_id"]
         if handoff_id in handoff_ids:
             raise WorkflowError(f"workflow contains duplicate handoff id: {handoff_id}")
@@ -74,7 +106,8 @@ def _validate_workflow(value: Mapping[str, Any]) -> dict[str, Any]:
             raise WorkflowError("workflow transition role does not match the required sequence")
         if transition["handoff_id"] != handoff_id or transition["handoff_status"] != handoff["status"]["state"]:
             raise WorkflowError("workflow transition does not match its accepted handoff")
-        expected_target = _NEXT_ROLE[expected_role] if handoff["status"]["state"] == "completed" else None
+        index = roles.index(expected_role)
+        expected_target = roles[index + 1] if handoff["status"]["state"] == "completed" and index + 1 < len(roles) else None
         if transition["to_role"] != expected_target:
             raise WorkflowError("workflow transition target is invalid for the handoff status")
         expected_role = expected_target
@@ -82,7 +115,7 @@ def _validate_workflow(value: Mapping[str, Any]) -> dict[str, Any]:
             terminal_status = handoff["status"]["state"]
 
     if not copied["transitions"]:
-        expected_status, expected_role = "ready", "implementer"
+        expected_status, expected_role = "ready", roles[0]
     elif terminal_status == "completed":
         expected_status, expected_role = "completed", None
     elif terminal_status is not None:
@@ -94,9 +127,12 @@ def _validate_workflow(value: Mapping[str, Any]) -> dict[str, Any]:
     return copied
 
 
-def new_workflow(source: Mapping[str, Any]) -> dict[str, Any]:
+def new_workflow(source: Mapping[str, Any], *, verification_policy: str = "implementation-review") -> dict[str, Any]:
     """Create a pure initial state. Persistence belongs to a later runtime layer."""
-    state = {
+    if verification_policy not in _POLICIES:
+        raise WorkflowError("workflow verification policy is not supported")
+    if verification_policy == "implementation-review":
+        state = {
         "kind": "tasktra.implementation-workflow",
         "version": 1,
         "source": copy.deepcopy(dict(source)),
@@ -104,7 +140,15 @@ def new_workflow(source: Mapping[str, Any]) -> dict[str, Any]:
         "status": "ready",
         "transitions": [],
         "accepted_handoffs": [],
-    }
+        }
+    else:
+        direct = verification_policy == "deterministic-direct"
+        state = {
+            "kind": "tasktra.implementation-workflow", "version": 2,
+            "source": copy.deepcopy(dict(source)), "verification_policy": verification_policy,
+            "current_role": None if direct else _POLICIES[verification_policy][0],
+            "status": "completed" if direct else "ready", "transitions": [], "accepted_handoffs": [],
+        }
     return _validate_workflow(state)
 
 
@@ -131,7 +175,10 @@ def accept_handoff(state: Mapping[str, Any], handoff: Mapping[str, Any]) -> dict
         raise WorkflowError(f"handoff producer must have role {role}")
 
     handoff_status = accepted["status"]["state"]
-    target = _NEXT_ROLE[role] if handoff_status == "completed" else None
+    policy = "implementation-review" if current["version"] == 1 else current["verification_policy"]
+    roles = _POLICIES[policy]
+    index = roles.index(role)
+    target = roles[index + 1] if handoff_status == "completed" and index + 1 < len(roles) else None
     next_state = copy.deepcopy(current)
     next_state["accepted_handoffs"].append(accepted)
     next_state["transitions"].append({
@@ -158,7 +205,11 @@ def is_workflow_complete(state: Mapping[str, Any]) -> bool:
     return (
         validated["status"] == "completed"
         and validated["current_role"] is None
-        and tuple(item["from_role"] for item in validated["transitions"]) == _WORKFLOW_COMPLETE
+        and (
+            (validated["version"] == 2 and validated["verification_policy"] == "deterministic-direct" and not validated["transitions"])
+            or tuple(item["from_role"] for item in validated["transitions"])
+            == _POLICIES["implementation-review" if validated["version"] == 1 else validated["verification_policy"]]
+        )
         and all(item["status"]["state"] == "completed" for item in validated["accepted_handoffs"])
     )
 
@@ -168,11 +219,20 @@ def workflow_completion_token(state: Mapping[str, Any]) -> dict[str, Any]:
     validated = _validate_workflow(state)
     if not is_workflow_complete(validated):
         raise WorkflowError("workflow is not eligible for completion")
+    policy = "implementation-review" if validated["version"] == 1 else validated["verification_policy"]
+    # Direct verification has deliberately no agent handoff.  Keep the token
+    # shape stable and bind this synthetic terminal marker to the source and
+    # full workflow digest below, rather than indexing an empty handoff list.
+    terminal_handoff_id = (
+        "deterministic-direct"
+        if policy == "deterministic-direct"
+        else validated["accepted_handoffs"][-1]["handoff_id"]
+    )
     token = {
         "kind": "tasktra.workflow-completion-token",
         "version": 1,
         "source": copy.deepcopy(validated["source"]),
-        "terminal_handoff_id": validated["accepted_handoffs"][-1]["handoff_id"],
+        "terminal_handoff_id": terminal_handoff_id,
         "workflow_sha256": hashlib.sha256(
             _canonical_json(validated).encode("utf-8")
         ).hexdigest(),

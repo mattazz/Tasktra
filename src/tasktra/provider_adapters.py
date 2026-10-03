@@ -8,20 +8,17 @@ argument arrays or structured connector calls.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 from hashlib import sha256
 import json
 import os
 from pathlib import Path
 import re
-import signal
-import subprocess
+import subprocess  # Compatibility patch seam for downstream provider tests.
 from tempfile import TemporaryDirectory
-import threading
-import time
 from typing import Any
 from urllib.parse import urlparse
 
+from .processes import ArgvProcessRunner, ProcessResult, _WindowsJob
 from .providers import (
     MAX_PROVIDER_JSON_BYTES, OperationDescriptor, ProviderError, ProviderHealth,
     ProviderResult, READ_ONLY, ResourceScope, _bounded_json, load_bounded_provider_json,
@@ -69,90 +66,11 @@ _UNTRUSTED_GIT_TRANSPORT_CONFIG = (
 )
 
 
-@dataclass(frozen=True)
-class CommandResult:
-    returncode: int
-    stdout: bytes = b""
-    stderr: bytes = b""
-    timed_out: bool = False
-    output_limited: bool = False
-    input_uncertain: bool = False
-    dispatched: bool = True
-
-
-class _WindowsJob:
-    """Kill-on-close Windows Job Object assigned immediately after spawn."""
-
-    _KILL_ON_JOB_CLOSE = 0x00002000
-    _EXTENDED_LIMIT_INFORMATION = 9
-
-    def __init__(self, handle: object) -> None:
-        self._handle = handle
-
-    @classmethod
-    def assign(cls, process: subprocess.Popen[bytes]) -> "_WindowsJob":
-        import ctypes
-        from ctypes import wintypes
-
-        class _BasicLimitInformation(ctypes.Structure):
-            _fields_ = [
-                ("per_process_user_time_limit", ctypes.c_longlong),
-                ("per_job_user_time_limit", ctypes.c_longlong),
-                ("limit_flags", wintypes.DWORD),
-                ("minimum_working_set_size", ctypes.c_size_t),
-                ("maximum_working_set_size", ctypes.c_size_t),
-                ("active_process_limit", wintypes.DWORD),
-                ("affinity", ctypes.c_size_t),
-                ("priority_class", wintypes.DWORD),
-                ("scheduling_class", wintypes.DWORD),
-            ]
-
-        class _IoCounters(ctypes.Structure):
-            _fields_ = [(name, ctypes.c_ulonglong) for name in (
-                "read_operation_count", "write_operation_count", "other_operation_count",
-                "read_transfer_count", "write_transfer_count", "other_transfer_count",
-            )]
-
-        class _ExtendedLimitInformation(ctypes.Structure):
-            _fields_ = [
-                ("basic_limit_information", _BasicLimitInformation),
-                ("io_info", _IoCounters),
-                ("process_memory_limit", ctypes.c_size_t),
-                ("job_memory_limit", ctypes.c_size_t),
-                ("peak_process_memory_used", ctypes.c_size_t),
-                ("peak_job_memory_used", ctypes.c_size_t),
-            ]
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
-        handle = kernel32.CreateJobObjectW(None, None)
-        if not handle:
-            raise ctypes.WinError(ctypes.get_last_error())
-        info = _ExtendedLimitInformation()
-        info.basic_limit_information.limit_flags = cls._KILL_ON_JOB_CLOSE
-        try:
-            if not kernel32.SetInformationJobObject(
-                handle, cls._EXTENDED_LIMIT_INFORMATION, ctypes.byref(info), ctypes.sizeof(info)
-            ):
-                raise ctypes.WinError(ctypes.get_last_error())
-            if not kernel32.AssignProcessToJobObject(handle, wintypes.HANDLE(process._handle)):
-                raise ctypes.WinError(ctypes.get_last_error())
-        except BaseException:
-            kernel32.CloseHandle(handle)
-            raise
-        return cls(handle)
-
-    def close(self) -> None:
-        if self._handle is None:
-            return
-        import ctypes
-
-        ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(self._handle)
-        self._handle = None
+CommandResult = ProcessResult
 
 
 class BoundedArgvRunner:
-    """Run argument arrays only, with a small output budget and no shell."""
+    """Provider compatibility seam over the shared direct-argv runner."""
 
     def __init__(self, invoke: Callable[..., CommandResult] | None = None, *, timeout: int = DEFAULT_TIMEOUT_SECONDS,
                  output_limit: int = MAX_COMMAND_OUTPUT_BYTES) -> None:
@@ -161,223 +79,21 @@ class BoundedArgvRunner:
     def run(self, argv: list[str], *, cwd: Path, env: Mapping[str, str], stdin: bytes = b"") -> CommandResult:
         if not isinstance(argv, list) or not argv or any(not isinstance(item, str) or not item for item in argv):
             raise ProviderError("command must be a non-empty argv array")
-        if self._invoke is not None:
-            raw = self._invoke(argv=tuple(argv), cwd=cwd, env=dict(env), stdin=stdin, timeout=self.timeout, shell=False)
-        else:
-            raw = self._run_capped(argv, cwd=cwd, env=env, stdin=stdin)
-        if not isinstance(raw, CommandResult):
+        raw = (
+            self._invoke(argv=tuple(argv), cwd=cwd, env=dict(env), stdin=stdin, timeout=self.timeout, shell=False)
+            if self._invoke is not None
+            else ArgvProcessRunner(timeout=self.timeout, output_limit=self.output_limit).run(
+                argv, cwd=cwd, env=env, stdin=stdin,
+            )
+        )
+        if not isinstance(raw, ProcessResult):
             raise ProviderError("runner returned an invalid command result")
         stdout, stderr = bytes(raw.stdout), bytes(raw.stderr)
         limited = raw.output_limited or len(stdout) > self.output_limit or len(stderr) > self.output_limit
         return CommandResult(
             raw.returncode, stdout[:self.output_limit], stderr[:self.output_limit], raw.timed_out, limited,
-            raw.input_uncertain, raw.dispatched,
+            raw.input_uncertain, raw.dispatched, raw.cancelled, raw.stdout_limited, raw.stderr_limited,
         )
-
-    def _run_capped(self, argv: list[str], *, cwd: Path, env: Mapping[str, str], stdin: bytes) -> CommandResult:
-        """Capture at most the configured budget per stream while the child runs.
-
-        Pipes are read in two small reader threads because Windows anonymous
-        pipes cannot be selected portably.  Reaching either budget terminates
-        the process group: keeping a child alive after discarding its output
-        would merely move the unbounded-buffer problem into the OS pipe.
-        """
-        startup: dict[str, Any] = {"stdin": subprocess.PIPE, "stdout": subprocess.PIPE, "stderr": subprocess.PIPE,
-                                    "cwd": cwd, "env": dict(env), "shell": False, "bufsize": 0}
-        if os.name == "nt":
-            startup["creationflags"] = (
-                getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-                | getattr(subprocess, "CREATE_SUSPENDED", 0x00000004)
-            )
-        else:
-            startup["start_new_session"] = True
-        try:
-            process = subprocess.Popen(argv, **startup)
-        except OSError:
-            return CommandResult(127, dispatched=False)
-        windows_job: _WindowsJob | None = None
-        if os.name == "nt":
-            try:
-                windows_job = _WindowsJob.assign(process)
-                self._resume_windows_process(process)
-            except OSError:
-                # Fail closed while the root is still suspended.  A provider
-                # command is never allowed to run without job ownership.
-                if windows_job is not None:
-                    windows_job.close()
-                    windows_job = None
-                if process.poll() is None:
-                    try:
-                        process.kill()
-                    except OSError:
-                        pass
-                try:
-                    process.wait(timeout=2)
-                except (OSError, subprocess.TimeoutExpired):
-                    pass
-                for pipe in (process.stdin, process.stdout, process.stderr):
-                    if pipe is not None:
-                        try:
-                            pipe.close()
-                        except OSError:
-                            pass
-                return CommandResult(127, dispatched=False)
-
-        deadline = time.monotonic() + self.timeout
-
-        stdout, stderr = bytearray(), bytearray()
-        overflow = threading.Event()
-        writer_failed = threading.Event()
-        input_uncertain = threading.Event()
-        terminate_once = threading.Event()
-
-        def terminate() -> None:
-            nonlocal windows_job
-            if terminate_once.is_set():
-                return
-            terminate_once.set()
-            if windows_job is not None:
-                windows_job.close()
-                windows_job = None
-            self._terminate_process_tree(process)
-
-        def reader(pipe: Any, sink: bytearray) -> None:
-            try:
-                while True:
-                    # One extra byte distinguishes a full legitimate stream
-                    # from an overflow without retaining unbounded content.
-                    remaining = self.output_limit - len(sink)
-                    chunk = pipe.read(min(4096, max(1, remaining + 1)))
-                    if not chunk:
-                        return
-                    if len(chunk) > remaining:
-                        sink.extend(chunk[:max(0, remaining)])
-                        overflow.set()
-                        terminate()
-                        return
-                    sink.extend(chunk)
-            finally:
-                try:
-                    pipe.close()
-                except OSError:
-                    pass
-
-        def writer() -> None:
-            try:
-                assert process.stdin is not None
-                if stdin:
-                    written = process.stdin.write(stdin)
-                    if written is not None and written != len(stdin):
-                        input_uncertain.set()
-                        terminate()
-            except (OSError, BrokenPipeError):
-                writer_failed.set()
-                input_uncertain.set()
-                if process.poll() is None:
-                    terminate()
-            finally:
-                try:
-                    assert process.stdin is not None
-                    process.stdin.close()
-                except OSError:
-                    pass
-
-        try:
-            assert process.stdin is not None and process.stdout is not None and process.stderr is not None
-            readers = [threading.Thread(target=reader, args=(process.stdout, stdout), daemon=True),
-                       threading.Thread(target=reader, args=(process.stderr, stderr), daemon=True)]
-            input_writer = threading.Thread(target=writer, daemon=True)
-            for thread in readers:
-                thread.start()
-            input_writer.start()
-            timed_out = False
-            while process.poll() is None:
-                if time.monotonic() >= deadline:
-                    timed_out = True
-                    terminate()
-                    break
-                time.sleep(0.01)
-            try:
-                returncode = process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self._kill_process_tree(process)
-                returncode = process.wait(timeout=2)
-            # Kill-on-close applies even after a normal parent exit: a command
-            # may otherwise detach descendants that retain inherited handles
-            # and outlive the bounded provider operation.
-            if windows_job is not None:
-                windows_job.close()
-                windows_job = None
-            input_writer.join(timeout=2)
-            if input_writer.is_alive():
-                input_uncertain.set()
-                terminate()
-            for thread in readers:
-                thread.join(timeout=2)
-            if writer_failed.is_set() and returncode == 0:
-                returncode = 127
-            return CommandResult(
-                returncode, bytes(stdout), bytes(stderr), timed_out, overflow.is_set(),
-                input_uncertain.is_set(), True,
-            )
-        except (OSError, BrokenPipeError):
-            terminate()
-            return CommandResult(127, bytes(stdout), bytes(stderr), False, overflow.is_set(), True, True)
-        finally:
-            if windows_job is not None:
-                windows_job.close()
-
-    @staticmethod
-    def _resume_windows_process(process: subprocess.Popen[bytes]) -> None:
-        """Resume a suspended process only after Job Object assignment."""
-        import ctypes
-        from ctypes import wintypes
-
-        ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
-        ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
-        ntdll.NtResumeProcess.restype = ctypes.c_long
-        status = int(ntdll.NtResumeProcess(wintypes.HANDLE(process._handle)))
-        if status != 0:
-            raise OSError(f"NtResumeProcess failed with NTSTATUS 0x{status & 0xffffffff:08x}")
-
-    @staticmethod
-    def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
-        """Terminate the process group without invoking a shell."""
-        if process.poll() is not None:
-            return
-        try:
-            if os.name == "nt":
-                # CTRL_BREAK_EVENT is unreliable for non-console children;
-                # taskkill /T is the portable process-tree fallback.
-                subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], shell=False,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=5)
-                if process.poll() is None:
-                    process.kill()
-            else:
-                os.killpg(process.pid, signal.SIGTERM)
-        except (OSError, subprocess.SubprocessError):
-            try:
-                process.kill()
-            except OSError:
-                pass
-
-    @staticmethod
-    def _kill_process_tree(process: subprocess.Popen[bytes]) -> None:
-        if process.poll() is not None:
-            return
-        try:
-            if os.name == "nt":
-                subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], shell=False,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=5)
-                if process.poll() is None:
-                    process.kill()
-            else:
-                os.killpg(process.pid, signal.SIGKILL)
-        except (OSError, subprocess.SubprocessError):
-            try:
-                process.kill()
-            except OSError:
-                pass
 
 
 def _git_env() -> dict[str, str]:

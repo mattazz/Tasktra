@@ -12,6 +12,7 @@ from tasktra.lessons import (
     LessonProposal,
     LessonProposalStore,
 )
+from tasktra.filelocks import exclusive_file_lock
 
 
 SHA_A = "a" * 64
@@ -61,6 +62,20 @@ def proposal_args(proposal_id="retry-lesson"):
 
 
 class Stage6LessonTests(unittest.TestCase):
+    def test_update_lock_uses_os_ownership_and_recovers_legacy_marker(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            proposal = store.create(**proposal_args())
+            lock = store.directory / f".{proposal.id}.json.lock"
+            lock.touch()
+            with exclusive_file_lock(lock, root=directory):
+                with self.assertRaisesRegex(LessonConflictError, "already being updated"):
+                    store.transition(proposal.id, expected_version=1, to_status="reviewed", actor="independent-reviewer")
+            reviewed = store.transition(proposal.id, expected_version=1, to_status="reviewed", actor="independent-reviewer")
+            self.assertEqual(reviewed.status, "reviewed")
+            self.assertEqual(reviewed.version, 2)
+            self.assertTrue(lock.exists())
+
     def store(self, directory):
         return LessonProposalStore(directory, clock=lambda: "2026-09-20T12:00:00Z")
 

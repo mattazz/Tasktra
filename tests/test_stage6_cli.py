@@ -249,10 +249,12 @@ class Stage6CliTests(unittest.TestCase):
             baseline.write_text(json.dumps([{
                 "scenario": "retrieval", "retrievals": ["doc-a", "doc-b"],
                 "context_tokens": 100, "escalation_count": 0, "retry_count": 0,
+                "validation_outcome": "passed",
             }]), encoding="utf-8")
             candidate.write_text(json.dumps([{
                 "scenario": "retrieval", "retrievals": ["doc-a", "doc-a", "doc-b"],
                 "context_tokens": 140, "escalation_count": 1, "retry_count": 2,
+                "validation_outcome": "passed",
             }]), encoding="utf-8")
 
             code, result = payload("benchmark", str(baseline), str(candidate))
@@ -260,7 +262,7 @@ class Stage6CliTests(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertFalse(result["ok"])
             self.assertEqual([item["kind"] for item in result["findings"]], [
-                "duplicate-retrieval", "avoidable-context-growth", "unnecessary-escalation", "retry-regression",
+                "duplicate-retrieval", "avoidable-context-growth", "escalation-increase", "retry-regression",
             ])
             self.assertIsNone(result["estimated_token_savings"])
 

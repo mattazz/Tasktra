@@ -20,11 +20,14 @@ from uuid import uuid4
 
 from .identifiers import IdentifierError, require_identifier, require_optional_identifier
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 # The broader lifecycle belongs to the Stage 3 goal engine. Retaining only
 # planned state prevents an incomplete authority envelope from authorizing work.
 GOAL_STATUSES = {"planned", "active", "paused", "blocked", "complete", "stopped"}
 WORK_UNIT_STATUSES = {"planned", "eligible", "leased", "retry-wait", "blocked", "approval-required", "failed", "exhausted", "complete", "paused", "stopped"}
+VERIFICATION_POLICIES = {
+    "implementation-review", "research-review", "documentation-review", "deterministic-direct",
+}
 APPROVAL_DECISIONS = {"approved", "rejected", "needs_human_review"}
 _LEGACY_IDENTITY = "legacy-unattributed"
 _GENESIS_HASH = "0" * 64
@@ -99,6 +102,48 @@ def _persisted_optional_identifier(value: Any, *, label: str) -> str | None:
     if value is None:
         return None
     return _persisted_identifier(value, label=label)
+
+
+def validate_observed_usage_evidence(value: Any, *, tokens_consumed: int) -> dict[str, Any]:
+    """Validate a coordinator's bounded usage attestation for debt settlement.
+
+    This state-level API validates the attestation's shape and its binding to
+    the settled total.  It cannot prove that the execution IDs exist or that
+    their host callbacks measured the stated usage; the execution store must
+    independently perform that verification before a coordinator calls this
+    API.  Model text is never usage evidence.
+    """
+    if not isinstance(value, Mapping):
+        raise StateError("observed usage evidence must be an object")
+    required = {"source", "execution_ids", "total_tokens"}
+    if set(value) != required or value.get("source") != "coordinator-attested":
+        raise StateError("observed usage evidence must be coordinator-attested with exact fields")
+    total = value.get("total_tokens")
+    if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+        raise StateError("observed usage total_tokens must be a non-negative integer")
+    if total != tokens_consumed:
+        raise StateError("observed usage total_tokens must equal tokens_consumed")
+    execution_ids = value.get("execution_ids")
+    if not isinstance(execution_ids, list) or not 1 <= len(execution_ids) <= 32:
+        raise StateError("observed usage evidence requires 1 to 32 execution_ids")
+    normalized: list[str] = []
+    for execution_id in execution_ids:
+        normalized.append(_identifier(execution_id, label="observed execution_id"))
+    if len(set(normalized)) != len(normalized):
+        raise StateError("observed usage execution_ids must be distinct")
+    return {"source": "coordinator-attested", "execution_ids": normalized, "total_tokens": total}
+
+
+def unmeasured_usage_evidence(*, charged_tokens: int, reason: str) -> dict[str, Any]:
+    """Describe a conservative reservation charge without claiming a measurement."""
+    if not isinstance(charged_tokens, int) or isinstance(charged_tokens, bool) or charged_tokens < 0:
+        raise StateError("unmeasured usage charge must be a non-negative integer")
+    if not isinstance(reason, str) or not reason:
+        raise StateError("unmeasured usage reason must be non-empty")
+    return {
+        "source": "reservation-charge", "state": "unmeasured",
+        "charged_tokens": charged_tokens, "reason": reason,
+    }
 
 
 def _now() -> str:
@@ -611,6 +656,22 @@ class StateStore:
             connection.execute("CREATE INDEX IF NOT EXISTS schedule_resume_goal_unit ON schedule_resume_idempotency(goal_id,work_unit_id)")
             connection.execute("PRAGMA user_version = 10")
             current = 10
+        if current < 11:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(work_units)")}
+            if "verification_policy" not in columns:
+                # A legacy row always retains the published Stage 2 path.  Do
+                # not infer a weaker policy from a title, scope, or outcome.
+                connection.execute(
+                    "ALTER TABLE work_units ADD COLUMN verification_policy TEXT NOT NULL DEFAULT 'implementation-review'"
+                )
+            invalid = connection.execute(
+                "SELECT id FROM work_units WHERE verification_policy NOT IN "
+                "('implementation-review','research-review','documentation-review','deterministic-direct') LIMIT 1"
+            ).fetchone()
+            if invalid is not None:
+                raise StateError(f"cannot migrate invalid work-unit verification policy: {invalid['id']}")
+            connection.execute("PRAGMA user_version = 11")
+            current = 11
         return SCHEMA_VERSION
 
     @staticmethod
@@ -987,12 +1048,15 @@ class StateStore:
         return self.get_goal(goal_id) or {}
 
     def create_work_unit(self, *, goal_id: str, title: str, scope: dict[str, Any] | None = None,
-                         work_unit_id: str | None = None, checkpoint_id: str | None = None) -> dict[str, Any]:
+                         work_unit_id: str | None = None, checkpoint_id: str | None = None,
+                         verification_policy: str = "implementation-review") -> dict[str, Any]:
         if not title.strip():
             raise StateError("Work unit title must be non-empty")
         goal_id = _identifier(goal_id, label="goal_id")
         identifier, timestamp = _identifier(work_unit_id or f"work-{uuid4().hex[:12]}", label="work_unit_id"), _now()
         checkpoint_id = _optional_identifier(checkpoint_id, label="checkpoint_id")
+        if verification_policy not in VERIFICATION_POLICIES:
+            raise StateError("work-unit verification_policy is not supported")
         with self._connection() as connection:
             self._prepare_write(connection)
             goal = connection.execute("SELECT status FROM goals WHERE id=?", (goal_id,)).fetchone()
@@ -1028,14 +1092,20 @@ class StateStore:
                     selected_checkpoint = next(row for row in checkpoint_rows if row["checkpoint_id"] == checkpoint_id)
                     if selected_checkpoint["status"] != "pending":
                         raise StateError("work units cannot be added to a reached checkpoint")
+                if verification_policy != "implementation-review":
+                    from .authority import verification_policy_allowed
+                    if not verification_policy_allowed(contract, verification_policy):
+                        raise StateError("authority envelope does not explicitly permit this verification policy")
+            elif verification_policy != "implementation-review":
+                raise StateError("non-legacy verification policies require an authority envelope")
             elif checkpoint_id is not None:
                 raise StateError("work unit checkpoint_id requires an authority envelope")
             try:
                 connection.execute(
-                    "INSERT INTO work_units (id,goal_id,title,status,scope,checkpoint_id,created_at,updated_at) VALUES(?,?,?,'planned',?,?,?,?)",
-                    (identifier, goal_id, title, _encode(persisted_scope), checkpoint_id, timestamp, timestamp),
+                    "INSERT INTO work_units (id,goal_id,title,status,scope,checkpoint_id,verification_policy,created_at,updated_at) VALUES(?,?,?,'planned',?,?,?,?,?)",
+                    (identifier, goal_id, title, _encode(persisted_scope), checkpoint_id, verification_policy, timestamp, timestamp),
                 )
-                self._append_event_in_transaction(connection, "work_unit.created", goal_id=goal_id, work_unit_id=identifier, payload={"title": title, "checkpoint_id": checkpoint_id})
+                self._append_event_in_transaction(connection, "work_unit.created", goal_id=goal_id, work_unit_id=identifier, payload={"title": title, "checkpoint_id": checkpoint_id, "verification_policy": verification_policy})
             except sqlite3.IntegrityError as error:
                 raise StateError(f"Cannot create work unit {identifier}; verify its id and goal") from error
         return self.get_work_unit(identifier) or {}
@@ -1049,6 +1119,54 @@ class StateStore:
             _persisted_identifier(result["id"], label="work_unit_id")
             _persisted_identifier(result["goal_id"], label="goal_id")
         return result
+
+    def get_attempt(self, attempt_id: str) -> dict[str, Any] | None:
+        """Return the immutable claim context a host must bind before execution."""
+        attempt_id = _identifier(attempt_id, label="attempt_id")
+        self._ensure()
+        with self._connection(write=False) as connection:
+            row = connection.execute(
+                """SELECT a.*,u.goal_id,u.title AS work_unit_title,u.scope AS work_unit_scope,
+                          u.checkpoint_id,u.verification_policy,u.status AS work_unit_status
+                   FROM work_attempts a JOIN work_units u ON u.id=a.work_unit_id WHERE a.id=?""",
+                (attempt_id,),
+            ).fetchone()
+        return None if row is None else _row(row)
+
+    def work_unit_execution_health(self, work_unit_id: str) -> dict[str, Any]:
+        """Report derived execution health without changing goal lifecycle state."""
+        work_unit_id = _identifier(work_unit_id, label="work_unit_id")
+        self._ensure()
+        with self._connection(write=False) as connection:
+            unit = connection.execute("SELECT * FROM work_units WHERE id=?", (work_unit_id,)).fetchone()
+            if unit is None:
+                raise StateError(f"Unknown work unit: {work_unit_id}")
+            outcomes = [row[0] for row in connection.execute(
+                "SELECT outcome_class FROM work_attempts WHERE work_unit_id=? AND outcome_class IS NOT NULL ORDER BY attempt_no",
+                (work_unit_id,),
+            )]
+        status = unit["status"]
+        return {
+            "work_unit_id": work_unit_id, "status": status,
+            "verification_policy": unit["verification_policy"], "attempt_outcomes": outcomes,
+            "execution_state": "healthy" if status in {"planned", "eligible", "retry-wait", "leased", "complete"}
+            else "needs-authority" if status in {"blocked", "approval-required", "failed", "exhausted"}
+            else "inactive",
+            "requires_requeue_authority": status in {"blocked", "approval-required", "failed", "exhausted"},
+        }
+
+    def goal_execution_health(self, goal_id: str) -> dict[str, Any]:
+        """Summarize unit execution health; permanent failures never block a goal by assertion."""
+        goal_id = _identifier(goal_id, label="goal_id")
+        self._ensure()
+        with self._connection(write=False) as connection:
+            goal = connection.execute("SELECT status FROM goals WHERE id=?", (goal_id,)).fetchone()
+            if goal is None:
+                raise StateError(f"Unknown goal: {goal_id}")
+            units = [row["id"] for row in connection.execute("SELECT id FROM work_units WHERE goal_id=? ORDER BY id", (goal_id,))]
+        health = [self.work_unit_execution_health(unit_id) for unit_id in units]
+        return {"goal_id": goal_id, "goal_status": goal["status"], "work_units": health,
+                "unresolved_work_unit_ids": [item["work_unit_id"] for item in health if item["requires_requeue_authority"]]}
 
     def assign_work_unit_checkpoint(self, work_unit_id: str, checkpoint_id: str, *, actor_id: str,
                                     actor_kind: str,
@@ -1190,9 +1308,30 @@ class StateStore:
                 raise StateError("authority envelope acceptance criteria must match the goal acceptance exactly")
             if goal_id in contract["dependencies"]:
                 raise StateError("authority envelope cannot depend on itself")
-            existing_units = connection.execute("SELECT count(*) FROM work_units WHERE goal_id=?", (goal_id,)).fetchone()[0]
-            if contract["checkpoints"] and existing_units:
-                raise StateError("checkpointed authority must be defined before creating work units")
+            # Replacing a planned-goal envelope must not strand pre-existing
+            # scope or checkpoint bindings.  The old implementation rebuilt
+            # the checkpoint table unconditionally, making a narrow rewrite
+            # such as `.` -> `docs` leave a `src` unit impossible to claim.
+            existing_units = connection.execute(
+                "SELECT id,scope,checkpoint_id,current_attempt_id,verification_policy FROM work_units WHERE goal_id=?", (goal_id,)
+            ).fetchall()
+            for unit in existing_units:
+                try:
+                    unit_scope = _decode(unit["scope"], {})
+                except (TypeError, ValueError) as error:
+                    raise StateError(f"existing work unit has malformed scope: {unit['id']}") from error
+                if not self._scope_within_contract(unit_scope, contract["scope"]):
+                    raise StateError("authority envelope would strand an existing work unit scope")
+                from .authority import verification_policy_allowed
+                if not verification_policy_allowed(contract, unit["verification_policy"]):
+                    raise StateError("authority envelope would revoke an existing work unit verification policy")
+                checkpoint_id = unit["checkpoint_id"]
+                if checkpoint_id is not None and checkpoint_id not in contract["checkpoints"]:
+                    raise StateError("authority envelope would strand an existing work unit checkpoint")
+                if checkpoint_id is None and contract["checkpoints"]:
+                    raise StateError("checkpointed authority cannot strand an unbound existing work unit")
+                if unit["current_attempt_id"] is not None:
+                    raise StateError("authority envelope cannot be replaced while a work unit is leased")
             usage = connection.execute(
                 "SELECT consumed_tokens,reserved_tokens,consumed_attempts,consumed_elapsed_ms FROM budgets WHERE goal_id=?",
                 (goal_id,),
@@ -1220,6 +1359,13 @@ class StateStore:
             )
             contract_row = connection.execute("SELECT * FROM goal_contracts WHERE goal_id=?", (goal_id,)).fetchone()
             self._seal_authority_row_in_transaction(connection, "goal_contracts", goal_id, contract_row, timestamp)
+            existing_checkpoints = connection.execute(
+                "SELECT checkpoint_id,status,evidence_json,reached_at FROM goal_checkpoints WHERE goal_id=? ORDER BY position", (goal_id,)
+            ).fetchall()
+            # A contract may be re-recorded for a planned goal, but recorded
+            # checkpoint evidence is immutable and therefore cannot be erased.
+            if any(row["status"] == "reached" for row in existing_checkpoints):
+                raise StateError("authority envelope cannot replace reached checkpoints")
             connection.execute("DELETE FROM goal_checkpoints WHERE goal_id=?", (goal_id,))
             for position, checkpoint_id in enumerate(contract["checkpoints"]):
                 connection.execute(
@@ -1410,7 +1556,37 @@ class StateStore:
                 if budget[name] is not None and int(budget[name]) < 0:
                     raise StateError(f"cannot attest invalid budget limit: {goal['id']}")
             if budget["total_tokens"] is not None and budget["consumed_tokens"] + budget["reserved_tokens"] > budget["total_tokens"]:
-                raise StateError(f"cannot attest exceeded token budget: {goal['id']}")
+                # A host may measure actual CLI usage after a soft reservation
+                # was crossed.  That debt is valid only when a finished,
+                # exhausted attempt carries a compact coordinator attestation
+                # to execution receipts; a generic counter edit can never
+                # turn into a budget overrun.
+                required_debt = (
+                    int(budget["consumed_tokens"]) + int(budget["reserved_tokens"])
+                    - int(budget["total_tokens"])
+                )
+                evidenced_debt = 0
+                attempts = connection.execute(
+                    """SELECT a.* FROM work_attempts a JOIN work_units u ON u.id=a.work_unit_id
+                       WHERE u.goal_id=? AND a.tokens_consumed>a.tokens_reserved""",
+                    (goal["id"],),
+                ).fetchall()
+                for attempt in attempts:
+                    if attempt["status"] != "finished" or attempt["outcome_class"] != "exhausted":
+                        raise StateError(f"cannot attest unbounded token overrun: {attempt['id']}")
+                    evidence = _decode(attempt["outcome_json"], {})
+                    if not isinstance(evidence, dict):
+                        raise StateError(f"cannot attest token overrun without evidence: {attempt['id']}")
+                    try:
+                        validate_observed_usage_evidence(
+                            evidence.get("observed_usage"),
+                            tokens_consumed=int(attempt["tokens_consumed"]),
+                        )
+                    except StateError as error:
+                        raise StateError(f"cannot attest invalid token-overrun evidence: {attempt['id']}") from error
+                    evidenced_debt += int(attempt["tokens_consumed"]) - int(attempt["tokens_reserved"])
+                if evidenced_debt < required_debt:
+                    raise StateError(f"cannot attest exceeded token budget: {goal['id']}")
             if budget["total_attempts"] is not None and budget["consumed_attempts"] > budget["total_attempts"]:
                 raise StateError(f"cannot attest exceeded attempt budget: {goal['id']}")
             if budget["total_elapsed_ms"] is not None and budget["consumed_elapsed_ms"] > budget["total_elapsed_ms"]:
@@ -1444,6 +1620,19 @@ class StateStore:
         for unit in connection.execute("SELECT * FROM work_units"):
             if unit["status"] not in WORK_UNIT_STATUSES:
                 raise StateError(f"cannot attest invalid work-unit status: {unit['id']}")
+            if unit["verification_policy"] not in VERIFICATION_POLICIES:
+                raise StateError(f"cannot attest unsupported work-unit verification policy: {unit['id']}")
+            if unit["verification_policy"] != "implementation-review":
+                try:
+                    from .authority import validate_authority_envelope, verification_policy_allowed
+                    contract_row = connection.execute(
+                        "SELECT contract FROM goal_contracts WHERE goal_id=?", (unit["goal_id"],)
+                    ).fetchone()
+                    contract = None if contract_row is None else validate_authority_envelope(_decode(contract_row["contract"], {}))
+                except ValueError as error:
+                    raise StateError(f"cannot attest invalid authority for work unit policy: {unit['id']}") from error
+                if contract is None or not verification_policy_allowed(contract, unit["verification_policy"]):
+                    raise StateError(f"cannot attest revoked work-unit verification policy: {unit['id']}")
             attempts = connection.execute("SELECT * FROM work_attempts WHERE work_unit_id=? ORDER BY attempt_no", (unit["id"],)).fetchall()
             if unit["attempt_count"] != len(attempts) or [row["attempt_no"] for row in attempts] != list(range(1, len(attempts) + 1)):
                 raise StateError(f"cannot attest inconsistent attempt sequence: {unit['id']}")
@@ -1470,7 +1659,7 @@ class StateStore:
             from .workflow import load_workflow, validate_workflow_completion_token
         except ImportError as error:  # pragma: no cover
             raise StateError("workflow validation is unavailable") from error
-        for evidence in connection.execute("SELECT w.*,u.goal_id FROM workflow_evidence w JOIN work_units u ON u.id=w.work_unit_id"):
+        for evidence in connection.execute("SELECT w.*,u.goal_id,u.verification_policy FROM workflow_evidence w JOIN work_units u ON u.id=w.work_unit_id"):
             if hashlib.sha256(evidence["workflow_json"].encode("utf-8")).hexdigest() != evidence["workflow_sha256"]:
                 raise StateError(f"cannot attest workflow hash mismatch: {evidence['work_unit_id']}")
             try:
@@ -1480,6 +1669,9 @@ class StateStore:
                 raise StateError(f"cannot attest invalid workflow evidence: {evidence['work_unit_id']}") from error
             if token["source"] != {"goal_id": evidence["goal_id"], "work_unit_id": evidence["work_unit_id"]}:
                 raise StateError(f"cannot attest cross-bound workflow evidence: {evidence['work_unit_id']}")
+            workflow_policy = "implementation-review" if workflow.get("version") == 1 else workflow.get("verification_policy")
+            if workflow_policy != evidence["verification_policy"]:
+                raise StateError(f"cannot attest workflow with a mismatched verification policy: {evidence['work_unit_id']}")
         for checkpoint in connection.execute("SELECT * FROM goal_checkpoints"):
             if checkpoint["status"] not in {"pending", "reached"}:
                 raise StateError(f"cannot attest invalid checkpoint status: {checkpoint['goal_id']}/{checkpoint['checkpoint_id']}")
@@ -2182,13 +2374,30 @@ class StateStore:
             connection.execute("UPDATE goals SET status=?,updated_at=? WHERE id=?", (target, timestamp, goal_id))
             if target in {"paused", "stopped"}:
                 attempt_status = "paused" if target == "paused" else "stopped"
-                reserved = connection.execute("SELECT COALESCE(sum(tokens_reserved),0) FROM work_attempts WHERE work_unit_id IN (SELECT id FROM work_units WHERE goal_id=?) AND status IN ('leased','active')", (goal_id,)).fetchone()[0]
+                live_attempts = connection.execute(
+                    """SELECT id,tokens_reserved FROM work_attempts
+                       WHERE work_unit_id IN (SELECT id FROM work_units WHERE goal_id=?)
+                       AND status IN ('leased','active')""",
+                    (goal_id,),
+                ).fetchall()
+                reserved = sum(int(attempt["tokens_reserved"]) for attempt in live_attempts)
                 elapsed = connection.execute("SELECT COALESCE(sum(min(max(0,CAST((julianday(?) - julianday(acquired_at))*86400000 AS INTEGER)),max(0,CAST((julianday(expires_at) - julianday(acquired_at))*86400000 AS INTEGER)))),0) FROM work_attempts WHERE work_unit_id IN (SELECT id FROM work_units WHERE goal_id=?) AND status IN ('leased','active')", (timestamp, goal_id)).fetchone()[0]
                 connection.execute("UPDATE budgets SET consumed_elapsed_ms=consumed_elapsed_ms+?,updated_at=? WHERE goal_id=?", (elapsed, timestamp, goal_id))
                 connection.execute("UPDATE work_attempts SET elapsed_ms=elapsed_ms+min(max(0,CAST((julianday(?) - julianday(acquired_at))*86400000 AS INTEGER)),max(0,CAST((julianday(expires_at) - julianday(acquired_at))*86400000 AS INTEGER))) WHERE work_unit_id IN (SELECT id FROM work_units WHERE goal_id=?) AND status IN ('leased','active')", (timestamp, goal_id))
-                connection.execute("UPDATE work_attempts SET status=?,ended_at=?,outcome_class=?,outcome_json=?,tokens_reserved=0 WHERE work_unit_id IN (SELECT id FROM work_units WHERE goal_id=?) AND status IN ('leased','active')", (attempt_status, timestamp, attempt_status, _encode({"actor_id": actor_id, "reason": f"goal {target}"}), goal_id))
+                for attempt in live_attempts:
+                    charge = int(attempt["tokens_reserved"])
+                    outcome_evidence: dict[str, Any] = {"actor_id": actor_id, "reason": f"goal {target}"}
+                    if charge:
+                        outcome_evidence["unmeasured_usage"] = unmeasured_usage_evidence(
+                            charged_tokens=charge, reason=f"goal-{target}",
+                        )
+                    connection.execute(
+                        """UPDATE work_attempts SET status=?,ended_at=?,outcome_class=?,outcome_json=?,
+                           tokens_consumed=tokens_consumed+? WHERE id=?""",
+                        (attempt_status, timestamp, attempt_status, _encode(outcome_evidence), charge, attempt["id"]),
+                    )
                 connection.execute("UPDATE work_units SET status=?,current_attempt_id=NULL,lease_holder=NULL,lease_expires_at=NULL,updated_at=? WHERE goal_id=? AND status='leased'", (target, timestamp, goal_id))
-                connection.execute("UPDATE budgets SET reserved_tokens=max(0,reserved_tokens-?),updated_at=? WHERE goal_id=?", (reserved, timestamp, goal_id))
+                connection.execute("UPDATE budgets SET reserved_tokens=max(0,reserved_tokens-?),consumed_tokens=consumed_tokens+?,updated_at=? WHERE goal_id=?", (reserved, reserved, timestamp, goal_id))
             elif target == "active" and row["status"] == "paused":
                 connection.execute("UPDATE work_units SET status='eligible',updated_at=? WHERE goal_id=? AND status='paused'", (timestamp, goal_id))
             self._append_event_in_transaction(connection, f"goal.{target}", goal_id=goal_id, payload={"actor_id": actor_id})
@@ -2215,11 +2424,24 @@ class StateStore:
             if connection.execute("SELECT emergency_stopped FROM runtime_control WHERE id=1").fetchone()[0]:
                 return False
             connection.execute("UPDATE runtime_control SET emergency_stopped=1,reason=?,set_by=?,set_at=? WHERE id=1", (reason, actor_id, timestamp))
-            connection.execute("UPDATE budgets SET consumed_elapsed_ms=consumed_elapsed_ms+COALESCE((SELECT sum(min(max(0,CAST((julianday(?) - julianday(a.acquired_at))*86400000 AS INTEGER)),max(0,CAST((julianday(a.expires_at) - julianday(a.acquired_at))*86400000 AS INTEGER)))) FROM work_attempts a JOIN work_units u ON u.id=a.work_unit_id WHERE u.goal_id=budgets.goal_id AND a.status IN ('leased','active')),0),reserved_tokens=0,updated_at=?", (timestamp, timestamp))
-            connection.execute("UPDATE work_attempts SET elapsed_ms=elapsed_ms+min(max(0,CAST((julianday(?) - julianday(acquired_at))*86400000 AS INTEGER)),max(0,CAST((julianday(expires_at) - julianday(acquired_at))*86400000 AS INTEGER))),status='paused',ended_at=?,outcome_class='paused',outcome_json=?,tokens_reserved=0 WHERE status IN ('leased','active')", (timestamp, _encode({"actor_id": actor_id, "reason": reason}), timestamp))
+            live_attempts = connection.execute(
+                "SELECT id,tokens_reserved FROM work_attempts WHERE status IN ('leased','active')"
+            ).fetchall()
+            connection.execute("UPDATE budgets SET consumed_elapsed_ms=consumed_elapsed_ms+COALESCE((SELECT sum(min(max(0,CAST((julianday(?) - julianday(a.acquired_at))*86400000 AS INTEGER)),max(0,CAST((julianday(a.expires_at) - julianday(a.acquired_at))*86400000 AS INTEGER)))) FROM work_attempts a JOIN work_units u ON u.id=a.work_unit_id WHERE u.goal_id=budgets.goal_id AND a.status IN ('leased','active')),0),consumed_tokens=consumed_tokens+reserved_tokens,reserved_tokens=0,updated_at=?", (timestamp, timestamp))
+            for attempt in live_attempts:
+                charge = int(attempt["tokens_reserved"])
+                outcome_evidence: dict[str, Any] = {"actor_id": actor_id, "reason": reason}
+                if charge:
+                    outcome_evidence["unmeasured_usage"] = unmeasured_usage_evidence(
+                        charged_tokens=charge, reason="emergency-stop",
+                    )
+                connection.execute(
+                    """UPDATE work_attempts SET elapsed_ms=elapsed_ms+min(max(0,CAST((julianday(?) - julianday(acquired_at))*86400000 AS INTEGER)),max(0,CAST((julianday(expires_at) - julianday(acquired_at))*86400000 AS INTEGER))),
+                       status='paused',ended_at=?,outcome_class='paused',outcome_json=?,tokens_consumed=tokens_consumed+? WHERE id=?""",
+                    (timestamp, timestamp, _encode(outcome_evidence), charge, attempt["id"]),
+                )
             connection.execute("UPDATE work_units SET status='paused',current_attempt_id=NULL,lease_holder=NULL,lease_expires_at=NULL,updated_at=? WHERE status='leased'", (timestamp,))
             connection.execute("UPDATE goals SET status='paused',updated_at=? WHERE status='active'", (timestamp,))
-            connection.execute("UPDATE budgets SET reserved_tokens=0,updated_at=? WHERE reserved_tokens > 0", (timestamp,))
             self._append_event_in_transaction(connection, "runtime.emergency_stop_set", payload={"actor_id": actor_id, "reason": reason})
         return True
 

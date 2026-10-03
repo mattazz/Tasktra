@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 from pathlib import Path
 import tempfile
+import time
 import unittest
 
 from tasktra.telemetry import TelemetryError, TelemetryRecord, TelemetryStore
@@ -19,7 +21,103 @@ def record(event_id: str = "event-001") -> TelemetryRecord:
     )
 
 
+def append_in_process(root, start, result, identifiers, max_records, max_file_bytes):
+    try:
+        store = TelemetryStore(root, enabled=True, max_records=max_records, max_file_bytes=max_file_bytes)
+        read = store._read_records
+
+        def slow_read():
+            records = read()
+            # Widen the previous read/replace race without requiring concurrent
+            # readers inside the region that is now protected by the lock.
+            time.sleep(0.02)
+            return records
+
+        store._read_records = slow_read
+        start.wait(15)
+        result.send([store.append(record(identifier)) for identifier in identifiers])
+    finally:
+        result.close()
+
+
 class TelemetryTests(unittest.TestCase):
+    def concurrent_appends(self, root, identifiers, *, max_records=128, max_file_bytes=8192):
+        context = multiprocessing.get_context("spawn")
+        start = context.Barrier(len(identifiers))
+        processes = []
+        receivers = []
+        try:
+            for batch in identifiers:
+                receiver, sender = context.Pipe(duplex=False)
+                process = context.Process(
+                    target=append_in_process,
+                    args=(root, start, sender, batch, max_records, max_file_bytes),
+                )
+                process.start()
+                sender.close()
+                processes.append(process)
+                receivers.append(receiver)
+            results = []
+            for receiver in receivers:
+                self.assertTrue(receiver.poll(20), "telemetry writer did not finish")
+                results.extend(receiver.recv())
+            for process in processes:
+                process.join(10)
+                self.assertEqual(process.exitcode, 0)
+            return results
+        finally:
+            for process in processes:
+                if process.is_alive():
+                    process.terminate()
+                process.join(10)
+                process.close()
+            for receiver in receivers:
+                receiver.close()
+
+    def test_concurrent_processes_preserve_distinct_events_and_initial_creation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            identifiers = [[f"event-{index:03d}"] for index in range(4)]
+            self.assertEqual(self.concurrent_appends(temporary, identifiers), [True] * 4)
+            records = TelemetryStore(temporary).records()
+            self.assertEqual({item.event_id for item in records}, {batch[0] for batch in identifiers})
+
+    def test_concurrent_retention_respects_record_and_byte_caps(self):
+        for max_records, max_bytes in ((3, 8192), (128, 4097)):
+            with self.subTest(max_records=max_records), tempfile.TemporaryDirectory() as temporary:
+                batches = [[f"event-{worker * 10 + index:03d}" for index in range(8)] for worker in range(3)]
+                self.assertTrue(all(self.concurrent_appends(
+                    temporary, batches, max_records=max_records, max_file_bytes=max_bytes,
+                )))
+                store = TelemetryStore(temporary, max_records=max_records, max_file_bytes=max_bytes)
+                records = store.records()
+                self.assertGreater(len(records), 0)
+                self.assertLessEqual(len(records), max_records)
+                self.assertLessEqual(store.path.stat().st_size, max_bytes)
+                self.assertEqual(len(records), len({item.event_id for item in records}))
+
+    def test_concurrent_duplicate_event_is_idempotent_and_conflicting_values_fail(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            results = self.concurrent_appends(temporary, [["event-001"], ["event-001"]])
+            self.assertEqual(sorted(results), [False, True])
+            store = TelemetryStore(temporary, enabled=True)
+            self.assertEqual(len(store.records()), 1)
+            with self.assertRaisesRegex(TelemetryError, "different measurements"):
+                store.append({**record().as_dict(), "elapsed_ms": 99})
+            self.assertEqual(store.records(), (record(),))
+
+    def test_legacy_records_remain_readable_and_lock_is_not_an_export_destination(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = TelemetryStore(temporary, enabled=True)
+            store.directory.mkdir(parents=True)
+            legacy = record().as_dict()
+            del legacy["schema_version"]
+            store.path.write_text(json.dumps(legacy) + "\n", encoding="utf-8")
+            self.assertFalse(store.append(record()))
+            self.assertEqual(store.records(), (record(),))
+            for target in (store.lock_path, store.directory / ".." / "telemetry" / store.lock_path.name):
+                with self.subTest(target=target), self.assertRaisesRegex(TelemetryError, "differ"):
+                    store.export_sanitized(target)
+
     def test_collection_is_disabled_and_local_by_default(self):
         with tempfile.TemporaryDirectory() as temporary:
             store = TelemetryStore(temporary)

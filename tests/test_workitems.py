@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from tasktra.contracts import validate_named
+from tasktra.filelocks import exclusive_file_lock
 from tasktra.handoffs import HANDOFF_KIND, HANDOFF_VERSION
 from tasktra.workflow import accept_handoff, new_workflow
 from tasktra.workitems import (
@@ -46,6 +47,20 @@ def completed_workflow(goal_id="goal-1", work_unit_id="one"):
 
 
 class WorkItemStoreTests(unittest.TestCase):
+    def test_update_lock_uses_os_ownership_and_recovers_legacy_marker(self):
+        with TemporaryDirectory() as directory:
+            store = WorkItemStore(directory)
+            store.create(item_id="one", title="One")
+            lock = Path(directory) / ".tasktra" / "work-items" / ".one.md.lock"
+            lock.touch()
+            with exclusive_file_lock(lock, root=directory):
+                with self.assertRaisesRegex(WorkItemConflictError, "already being updated"):
+                    store.update("one", expected_version=1, title="Conflicting")
+            updated = store.update("one", expected_version=1, title="Recovered")
+            self.assertEqual(updated.title, "Recovered")
+            self.assertEqual(updated.version, 2)
+            self.assertTrue(lock.exists())
+
     def test_create_read_list_and_safe_update(self):
         with TemporaryDirectory() as directory:
             store = WorkItemStore(directory)

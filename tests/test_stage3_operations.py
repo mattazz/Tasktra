@@ -4,6 +4,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from tasktra.authority import authority_envelope_sha256
+from tasktra.autonomy import AutonomyStore
 from tasktra.operations import export_audit, operational_status
 from tasktra.state import StateError, StateStore
 
@@ -118,7 +119,8 @@ class Stage3OperationsTests(unittest.TestCase):
     def test_status_is_concise_by_default_and_detail_is_bounded(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "state.sqlite"
-            store = StateStore(path)
+            # Status uses the same bounded aggregate view for an autonomy store.
+            store = AutonomyStore(path)
             store.create_goal(
                 goal_id="goal-one", title="Goal", description="Bounded status",
                 acceptance=["Done"],
@@ -136,6 +138,12 @@ class Stage3OperationsTests(unittest.TestCase):
             self.assertIn("goal", concise)
             self.assertNotIn("units", concise["goal"])
             self.assertEqual(concise["goal"]["work_units"], {"planned": 2})
+            self.assertEqual(concise["goal"]["execution_health"], {
+                "unresolved_work_units": 0,
+                "states": {"healthy": 2},
+                "verification_policies": {"implementation-review": 2},
+            })
+            self.assertNotIn("work_units", concise["goal"]["execution_health"])
             self.assertIn("emergency_stop", concise["summary"])
 
             detailed = operational_status(

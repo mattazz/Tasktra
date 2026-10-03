@@ -94,6 +94,24 @@ changing project records. Press Ctrl+C in the terminal to stop the server.
 
 See the [portal guide](docs/PORTAL.md) for tracking semantics and launch options.
 
+### Execute an approved work unit
+
+`tasktra run` previews a bounded Codex CLI workflow for an existing active goal
+and work unit. Add `--apply` to claim that exact unit, run fresh agent sessions,
+execute configured validation, and retain execution receipts and workflow evidence.
+It uses the project's configured role models and existing transition approvals.
+
+```powershell
+tasktra run --root . --goal-id <goal> --work-unit-id <unit> --actor <performer> --envelope-sha256 <digest>
+tasktra run --root . --goal-id <goal> --work-unit-id <unit> --actor <performer> --envelope-sha256 <digest> --token-reservation 150000 --timeout 900 --apply
+```
+
+The initial adapter requires a clean Git checkout, whole-workspace unit scope,
+and an installed, authenticated Codex CLI. It executes one unit per invocation;
+it does not create approvals or mark the overall goal complete. See the
+[execution guide](docs/EXECUTION.md) for verification policies, cancellation,
+budget accounting, and recovery.
+
 ### Optional Jira status synchronization
 
 Jira is not part of the default project context. A project that wants one-way Tasktra-to-Jira status updates can explicitly enable the `jira-sync` pack and add a policy such as:

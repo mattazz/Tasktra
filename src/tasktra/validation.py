@@ -3,20 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
 from pathlib import Path
-import signal
 import subprocess
-from threading import Thread
 from time import monotonic
+from collections.abc import Callable
 from typing import Iterable, Sequence
 
+from .processes import ArgvProcessRunner, ProcessError, posix_group_has_no_live_members, terminate_posix_group
 
-# Captures are deliberately bounded while a command is still running. Keeping
-# the first bytes gives a useful failure prefix without unbounded memory use.
+
+# Validation keeps a failure prefix and drains the remaining pipes so a noisy
+# command may still report its actual exit status.
 MAX_CAPTURE_CHARS = 12_000
-_READ_CHUNK_BYTES = 4_096
-_TERMINATION_GRACE_SECONDS = 2
 
 
 class ValidationError(ValueError):
@@ -37,132 +35,14 @@ class ValidationResult:
 
     def as_dict(self) -> dict[str, object]:
         return {
-            "argv": list(self.argv),
-            "elapsed_ms": self.elapsed_ms,
-            "exit_code": self.exit_code,
-            "status": self.status,
-            "stderr": self.stderr,
-            "stdout": self.stdout,
+            "argv": list(self.argv), "elapsed_ms": self.elapsed_ms,
+            "exit_code": self.exit_code, "status": self.status,
+            "stderr": self.stderr, "stdout": self.stdout,
         }
 
 
-class _BoundedCapture:
-    """Drain one pipe without retaining more than the configured byte cap."""
-
-    def __init__(self) -> None:
-        self._prefix = bytearray()
-        self._total_bytes = 0
-
-    def append(self, data: bytes) -> None:
-        self._total_bytes += len(data)
-        remaining = MAX_CAPTURE_CHARS - len(self._prefix)
-        if remaining > 0:
-            self._prefix.extend(data[:remaining])
-
-    def render(self) -> str:
-        text = bytes(self._prefix).decode(errors="replace")
-        omitted = self._total_bytes - len(self._prefix)
-        if omitted <= 0:
-            return text
-        suffix = f"\n... {omitted} bytes omitted"
-        return text[: max(0, MAX_CAPTURE_CHARS - len(suffix))] + suffix
-
-
-@dataclass
-class _RunningProcess:
-    process: subprocess.Popen[bytes]
-    windows_job: "_WindowsJob | None" = None
-
-
-class _WindowsJob:
-    """A kill-on-close Windows Job Object for reliable descendant cleanup."""
-
-    _KILL_ON_JOB_CLOSE = 0x00002000
-    _EXTENDED_LIMIT_INFORMATION = 9
-
-    def __init__(self, handle: object) -> None:
-        self._handle = handle
-
-    @classmethod
-    def assign(cls, process: subprocess.Popen[bytes]) -> "_WindowsJob":
-        import ctypes
-        from ctypes import wintypes
-
-        class _BasicLimitInformation(ctypes.Structure):
-            _fields_ = [
-                ("per_process_user_time_limit", ctypes.c_longlong),
-                ("per_job_user_time_limit", ctypes.c_longlong),
-                ("limit_flags", wintypes.DWORD),
-                ("minimum_working_set_size", ctypes.c_size_t),
-                ("maximum_working_set_size", ctypes.c_size_t),
-                ("active_process_limit", wintypes.DWORD),
-                ("affinity", ctypes.c_size_t),
-                ("priority_class", wintypes.DWORD),
-                ("scheduling_class", wintypes.DWORD),
-            ]
-
-        class _IoCounters(ctypes.Structure):
-            _fields_ = [(name, ctypes.c_ulonglong) for name in (
-                "read_operation_count", "write_operation_count", "other_operation_count",
-                "read_transfer_count", "write_transfer_count", "other_transfer_count",
-            )]
-
-        class _ExtendedLimitInformation(ctypes.Structure):
-            _fields_ = [
-                ("basic_limit_information", _BasicLimitInformation),
-                ("io_info", _IoCounters),
-                ("process_memory_limit", ctypes.c_size_t),
-                ("job_memory_limit", ctypes.c_size_t),
-                ("peak_process_memory_used", ctypes.c_size_t),
-                ("peak_job_memory_used", ctypes.c_size_t),
-            ]
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
-        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
-        kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
-        kernel32.SetInformationJobObject.restype = wintypes.BOOL
-        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
-        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
-        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-        kernel32.CloseHandle.restype = wintypes.BOOL
-        handle = kernel32.CreateJobObjectW(None, None)
-        if not handle:
-            raise ctypes.WinError(ctypes.get_last_error())
-        info = _ExtendedLimitInformation()
-        info.basic_limit_information.limit_flags = cls._KILL_ON_JOB_CLOSE
-        try:
-            if not kernel32.SetInformationJobObject(
-                handle, cls._EXTENDED_LIMIT_INFORMATION, ctypes.byref(info), ctypes.sizeof(info)
-            ):
-                raise ctypes.WinError(ctypes.get_last_error())
-            if not kernel32.AssignProcessToJobObject(handle, wintypes.HANDLE(process._handle)):
-                raise ctypes.WinError(ctypes.get_last_error())
-        except BaseException:
-            kernel32.CloseHandle(handle)
-            raise
-        return cls(handle)
-
-    def close(self) -> None:
-        if self._handle is None:
-            return
-        import ctypes
-        from ctypes import wintypes
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-        kernel32.CloseHandle.restype = wintypes.BOOL
-        if not kernel32.CloseHandle(self._handle):
-            raise ctypes.WinError(ctypes.get_last_error())
-        self._handle = None
-
-
 def parse_command(command: str) -> ValidationArgv:
-    """Reject the former string command format without trying to parse it.
-
-    Shell-like strings cannot represent Windows quoting and trailing backslashes
-    portably. Configuration and runtime callers must pass an argv array.
-    """
+    """Reject the former string command format without trying to parse it."""
     del command
     raise ValidationError(
         "string validation commands are unsupported; use an argv array such as "
@@ -185,10 +65,7 @@ def normalize_argv(command: Sequence[str]) -> ValidationArgv:
 
 
 def validation_plan(commands: Iterable[Sequence[str]]) -> tuple[ValidationResult, ...]:
-    return tuple(
-        ValidationResult(normalize_argv(command), "planned", None, 0)
-        for command in commands
-    )
+    return tuple(ValidationResult(normalize_argv(command), "planned", None, 0) for command in commands)
 
 
 def run_validations(
@@ -196,6 +73,7 @@ def run_validations(
     commands: Iterable[Sequence[str]],
     *,
     timeout_seconds: int = 300,
+    on_tick: Callable[[], object] | None = None,
 ) -> tuple[ValidationResult, ...]:
     """Run direct argv commands in order, stopping at the first non-pass result."""
     if timeout_seconds < 1:
@@ -205,197 +83,52 @@ def run_validations(
         raise ValidationError(f"validation root is not a directory: {project}")
     results: list[ValidationResult] = []
     for item in validation_plan(commands):
-        results.append(_run_one(project, item.argv, timeout_seconds))
+        results.append(_run_one(project, item.argv, timeout_seconds, on_tick=on_tick))
         if results[-1].status != "passed":
             break
     return tuple(results)
 
 
-def _run_one(project: Path, argv: ValidationArgv, timeout_seconds: int) -> ValidationResult:
+def _render_output(data: bytes, limited: bool) -> str:
+    text = data.decode(errors="replace")
+    # The shared runner deliberately does not retain an unbounded byte count;
+    # expose the cap without pretending an exact omitted amount is known.
+    return text if not limited else text[:MAX_CAPTURE_CHARS - 22] + "\n... bytes omitted"
+
+
+def _run_one(
+    project: Path, argv: ValidationArgv, timeout_seconds: int, *, on_tick: Callable[[], object] | None,
+) -> ValidationResult:
     started = monotonic()
     try:
-        running = _start_process(argv, project)
+        result = ArgvProcessRunner(
+            timeout=timeout_seconds, output_limit=MAX_CAPTURE_CHARS, terminate_on_output_limit=False,
+        ).run(argv, cwd=project, env=None, on_tick=on_tick)
+    except ProcessError as error:
+        return ValidationResult(
+            argv, "failed", None, int((monotonic() - started) * 1000), stderr=f"validation process cleanup failed: {error}",
+        )
     except OSError as error:
         return ValidationResult(argv, "unavailable", None, int((monotonic() - started) * 1000), stderr=str(error))
-
-    stdout, stderr = _BoundedCapture(), _BoundedCapture()
-    readers = _start_readers(running.process, stdout, stderr)
-    status = "passed"
-    exit_code: int | None = None
-    try:
-        exit_code = running.process.wait(timeout=timeout_seconds)
-        status = "passed" if exit_code == 0 else "failed"
-    except subprocess.TimeoutExpired:
-        status = "timed_out"
-        try:
-            _terminate_process_tree(running)
-        except (ValidationError, OSError, subprocess.TimeoutExpired) as error:
-            status = "failed"
-            stderr.append(f"\nvalidation process cleanup failed: {error}".encode())
-    finally:
-        try:
-            _finish_readers(running, readers)
-        except (ValidationError, OSError, subprocess.TimeoutExpired) as error:
-            status = "failed"
-            stderr.append(f"\n{error}".encode())
-
+    elapsed = int((monotonic() - started) * 1000)
+    if not result.dispatched:
+        return ValidationResult(argv, "unavailable", None, elapsed, stderr="validation command could not be launched")
+    status = "timed_out" if result.timed_out else ("passed" if result.returncode == 0 else "failed")
     return ValidationResult(
-        argv,
-        status,
-        exit_code,
-        int((monotonic() - started) * 1000),
-        stdout.render(),
-        stderr.render(),
+        argv, status, result.returncode, elapsed,
+        _render_output(result.stdout, result.stdout_limited),
+        _render_output(result.stderr, result.stderr_limited),
     )
 
 
-def _start_process(argv: ValidationArgv, project: Path) -> _RunningProcess:
-    kwargs: dict[str, object] = {
-        "cwd": project,
-        "stdout": subprocess.PIPE,
-        "stderr": subprocess.PIPE,
-        "stdin": subprocess.DEVNULL,
-    }
-    if os.name == "nt":
-        # A separate process group makes CTRL_BREAK available as a graceful
-        # fallback. taskkill /T below is still the authoritative tree cleanup.
-        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        kwargs["start_new_session"] = True
-    process = subprocess.Popen(argv, **kwargs)
-    if os.name != "nt":
-        return _RunningProcess(process)
-    try:
-        return _RunningProcess(process, _WindowsJob.assign(process))
-    except OSError:
-        # Some managed hosts disallow assigning nested jobs. taskkill remains
-        # available as the standard-system fallback for those environments.
-        return _RunningProcess(process)
-
-
-def _start_readers(
-    process: subprocess.Popen[bytes], stdout: _BoundedCapture, stderr: _BoundedCapture
-) -> tuple[Thread, Thread]:
-    assert process.stdout is not None
-    assert process.stderr is not None
-    output_thread = Thread(target=_drain, args=(process.stdout, stdout), daemon=True)
-    error_thread = Thread(target=_drain, args=(process.stderr, stderr), daemon=True)
-    output_thread.start()
-    error_thread.start()
-    return output_thread, error_thread
-
-
-def _drain(stream: object, capture: _BoundedCapture) -> None:
-    # Binary reads avoid platform text transcoding and let the capture cap apply
-    # to the memory actually retained.
-    while True:
-        data = stream.read(_READ_CHUNK_BYTES)  # type: ignore[attr-defined]
-        if not data:
-            return
-        capture.append(data)
-
-
-def _finish_readers(running: _RunningProcess, readers: tuple[Thread, Thread]) -> None:
-    # The parent can exit before a descendant releases inherited pipes. Clean
-    # up the owned process boundary before closing a reader's buffered stream:
-    # close() otherwise blocks on the lock held by its pending read().
-    if running.windows_job is not None:
-        running.windows_job.close()
-    elif os.name != "nt":
-        _terminate_posix_group(running.process)
-    for reader in readers:
-        reader.join(timeout=1)
-    process = running.process
-    for stream, reader in zip((process.stdout, process.stderr), readers):
-        if stream is not None and not reader.is_alive():
-            stream.close()
-    if any(reader.is_alive() for reader in readers):
-        raise ValidationError("validation descendants retained output pipes; process cleanup could not be verified")
-
-
-def _terminate_process_tree(running: _RunningProcess) -> None:
-    """Terminate a timed-out command and ordinary descendants before returning."""
-    process = running.process
-    if os.name != "nt":
-        _terminate_posix_group(process)
-        return
-    if process.poll() is not None and running.windows_job is None:
-        return
-    _terminate_windows_tree(process, running.windows_job)
+# These narrow wrappers retain the old test/import seam while the substantive
+# ownership and Darwin zombie handling live in tasktra.processes.
+def _posix_group_has_no_live_members(pgid: int) -> bool:
+    return posix_group_has_no_live_members(pgid, run=subprocess.run)
 
 
 def _terminate_posix_group(process: subprocess.Popen[bytes]) -> None:
     try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    except PermissionError as error:
-        if not _posix_group_has_no_live_members(process.pid):
-            raise ValidationError("validation process group termination was denied; cleanup is unverified") from error
-    try:
-        process.wait(timeout=_TERMINATION_GRACE_SECONDS)
-    except subprocess.TimeoutExpired:
-        pass
-    # A parent may exit on SIGTERM while a descendant ignores it. The group,
-    # rather than the parent's return code, is the cleanup boundary.
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    except PermissionError as error:
-        if not _posix_group_has_no_live_members(process.pid):
-            raise ValidationError("validation process group termination was denied; cleanup is unverified") from error
-    process.wait(timeout=_TERMINATION_GRACE_SECONDS)
-
-
-def _posix_group_has_no_live_members(pgid: int) -> bool:
-    # Darwin can report EPERM for a group containing only zombies. Confirm
-    # absence of live members independently; parent exit and pipe EOF are not
-    # sufficient evidence that every descendant stopped.
-    try:
-        result = subprocess.run(
-            ["/bin/ps", "-A", "-o", "pgid=", "-o", "stat="],
-            stdin=subprocess.DEVNULL, capture_output=True, text=True,
-            check=False, timeout=_TERMINATION_GRACE_SECONDS,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    if result.returncode != 0 or not result.stdout.strip():
-        return False
-    for line in result.stdout.splitlines():
-        fields = line.split()
-        if len(fields) != 2 or not fields[0].isdigit() or not fields[1][0].isalpha():
-            return False
-        if int(fields[0]) == pgid and not fields[1].startswith("Z"):
-            return False
-    return True
-
-
-def _terminate_windows_tree(process: subprocess.Popen[bytes], job: _WindowsJob | None) -> None:
-    # taskkill is the standard Windows facility that walks the descendant tree.
-    # It is invoked with an argv list (never a shell) and has a bounded wait.
-    if job is not None:
-        job.close()
-        try:
-            process.wait(timeout=_TERMINATION_GRACE_SECONDS)
-            return
-        except subprocess.TimeoutExpired:
-            pass
-    try:
-        subprocess.run(
-            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            timeout=_TERMINATION_GRACE_SECONDS + 3,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        process.wait(timeout=_TERMINATION_GRACE_SECONDS)
-        return
-    except (OSError, subprocess.TimeoutExpired):
-        # A minimal fallback if taskkill is unavailable or interrupted.
-        pass
-    if process.poll() is None:
-        process.kill()
-        process.wait(timeout=_TERMINATION_GRACE_SECONDS)
+        terminate_posix_group(process, probe=_posix_group_has_no_live_members)
+    except ProcessError as error:
+        raise ValidationError(str(error)) from error

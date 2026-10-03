@@ -20,6 +20,7 @@ from typing import Any, Iterator
 from uuid import uuid4
 
 from .contracts import ContractError, validate_named
+from .filelocks import FileLockBusyError, FileLockError, exclusive_file_lock
 from .identifiers import IdentifierError, require_identifier
 
 
@@ -338,15 +339,12 @@ class LessonProposalStore:
         lock = path.with_name(f".{path.name}.lock")
         self._assert_safe_path(lock)
         try:
-            descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError as error:
+            with exclusive_file_lock(lock, root=self.project_root):
+                yield
+        except FileLockBusyError as error:
             raise LessonConflictError(f"lesson proposal is already being updated: {path.stem}") from error
-        try:
-            os.close(descriptor)
-            yield
-        finally:
-            self._assert_safe_path(lock)
-            lock.unlink(missing_ok=True)
+        except FileLockError as error:
+            raise LessonError(str(error)) from error
 
     def _replace(self, path: Path, content: str) -> None:
         self._assert_safe_path(path, must_exist=True)

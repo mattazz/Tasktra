@@ -139,7 +139,34 @@ class PortalSnapshotTests(unittest.TestCase):
         agents = {agent["work_id"]: agent for agent in snapshot["agents"]}
         self.assertTrue(agents["expired"]["lease_stale"])
         self.assertFalse(agents["fresh"]["lease_stale"])
-        self.assertFalse(agents["complete"]["lease_stale"])
+        self.assertTrue(agents["complete"]["lease_stale"])
+
+    def test_stage_receipt_uses_parent_work_lease_and_paused_parent_is_not_running(self) -> None:
+        self.store.create_goal(goal_id="goal-one", title="One", description="One")
+        self.store.create_work_unit(goal_id="goal-one", work_unit_id="work-one", title="Work")
+        fresh = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+        with closing(sqlite3.connect(self.path)) as connection:
+            connection.execute(
+                "UPDATE work_units SET status='leased',lease_holder='worker-one',lease_expires_at=? WHERE id='work-one'",
+                (fresh,),
+            )
+            connection.commit()
+        ledger = ExecutionStore(self.root)
+        ledger.plan("work-one", "coordinator", None, None, attribution_reason="parent-attribution")
+        ledger.plan("work-one-implement", "implementer", None, None, parent_work_id="work-one")
+        ledger.start("work-one-implement", "codex", "local", "thread-one")
+        snapshot = portal_snapshot(self.root)
+        self.assertEqual((snapshot["summary"]["agents"], snapshot["summary"]["running_agents"]), (1, 1))
+        agent = snapshot["agents"][0]
+        self.assertEqual((agent["work_id"], agent["parent_work_id"], agent["goal_id"]),
+                         ("work-one-implement", "work-one", "goal-one"))
+        with closing(sqlite3.connect(self.path)) as connection:
+            connection.execute("UPDATE work_units SET status='paused' WHERE id='work-one'")
+            connection.commit()
+        paused = portal_snapshot(self.root)
+        self.assertEqual(paused["summary"]["running_agents"], 0)
+        self.assertEqual(paused["agents"][0]["work_id"], "work-one-implement")
+        self.assertTrue(paused["agents"][0]["lease_stale"])
 
     def test_fresh_lease_derives_one_agent_only_without_execution_record(self) -> None:
         self.store.create_goal(goal_id="goal-one", title="One", description="One")

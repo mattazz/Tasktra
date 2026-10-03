@@ -143,7 +143,7 @@ def _execution_rows(project_root: Path, warnings: list[str]) -> tuple[list[sqlit
                 "work_id", "role", "state", "agent_id", "configured_model", "configured_effort",
                 "requested_model", "requested_effort", "observed_model", "observed_effort",
                 "start_provenance", "finish_provenance", "usage_provenance", "usage_json",
-                "rollout_agent_id", "rollout_model", "rollout_effort", "source_sha256",
+                "rollout_agent_id", "rollout_model", "rollout_effort", "source_sha256", "parent_work_id",
             )
             selected = ", ".join(name if name in columns else f"NULL AS {name}" for name in names)
             total, running = connection.execute(
@@ -156,6 +156,12 @@ def _execution_rows(project_root: Path, warnings: list[str]) -> tuple[list[sqlit
     except (ExecutionError, OSError, sqlite3.Error):
         warnings.append("Execution ledger could not be read.")
         return [], 0, 0
+
+
+def _execution_parent(row: sqlite3.Row) -> str:
+    """Resolve a stage receipt to its runtime work unit when it has one."""
+    parent = row["parent_work_id"]
+    return str(parent) if isinstance(parent, str) and parent else str(row["work_id"])
 
 
 def _fresh_running_execution_count(project_root: Path, runtime: sqlite3.Connection,
@@ -172,10 +178,12 @@ def _fresh_running_execution_count(project_root: Path, runtime: sqlite3.Connecti
         if ledger is None:
             return 0
         try:
-            cursor = ledger.execute("SELECT work_id FROM execution WHERE state='started'")
+            columns = _columns(ledger, "execution")
+            parent = "parent_work_id" if "parent_work_id" in columns else "NULL AS parent_work_id"
+            cursor = ledger.execute(f"SELECT work_id,{parent} FROM execution WHERE state='started'")
             running = 0
             while batch := cursor.fetchmany(200):
-                work_ids = [str(row["work_id"]) for row in batch]
+                work_ids = [_execution_parent(row) for row in batch]
                 marks = ",".join("?" for _ in work_ids)
                 linked = {
                     str(row["id"]): row
@@ -212,22 +220,28 @@ def _lease_agents(project_root: Path, runtime: sqlite3.Connection, now: datetime
         items: list[dict[str, Any]] = []
         new_total = running = projected_total = 0
         while batch := cursor.fetchmany(200):
-            states: dict[str, str] = {}
+            linked_states: dict[str, list[str]] = {}
             if ledger is not None:
                 ids = [str(row["id"]) for row in batch]
                 marks = ",".join("?" for _ in ids)
-                states = {str(row["work_id"]): str(row["state"]) for row in ledger.execute(
-                    f"SELECT work_id,state FROM execution WHERE work_id IN ({marks})", ids
-                )}
+                columns = _columns(ledger, "execution")
+                parent = "parent_work_id" if "parent_work_id" in columns else "NULL AS parent_work_id"
+                for receipt in ledger.execute(
+                    f"SELECT work_id,state,{parent} FROM execution WHERE work_id IN ({marks}) OR parent_work_id IN ({marks})"
+                    if "parent_work_id" in columns else f"SELECT work_id,state,{parent} FROM execution WHERE work_id IN ({marks})",
+                    (*ids, *ids) if "parent_work_id" in columns else ids,
+                ):
+                    linked_states.setdefault(_execution_parent(receipt), []).append(str(receipt["state"]))
             for row in batch:
                 work_id = str(row["id"])
-                if states.get(work_id) == "started":
+                if "started" in linked_states.get(work_id, []):
                     continue
                 expiry = row["attempt_expires_at"] or row["lease_expires_at"]
                 stale = _lease_stale(expiry, now)
                 projected_total += 1
-                if work_id not in states:
-                    new_total += 1
+                # All linked planned/terminal receipts are replaced by this
+                # single current-lease projection, including staged children.
+                new_total += 1
                 running += not stale
                 if len(items) < limit:
                     items.append({
@@ -260,7 +274,8 @@ def _add_execution_agents(snapshot: dict[str, Any], execution_rows: list[sqlite3
             except ValueError:
                 warnings.append(f"Execution usage for {work_id} is malformed and was omitted.")
         total_tokens = usage.get("total_tokens") if isinstance(usage, dict) and isinstance(usage.get("total_tokens"), int) else None
-        job = work_details.get(work_id)
+        parent_work_id = _execution_parent(row)
+        job = work_details.get(parent_work_id)
         provenance = row["start_provenance"] or row["finish_provenance"] or row["usage_provenance"]
         state = str(row["state"])
         # A plan is an assertion of intended routing, never an observation of
@@ -272,20 +287,59 @@ def _add_execution_agents(snapshot: dict[str, Any], execution_rows: list[sqlite3
         host_observation = row["start_provenance"] == "host-callback"
         snapshot["agents"].append({
             "id": verified_agent or (row["agent_id"] if host_observation else None) or work_id, "work_id": work_id,
+            "parent_work_id": None if parent_work_id == work_id else parent_work_id,
             "goal_id": None if job is None else job["goal_id"], "role": str(row["role"]), "state": state,
             "model": (verified_model if verified_model is not None else row["observed_model"] if host_observation else None) if observed else None,
             "effort": (verified_effort if verified_effort is not None else row["observed_effort"] if host_observation else None) if observed else None,
             "provenance": "rollout-verified" if row["source_sha256"] is not None else provenance, "total_tokens": total_tokens,
             "heartbeat_at": None if job is None else job["heartbeat_at"],
             "lease_expires_at": None if job is None else job["lease_expires_at"],
-            "lease_stale": False if job is None else job["lease_stale"],
+            # A receipt linked to a paused, completed, or otherwise non-live
+            # work unit cannot render as an active agent in the portal.
+            "lease_stale": False if job is None else (
+                job["status"] != "leased" or job["lease_stale"]
+            ),
         })
     return total, running
+
+
+def _visible_execution_rows(
+    rows: list[sqlite3.Row], work_details: dict[str, dict[str, Any]],
+) -> list[sqlite3.Row]:
+    """Hide coordinator plans and stale stage plans behind their runtime job.
+
+    A supervisor records one coordinator plan per work unit and child receipts
+    for its stages.  The parent is attribution only.  A fresh current lease
+    replaces planned or terminal child receipts; an actual started child stays
+    visible as the observed agent.
+    """
+    parent_ids = {
+        str(row["parent_work_id"]) for row in rows
+        if isinstance(row["parent_work_id"], str) and row["parent_work_id"]
+    }
+    started = {_execution_parent(row) for row in rows if row["state"] == "started"}
+    visible: list[sqlite3.Row] = []
+    for row in rows:
+        work_id = str(row["work_id"])
+        linked_work = _execution_parent(row)
+        if work_id in parent_ids and row["role"] == "coordinator" and row["state"] == "planned":
+            continue
+        job = work_details.get(linked_work)
+        if job is not None and job["status"] == "leased":
+            if linked_work in started and row["state"] != "started":
+                continue
+            if linked_work not in started:
+                continue
+        visible.append(row)
+    return visible
 
 
 def _add_execution_only_agents(snapshot: dict[str, Any], project_root: Path) -> None:
     """Keep an optional receipt ledger useful when no StateStore exists yet."""
     rows, total, running = _execution_rows(project_root, snapshot["warnings"])
+    rows = _visible_execution_rows(rows, {})
+    total = len(rows)
+    running = sum(1 for row in rows if row["state"] == "started")
     total, running = _add_execution_agents(snapshot, rows, total, running, {}, snapshot["warnings"])
     snapshot["summary"]["agents"] = total
     snapshot["summary"]["running_agents"] = running
@@ -421,7 +475,7 @@ def portal_snapshot(root: Path) -> dict[str, Any]:
             })
 
         execution_rows, execution_total, execution_running = _execution_rows(project_root, warnings)
-        execution_ids = [str(row["work_id"]) for row in execution_rows]
+        execution_ids = sorted({_execution_parent(row) for row in execution_rows})
         # Resolve exact work-to-goal joins for displayed receipt rows without
         # exposing or scanning unbounded job detail.
         work_details: dict[str, dict[str, Any]] = {}
@@ -437,8 +491,11 @@ def portal_snapshot(root: Path) -> dict[str, Any]:
                 work_details[str(row["id"])] = {
                     "goal_id": str(row["goal_id"]), "heartbeat_at": row["heartbeat_at"],
                     "lease_expires_at": expiry,
-                    "lease_stale": status == "leased" and _lease_stale(expiry, now),
+                    "lease_stale": status == "leased" and _lease_stale(expiry, now), "status": status,
                 }
+        execution_rows = _visible_execution_rows(execution_rows, work_details)
+        execution_total = len(execution_rows)
+        execution_running = sum(1 for row in execution_rows if row["state"] == "started")
         execution_total, execution_running = _add_execution_agents(
             snapshot, execution_rows, execution_total, execution_running, work_details, warnings,
         )
