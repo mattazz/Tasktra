@@ -16,6 +16,7 @@ from typing import Any, Callable, Mapping
 
 from .contracts import require_valid
 from .processes import ArgvProcessRunner
+from .worker_profiles import CliCapabilities, HostLaunchProfile, WorkerContext
 
 MAX_EVENT_BYTES = 256 * 1024
 MAX_PROMPT_BYTES = 128 * 1024
@@ -55,6 +56,7 @@ class HostResult:
     thread_id: str
     response: Mapping[str, Any]
     usage: Mapping[str, int | None] | None
+    launch_profile: Mapping[str, Any] | None = None
 
 
 class CodexEventStream:
@@ -127,7 +129,7 @@ class CodexEventStream:
                     self.usage = values
             self.completed = True
 
-    def finish(self) -> HostResult:
+    def finish(self, *, launch_profile: HostLaunchProfile | None = None) -> HostResult:
         try:
             self._pending += self._decoder.decode(b"", final=True)
         except UnicodeDecodeError as error:
@@ -141,18 +143,52 @@ class CodexEventStream:
             require_valid(response, STAGE_SCHEMA, label="host stage result")
         except ValueError as error:
             raise HostError("Codex stage result failed validation") from error
-        return HostResult(self.thread_id, response, self.usage)
+        return HostResult(self.thread_id, response, self.usage,
+                          None if launch_profile is None else launch_profile.preview())
 
 
 class CodexHostAdapter:
     """Run a fresh CLI session using saved CLI authentication and bounded I/O."""
 
-    def __init__(self, executable: str = "codex", *, runner_factory: Any = ArgvProcessRunner) -> None:
+    def __init__(self, executable: str = "codex", *, runner_factory: Any = ArgvProcessRunner,
+                 worker_context: WorkerContext | None = None,
+                 cli_capabilities: CliCapabilities | None = None) -> None:
         self.executable = executable
         self.runner_factory = runner_factory
+        self.worker_context = worker_context
+        self.cli_capabilities = cli_capabilities
+        self._observed_cli_capabilities: CliCapabilities | None = None
 
     def available(self) -> bool:
         return shutil.which(self.executable) is not None
+
+    def launch_profile(self, workspace: Path) -> HostLaunchProfile:
+        executable = shutil.which(self.executable)
+        capabilities = (self._capabilities(executable, workspace)
+                        if executable and self.worker_context is not None and self.worker_context.needs_capability_check else None)
+        return HostLaunchProfile.from_context(self.worker_context, capabilities)
+
+    def _capabilities(self, executable: str, workspace: Path) -> CliCapabilities:
+        """Read only the installed executable's bounded help surfaces."""
+        if self.cli_capabilities is not None:
+            return self.cli_capabilities
+        if self._observed_cli_capabilities is not None:
+            return self._observed_cli_capabilities
+        runner = ArgvProcessRunner(timeout=5, output_limit=64 * 1024)
+        environment = host_environment()
+        cli = runner.run([executable, "--help"], cwd=workspace, env=environment)
+        command = runner.run([executable, "exec", "--help"], cwd=workspace, env=environment)
+        if (cli.returncode != 0 or command.returncode != 0 or cli.timed_out or command.timed_out
+                or cli.output_limited or command.output_limited or not cli.dispatched or not command.dispatched):
+            self._observed_cli_capabilities = CliCapabilities()
+            return self._observed_cli_capabilities
+        try:
+            self._observed_cli_capabilities = CliCapabilities.from_help(
+                cli.stdout.decode("utf-8", "strict"), command.stdout.decode("utf-8", "strict")
+            )
+        except UnicodeDecodeError:
+            self._observed_cli_capabilities = CliCapabilities()
+        return self._observed_cli_capabilities
 
     def run(self, *, prompt: str, workspace: Path, model: str | None, effort: str | None,
             sandbox: str, timeout_seconds: int, on_started: Callable[[str], None],
@@ -164,6 +200,10 @@ class CodexHostAdapter:
         executable = shutil.which(self.executable)
         if executable is None:
             raise HostError("Codex CLI is unavailable; install and authenticate it before running work")
+        launch = self.launch_profile(workspace)
+        if not launch.available:
+            unavailable = ", ".join(launch.unavailable_capabilities)
+            raise HostError(f"Codex CLI cannot safely apply requested worker context: {unavailable}")
         stream = CodexEventStream(on_started)
         # Schema lives outside the project so model edits cannot change the
         # contract. CLI output remains untrusted and is validated again here.
@@ -173,6 +213,10 @@ class CodexHostAdapter:
             argv = [executable, "exec", "--json", "--color", "never", "--sandbox", sandbox,
                     "--cd", str(workspace), "--output-schema", str(schema),
                     "-c", "project_doc_fallback_filenames=[]"]
+            if launch.user_profile is not None:
+                argv += ["--profile", launch.user_profile]
+            for override in launch.config_overrides:
+                argv += ["-c", override]
             if model is not None:
                 argv += ["--model", model]
             if effort is not None:
@@ -184,4 +228,4 @@ class CodexHostAdapter:
                                 on_stdout_chunk=stream.feed, on_tick=on_tick)
         if result.returncode != 0 or result.timed_out or result.output_limited or result.input_uncertain or not result.dispatched:
             raise HostError("Codex execution failed or exceeded a bound; inspect the execution receipt")
-        return stream.finish()
+        return stream.finish(launch_profile=launch)

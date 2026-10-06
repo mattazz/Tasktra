@@ -1,0 +1,268 @@
+{
+  "kind": "tasktra.development-efficiency-evidence",
+  "date": "2026-10-05",
+  "scenario": "name-normalization",
+  "replicates": 1,
+  "models": {
+    "implementer": "gpt-5.6-terra",
+    "tester": "gpt-5.6-terra",
+    "reviewer": "gpt-5.6-sol"
+  },
+  "effort": "high",
+  "counter_source": "host-imported execution receipts",
+  "results": {
+    "direct": {
+      "trial": {
+        "scenario": "name-normalization",
+        "replicate": 0,
+        "mode": "direct",
+        "config_fingerprint": "a693ad4a2e77ec968bf4f13bcc82aa99ad7783472d19c3c9d1f2f4bdea461334",
+        "acceptance_fingerprint": "e8d5a0e195a4e9efc866b0082a6601c42d4549e5e3e16cdea8eb16ed71b9671f",
+        "success": true,
+        "validation_outcome": "passed",
+        "elapsed_ms": 97172,
+        "receipt_ids": [
+          "direct-0-direct"
+        ]
+      },
+      "known_usage": {
+        "input_tokens": 110113,
+        "output_tokens": 644,
+        "total_tokens": 110757
+      },
+      "subsets": {
+        "cache_write_input_tokens": 0,
+        "reasoning_output_tokens": 68,
+        "cached_input_tokens": 82944
+      },
+      "usage_complete": true,
+      "acceptance_recheck": [
+        {
+          "status": "passed",
+          "exit_code": 0
+        }
+      ],
+      "check_unchanged_utf8": true,
+      "raw_artifact": ".tasktra/runtime/token-efficiency/experiment-1/0-direct/.tasktra/runtime/experiment.json",
+      "raw_artifact_sha256": "099808d4d91e7c37006e46de5377c0a5827eb2729120edb6d6d82a281fc9de3e",
+      "scoring_corrected": false,
+      "scope": {
+        "base_commit": "74a9b22eff52923a673dfc9766875f35acbb5256",
+        "changed_paths": [
+          "names.py"
+        ],
+        "untracked_paths": [],
+        "scope_valid": true
+      }
+    },
+    "current": {
+      "trial": {
+        "scenario": "name-normalization",
+        "replicate": 0,
+        "mode": "current",
+        "config_fingerprint": "a693ad4a2e77ec968bf4f13bcc82aa99ad7783472d19c3c9d1f2f4bdea461334",
+        "acceptance_fingerprint": "e8d5a0e195a4e9efc866b0082a6601c42d4549e5e3e16cdea8eb16ed71b9671f",
+        "success": true,
+        "validation_outcome": "passed",
+        "elapsed_ms": 379906,
+        "receipt_ids": [
+          "attempt-4e9e2ec62a8e44148c273266a1725713-1",
+          "attempt-4e9e2ec62a8e44148c273266a1725713-2",
+          "attempt-4e9e2ec62a8e44148c273266a1725713-3"
+        ]
+      },
+      "known_usage": {
+        "input_tokens": 319522,
+        "output_tokens": 2878,
+        "total_tokens": 322400
+      },
+      "subsets": {
+        "cache_write_input_tokens": 0,
+        "reasoning_output_tokens": 1039,
+        "cached_input_tokens": 249600
+      },
+      "usage_complete": true,
+      "acceptance_recheck": [
+        {
+          "status": "passed",
+          "exit_code": 0
+        }
+      ],
+      "check_unchanged_utf8": true,
+      "raw_artifact": ".tasktra/runtime/token-efficiency/experiment-2/0-current/.tasktra/runtime/experiment.json",
+      "raw_artifact_sha256": "5b4715e097c1059e69142640827329eb8a64aed3220f6020c8003e726cca20e0",
+      "scoring_corrected": true,
+      "scope": {
+        "base_commit": "262bc3cf5796ebade5c7b8219394858139133c0f",
+        "changed_paths": [
+          "names.py"
+        ],
+        "untracked_paths": [],
+        "scope_valid": true
+      }
+    },
+    "optimized": {
+      "trial": {
+        "scenario": "name-normalization",
+        "replicate": 0,
+        "mode": "optimized",
+        "config_fingerprint": "a693ad4a2e77ec968bf4f13bcc82aa99ad7783472d19c3c9d1f2f4bdea461334",
+        "acceptance_fingerprint": "e8d5a0e195a4e9efc866b0082a6601c42d4549e5e3e16cdea8eb16ed71b9671f",
+        "success": true,
+        "validation_outcome": "passed",
+        "elapsed_ms": 212922,
+        "receipt_ids": [
+          "attempt-5e817b0edeb74f45a69180b5177ac129-1",
+          "attempt-5e817b0edeb74f45a69180b5177ac129-2"
+        ]
+      },
+      "known_usage": {
+        "input_tokens": 184347,
+        "output_tokens": 2288,
+        "total_tokens": 186635
+      },
+      "subsets": {
+        "cache_write_input_tokens": 0,
+        "reasoning_output_tokens": 824,
+        "cached_input_tokens": 138368
+      },
+      "usage_complete": true,
+      "acceptance_recheck": [
+        {
+          "status": "passed",
+          "exit_code": 0
+        }
+      ],
+      "check_unchanged_utf8": true,
+      "raw_artifact": ".tasktra/runtime/token-efficiency/experiment-2/0-optimized/.tasktra/runtime/experiment.json",
+      "raw_artifact_sha256": "42a81740e7a1b5b7f39035215f46ed34d4336ca7cdeaf4c57064fb6d0c50cf35",
+      "scoring_corrected": true,
+      "scope": {
+        "base_commit": "2b511fe33926af9ab69994cdd7654c46cf366683",
+        "changed_paths": [
+          "names.py"
+        ],
+        "untracked_paths": [],
+        "scope_valid": true
+      }
+    },
+    "focused-optimized": {
+      "trial": {
+        "scenario": "name-normalization",
+        "replicate": 0,
+        "mode": "optimized",
+        "config_fingerprint": "a693ad4a2e77ec968bf4f13bcc82aa99ad7783472d19c3c9d1f2f4bdea461334",
+        "acceptance_fingerprint": "e8d5a0e195a4e9efc866b0082a6601c42d4549e5e3e16cdea8eb16ed71b9671f",
+        "success": true,
+        "validation_outcome": "passed",
+        "receipt_ids": [
+          "attempt-0a28de844cca45129ec32b8d5e5893b0-1",
+          "attempt-0a28de844cca45129ec32b8d5e5893b0-2"
+        ],
+        "elapsed_ms": 274985
+      },
+      "known_usage": {
+        "input_tokens": 218462,
+        "output_tokens": 2153,
+        "total_tokens": 220615
+      },
+      "subsets": {
+        "cache_write_input_tokens": 0,
+        "reasoning_output_tokens": 615,
+        "cached_input_tokens": 167680
+      },
+      "usage_complete": true,
+      "acceptance_recheck": [
+        {
+          "status": "passed",
+          "exit_code": 0
+        }
+      ],
+      "check_unchanged_utf8": true,
+      "raw_artifact": ".tasktra/runtime/token-efficiency/experiment-focused/result.json",
+      "raw_artifact_sha256": "a7ff57e6a656fe9a0307581127e68f5406465f493dc70fbe3723f902a4ffd39f",
+      "scoring_corrected": false,
+      "scope": {
+        "base_commit": "fd5f0ddfd7f0756ec80647f90747ef63e3ebd017",
+        "changed_paths": [
+          "names.py"
+        ],
+        "untracked_paths": [],
+        "scope_valid": true
+      }
+    }
+  },
+  "aggregates": {
+    "optimized": {
+      "optimized_vs_direct": {
+        "pair_count": 1,
+        "ineligible_pairs": 0,
+        "scope": "complete-case-only",
+        "overall_savings_claim": null,
+        "eligible_pairs": 1,
+        "baseline_total_tokens": 110757,
+        "optimized_total_tokens": 186635,
+        "total_token_delta": 75878,
+        "total_token_percent_delta": 68.50853670648355,
+        "median_total_token_delta": 75878,
+        "median_total_token_percent_delta": 68.50853670648355,
+        "percent_sample_count": 1
+      },
+      "optimized_vs_current": {
+        "pair_count": 1,
+        "ineligible_pairs": 0,
+        "scope": "complete-case-only",
+        "overall_savings_claim": null,
+        "eligible_pairs": 1,
+        "baseline_total_tokens": 322400,
+        "optimized_total_tokens": 186635,
+        "total_token_delta": -135765,
+        "total_token_percent_delta": -42.110732009925556,
+        "median_total_token_delta": -135765,
+        "median_total_token_percent_delta": -42.110732009925556,
+        "percent_sample_count": 1
+      }
+    },
+    "focused-optimized": {
+      "optimized_vs_direct": {
+        "pair_count": 1,
+        "ineligible_pairs": 0,
+        "scope": "complete-case-only",
+        "overall_savings_claim": null,
+        "eligible_pairs": 1,
+        "baseline_total_tokens": 110757,
+        "optimized_total_tokens": 220615,
+        "total_token_delta": 109858,
+        "total_token_percent_delta": 99.18831315402187,
+        "median_total_token_delta": 109858,
+        "median_total_token_percent_delta": 99.18831315402187,
+        "percent_sample_count": 1
+      },
+      "optimized_vs_current": {
+        "pair_count": 1,
+        "ineligible_pairs": 0,
+        "scope": "complete-case-only",
+        "overall_savings_claim": null,
+        "eligible_pairs": 1,
+        "baseline_total_tokens": 322400,
+        "optimized_total_tokens": 220615,
+        "total_token_delta": -101785,
+        "total_token_percent_delta": -31.571029776674937,
+        "median_total_token_delta": -101785,
+        "median_total_token_percent_delta": -31.571029776674937,
+        "percent_sample_count": 1
+      }
+    }
+  },
+  "scoring_correction": "The temporary resume helper used Windows default decoding for Unicode check.py. Both resumed model runs completed and their original recorded acceptance checks passed. Explicit UTF-8 comparison and fresh deterministic checks correct the scoring only. Raw artifacts and host receipts remain unchanged.",
+  "setup_failures": "experiment-2/setup-failures.json retains two pre-dispatch work-unit ID validation failures; no model spend.",
+  "limitations": [
+    "One replicate; model variability and provider caching uncontrolled.",
+    "Focused-tool extension reuses direct/current controls; not an independent replicate.",
+    "Requested tool disabling is retained but effective host tool reduction is unverified.",
+    "Development build with late context parity fixes after launches; not an exact final-commit benchmark.",
+    "Same fixed acceptance checks do not prove equivalent defect detection.",
+    "No general savings, billing cost, or project-wide usage claim.",
+    "Tasktra development and audit usage excluded."
+  ]
+}

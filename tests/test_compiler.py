@@ -17,6 +17,7 @@ from tasktra.compiler import (
     resolve_packs,
     write_projection,
 )
+from tasktra.config import ProjectRoute
 from tasktra.model_policy import CodexModelPolicy
 
 
@@ -85,6 +86,32 @@ class CompilerTests(unittest.TestCase):
         scout = projection.files[PurePosixPath(".codex/agents/scout.toml")]
         self.assertIn('model = "project-fast"', scout)
         self.assertIn('model_reasoning_effort = "medium"', scout)
+
+    def test_projection_selectors_are_enabled_pack_bounded_and_keep_core_safety_skills(self):
+        catalog = load_catalog(ROOT / "catalog")
+        projection = compile_catalog(
+            catalog,
+            projection_roles=("scout", "writer"),
+            projection_skills=("tasktra-goal", "tasktra-run", "tasktra-stop"),
+        )
+        self.assertIn(PurePosixPath(".codex/agents/scout.toml"), projection.files)
+        self.assertIn(PurePosixPath(".codex/agents/writer.toml"), projection.files)
+        self.assertNotIn(PurePosixPath(".codex/agents/implementer.toml"), projection.files)
+        self.assertIn("Roles: scout, writer", projection.files[PurePosixPath("AGENTS.md")])
+        self.assertNotIn(PurePosixPath(".agents/skills/tasktra-init/SKILL.md"), projection.files)
+        with self.assertRaisesRegex(CatalogError, "requires enabled pack item"):
+            compile_catalog(catalog, projection_roles=("frontend-specialist",))
+        with self.assertRaisesRegex(CatalogError, "core safety skills"):
+            compile_catalog(catalog, projection_skills=("tasktra-goal",))
+
+    def test_selected_routes_must_remain_projected(self):
+        catalog = load_catalog(ROOT / "catalog")
+        with self.assertRaisesRegex(CatalogError, "requires an enabled pack"):
+            compile_catalog(
+                catalog,
+                projection_roles=("scout",),
+                project_routes=(ProjectRoute("review", "Review work", role="reviewer"),),
+            )
 
     def test_invalid_role_model_metadata_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -18,6 +18,7 @@ from urllib.parse import quote, urlsplit
 
 from .config import ConfigError, load_project_config
 from .execution import ExecutionError, ExecutionStore
+from .efficiency import summarize_executions
 from .state import SCHEMA_VERSION
 
 
@@ -294,9 +295,9 @@ def _add_execution_agents(snapshot: dict[str, Any], execution_rows: list[sqlite3
             "provenance": "rollout-verified" if row["source_sha256"] is not None else provenance, "total_tokens": total_tokens,
             "heartbeat_at": None if job is None else job["heartbeat_at"],
             "lease_expires_at": None if job is None else job["lease_expires_at"],
-            # A receipt linked to a paused, completed, or otherwise non-live
-            # work unit cannot render as an active agent in the portal.
-            "lease_stale": False if job is None else (
+            # Only an unfinished execution can have a stale live-work claim.
+            # Terminal receipts keep their actual success/failure state.
+            "lease_stale": False if job is None or state != "started" else (
                 job["status"] != "leased" or job["lease_stale"]
             ),
         })
@@ -356,6 +357,10 @@ def portal_snapshot(root: Path) -> dict[str, Any]:
 
     snapshot = _empty_snapshot(config.name, "Runtime database is unavailable.")
     warnings: list[str] = snapshot["warnings"]
+    try:
+        snapshot["efficiency"] = summarize_executions(ExecutionStore(project_root).iter_records())
+    except (ExecutionError, OSError, sqlite3.Error, ValueError):
+        snapshot["efficiency"] = None
     try:
         database = config.database_path(project_root)
         if not database.is_file():

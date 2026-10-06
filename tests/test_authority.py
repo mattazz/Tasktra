@@ -17,6 +17,7 @@ from tasktra.authority import (
     transition_approval_subject_sha256,
     validate_authority_envelope,
     validate_transition_approval,
+    verification_policy_allowed,
 )
 
 
@@ -79,6 +80,14 @@ class AuthorityEnvelopeTests(unittest.TestCase):
         value["budgets"]["attempts"] = 0
         with self.assertRaises(AuthorityError):
             validate_authority_envelope(value)
+
+    def test_deterministic_implementation_review_requires_its_exact_action(self):
+        value = envelope()
+        self.assertFalse(verification_policy_allowed(value, "implementation-deterministic-review"))
+        value["allowed_actions"].append("verify-implementation-deterministic-review")
+        self.assertTrue(verification_policy_allowed(value, "implementation-deterministic-review"))
+        value["prohibited_actions"].append("verify-implementation-deterministic-review")
+        self.assertFalse(verification_policy_allowed(value, "implementation-deterministic-review"))
 
 
 class TransitionApprovalTests(unittest.TestCase):

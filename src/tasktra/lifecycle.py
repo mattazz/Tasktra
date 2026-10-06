@@ -27,10 +27,10 @@ _SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 _LOCK_PATH = PurePosixPath(".tasktra/tasktra.lock")
 _MANIFEST_PATH = PurePosixPath(".tasktra/generated/manifest.json")
 _DECLARED_MAJOR_COMPATIBILITY_EDGES = frozenset({("0.6.0", "1.0.0")})
-# Runtime 11 adds a deterministic, sealed work-unit verification policy.  The
-# historical 8/9 ledgers have explicit, audited migration steps through 10;
-# accept only those reviewed compound paths plus the immediate 10 -> 11 edge.
-_DECLARED_RUNTIME_COMPATIBILITY_EDGES = frozenset({(8, 11), (9, 11)})
+# Runtime 12 extends the sealed verification-policy vocabulary. Historical
+# ledgers have explicit audited steps through 10/11; retain those compound
+# paths as well as the immediate predecessor handled below.
+_DECLARED_RUNTIME_COMPATIBILITY_EDGES = frozenset({(8, 11), (9, 11), (8, 12), (9, 12), (10, 12)})
 
 
 class LifecycleError(ValueError):
@@ -62,6 +62,8 @@ def preview_adoption(
     codex_model_policy: CodexModelPolicy | None = None,
     codex_role_overrides: Mapping[str, Mapping[str, str]] | None = None,
     project_routes: Iterable[ProjectRoute] = (),
+    projection_roles: Iterable[str] | None = None,
+    projection_skills: Iterable[str] | None = None,
 ) -> LifecyclePreview:
     """Return a bounded adoption plan without treating instructions as equivalent.
 
@@ -71,7 +73,8 @@ def preview_adoption(
     """
     project = _project_root(root)
     inspection = inspect_existing_instructions(project)
-    target = _target_projection(catalog, enabled_packs, codex_model_policy, codex_role_overrides, project_routes, project)
+    target = _target_projection(catalog, enabled_packs, codex_model_policy, codex_role_overrides, project_routes, project,
+                                projection_roles, projection_skills)
     activation = preflight_packs(
         catalog, target.packs,
         available_capabilities=available_capabilities,
@@ -118,6 +121,8 @@ def preview_upgrade(
     codex_model_policy: CodexModelPolicy | None = None,
     codex_role_overrides: Mapping[str, Mapping[str, str]] | None = None,
     project_routes: Iterable[ProjectRoute] = (),
+    projection_roles: Iterable[str] | None = None,
+    projection_skills: Iterable[str] | None = None,
 ) -> LifecyclePreview:
     """Compose a deterministic, authority-scoped upgrade preview.
 
@@ -137,7 +142,8 @@ def preview_upgrade(
             blockers.append(_blocker("lockfile", f"invalid lockfile: {error}"))
     selected = tuple(enabled_packs) if enabled_packs is not None else (lock.packs if lock is not None else ("core",))
     try:
-        target = _target_projection(catalog, selected, codex_model_policy, codex_role_overrides, project_routes, project)
+        target = _target_projection(catalog, selected, codex_model_policy, codex_role_overrides, project_routes, project,
+                                    projection_roles, projection_skills)
         activation = preflight_packs(
             catalog, target.packs,
             available_capabilities=available_capabilities,
@@ -235,6 +241,7 @@ def _target_projection(
     catalog: Catalog, enabled_packs: Iterable[str], codex_model_policy: CodexModelPolicy | None = None,
     codex_role_overrides: Mapping[str, Mapping[str, str]] | None = None,
     project_routes: Iterable[ProjectRoute] = (), project_root: Path | None = None,
+    projection_roles: Iterable[str] | None = None, projection_skills: Iterable[str] | None = None,
 ):
     selected = tuple(sorted(set(enabled_packs)))
     if not selected:
@@ -243,6 +250,7 @@ def _target_projection(
         catalog, selected, codex_model_policy=codex_model_policy,
         codex_role_overrides=codex_role_overrides, project_routes=project_routes,
         project_root=project_root,
+        projection_roles=projection_roles, projection_skills=projection_skills,
     )
 
 

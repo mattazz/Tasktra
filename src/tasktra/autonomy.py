@@ -16,7 +16,8 @@ from uuid import uuid4
 
 from .state import (
     StateError, StateStore, _decode, _encode, _identifier, _optional_identifier,
-    _row, _timestamp, unmeasured_usage_evidence, validate_observed_usage_evidence,
+    _row, _timestamp, unmeasured_usage_evidence, validate_deterministic_review_completion_evidence,
+    validate_observed_usage_evidence,
 )
 from .authority import load_authority_envelope
 from .providers import OperationDescriptor, ProviderError, ResourceScope
@@ -822,19 +823,26 @@ class AutonomyStore(StateStore):
 
     @staticmethod
     def _store_workflow(connection: Any, *, goal_id: str, work_unit_id: str,
-                        workflow_json: str, completion_json: str, timestamp: str) -> None:
+                        workflow_json: str, completion_json: str,
+                        completion_evidence_json: str | None, timestamp: str) -> None:
         digest = sha256(workflow_json.encode("utf-8")).hexdigest()
-        existing = connection.execute("SELECT workflow_sha256 FROM workflow_evidence WHERE work_unit_id=?", (work_unit_id,)).fetchone()
+        existing = connection.execute(
+            "SELECT workflow_sha256,completion_evidence_json FROM workflow_evidence WHERE work_unit_id=?",
+            (work_unit_id,),
+        ).fetchone()
         if existing is not None and existing["workflow_sha256"] != digest:
             raise AutonomyError("work unit already has different workflow evidence")
+        if existing is not None and existing["completion_evidence_json"] != completion_evidence_json:
+            raise AutonomyError("work unit already has different completion evidence")
         connection.execute(
-            """INSERT INTO workflow_evidence(work_unit_id,workflow_json,workflow_sha256,completion_token_json,recorded_at)
-               VALUES(?,?,?,?,?) ON CONFLICT(work_unit_id) DO NOTHING""",
-            (work_unit_id, workflow_json, digest, completion_json, timestamp),
+            """INSERT INTO workflow_evidence(work_unit_id,workflow_json,workflow_sha256,completion_token_json,completion_evidence_json,recorded_at)
+               VALUES(?,?,?,?,?,?) ON CONFLICT(work_unit_id) DO NOTHING""",
+            (work_unit_id, workflow_json, digest, completion_json, completion_evidence_json, timestamp),
         )
 
     def record_workflow_completion(self, *, goal_id: str, work_unit_id: str, workflow: Mapping[str, Any],
                                    completion_token: Mapping[str, Any] | None = None,
+                                   completion_evidence: Mapping[str, Any] | None = None,
                                    at: str | datetime | None = None) -> dict[str, Any]:
         goal_id = _identifier(goal_id, label="goal_id")
         work_unit_id = _identifier(work_unit_id, label="work_unit_id")
@@ -842,6 +850,15 @@ class AutonomyStore(StateStore):
         if unit_policy is None:
             raise AutonomyError("unknown work unit for goal")
         workflow_json, token_json = self._validate_completion(goal_id, work_unit_id, unit_policy["verification_policy"], workflow, completion_token)
+        evidence_json: str | None = None
+        if unit_policy["verification_policy"] == "implementation-deterministic-review":
+            try:
+                proof = validate_deterministic_review_completion_evidence(
+                    workflow, unit_policy["acceptance_checks"], completion_evidence,
+                )
+            except StateError as error:
+                raise AutonomyError(str(error)) from error
+            evidence_json = _encode(proof)
         timestamp, _ = _clock(at)
         with self._connection() as connection:
             self._prepare_write(connection)
@@ -849,7 +866,8 @@ class AutonomyStore(StateStore):
             if unit is None or unit["goal_id"] != goal_id:
                 raise AutonomyError("unknown work unit for goal")
             self._store_workflow(connection, goal_id=goal_id, work_unit_id=work_unit_id,
-                                 workflow_json=workflow_json, completion_json=token_json, timestamp=timestamp)
+                                 workflow_json=workflow_json, completion_json=token_json,
+                                 completion_evidence_json=evidence_json, timestamp=timestamp)
             self._append(connection, "workflow.completed", goal_id=goal_id, work_unit_id=work_unit_id, payload={"workflow_sha256": sha256(workflow_json.encode()).hexdigest()})
         return {"work_unit_id": work_unit_id, "workflow_sha256": sha256(workflow_json.encode()).hexdigest()}
 
@@ -939,7 +957,7 @@ class AutonomyStore(StateStore):
         supplied_hash = sha256(lease_token.encode("utf-8")).hexdigest() if isinstance(lease_token, str) else ""
         with self._connection() as connection:
             self._prepare_write(connection)
-            row = connection.execute("""SELECT a.*,u.goal_id,u.current_attempt_id,u.attempt_count,u.checkpoint_id,u.verification_policy FROM work_attempts a
+            row = connection.execute("""SELECT a.*,u.goal_id,u.current_attempt_id,u.attempt_count,u.checkpoint_id,u.verification_policy,u.acceptance_checks FROM work_attempts a
                                       JOIN work_units u ON u.id=a.work_unit_id WHERE a.id=?""", (attempt_id,)).fetchone()
             if row is None or row["status"] != "leased" or row["current_attempt_id"] != attempt_id:
                 raise AutonomyError("attempt is stale or no longer current")
@@ -994,6 +1012,17 @@ class AutonomyStore(StateStore):
                                 envelope_sha256=connection.execute("SELECT envelope_sha256 FROM goal_contracts WHERE goal_id=?", (row["goal_id"],)).fetchone()[0],
                                 performer_id=performer_id, effect=LOCAL_REVERSIBLE_WRITE, timestamp=timestamp)
                 workflow_json, token_json = self._validate_completion(row["goal_id"], row["work_unit_id"], row["verification_policy"], workflow, completion_token)
+                completion_evidence_json = None
+                if row["verification_policy"] == "implementation-deterministic-review":
+                    try:
+                        proof = validate_deterministic_review_completion_evidence(
+                            workflow, _decode(row["acceptance_checks"], None), outcome_evidence,
+                        )
+                    except StateError as error:
+                        raise AutonomyError(str(error)) from error
+                    completion_evidence_json = _encode(proof)
+            else:
+                completion_evidence_json = None
             other_reservation = self._live_reservation_ms(connection, row["goal_id"], excluding_attempt_id=attempt_id)
             if (budget["total_elapsed_ms"] is not None and budget["consumed_elapsed_ms"] + other_reservation + measured_elapsed > budget["total_elapsed_ms"]):
                 terminal = "exhausted"
@@ -1009,7 +1038,11 @@ class AutonomyStore(StateStore):
                                ("complete" if terminal == "success" else "retry-wait" if terminal == "retry" else terminal,
                                 timestamp if terminal == "retry" else None, terminal, timestamp, row["work_unit_id"]))
             if terminal == "success":
-                self._store_workflow(connection, goal_id=row["goal_id"], work_unit_id=row["work_unit_id"], workflow_json=workflow_json or "", completion_json=token_json or "", timestamp=timestamp)
+                self._store_workflow(
+                    connection, goal_id=row["goal_id"], work_unit_id=row["work_unit_id"],
+                    workflow_json=workflow_json or "", completion_json=token_json or "",
+                    completion_evidence_json=completion_evidence_json, timestamp=timestamp,
+                )
                 self._reach_checkpoint_if_ready(
                     connection, goal_id=row["goal_id"], work_unit_id=row["work_unit_id"],
                     checkpoint_id=row["checkpoint_id"], workflow_json=workflow_json or "",
@@ -1107,7 +1140,7 @@ class AutonomyStore(StateStore):
         timestamp, _ = _clock(at)
         with self._connection() as connection:
             runtime_schema = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            compatibility_write = runtime_schema in {8, 9}
+            compatibility_write = runtime_schema in {8, 9, 10, 11}
             if compatibility_write:
                 if (
                     effect_class != LOCAL_REVERSIBLE_WRITE
@@ -1505,12 +1538,47 @@ class AutonomyStore(StateStore):
         evidence_json, _ = _json_hash(evidence)
         timestamp, _ = _clock(at)
         with self._connection() as connection:
-            self._prepare_write(connection)
+            runtime_schema = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            compatibility_write = runtime_schema in {8, 9, 10, 11}
+            if compatibility_write:
+                # An upgrade can fail before it reaches the schema migration.
+                # Preserve that outcome without opening the old ledger to normal
+                # receipts: only the already-bound, local reversible upgrade
+                # intent may receive a terminal failure record.
+                self._assert_audit_chain_in_transaction(connection)
+                self._assert_current_state_integrity_in_transaction(
+                    connection, existing_only=True,
+                )
+            else:
+                self._prepare_write(connection)
             intent = connection.execute("SELECT * FROM effect_intents WHERE idempotency_key=?", (idempotency_key,)).fetchone()
             if intent is None: raise AutonomyError("unknown effect intent")
             if _intent_performer(intent) != performer_id:
                 raise AutonomyError("effect receipt performer does not match the authorized intent performer")
             existing = connection.execute("SELECT * FROM effect_receipts WHERE intent_key=?", (idempotency_key,)).fetchone()
+            if compatibility_write:
+                try:
+                    request = _intent_request(intent)
+                except AutonomyError:
+                    raise
+                if (
+                    int(intent["protocol_version"] or 1) != 1
+                    or intent["effect_class"] != LOCAL_REVERSIBLE_WRITE
+                    or intent["operation"] != "local-effect"
+                    or (intent["status"] != "pending" and existing is None)
+                    or set(request) != {"action", "plan_sha256"}
+                    or request.get("action") != "upgrade-apply"
+                    or not isinstance(request.get("plan_sha256"), str)
+                    or len(request["plan_sha256"]) != 64
+                    or outcome not in {"failed-before-effect", "indeterminate", "recovery-required"}
+                    or evidence.get("action") != "upgrade-apply"
+                    or evidence.get("plan_sha256") != request["plan_sha256"]
+                    or not isinstance(evidence.get("error"), str)
+                    or not evidence["error"].strip()
+                ):
+                    raise AutonomyError(
+                        "pre-migration receipt bridge only permits a bound upgrade terminal failure"
+                    )
             if existing is not None:
                 if (existing["outcome"], existing["before_sha256"], existing["after_sha256"], existing["evidence_json"], existing["performed_by"]) != (outcome, before_sha256, after_sha256, evidence_json, performer_id):
                     raise AutonomyError("effect receipt conflicts with the existing receipt")
@@ -1523,6 +1591,10 @@ class AutonomyStore(StateStore):
             connection.execute("INSERT INTO effect_receipts VALUES(?,?,?,?,?,?,?,?)", (receipt_id, idempotency_key, outcome, before_sha256, after_sha256, evidence_json, performer_id, timestamp))
             connection.execute("UPDATE effect_intents SET status=? WHERE idempotency_key=?", (intent_status, idempotency_key))
             self._append(connection, "effect.receipt_recorded", goal_id=intent["goal_id"], work_unit_id=intent["work_unit_id"], payload={"idempotency_key": idempotency_key, "receipt_id": receipt_id, "outcome": outcome, "recovery_required": intent_status == "recovery-required"})
+            if compatibility_write:
+                self._seal_current_state_in_transaction(
+                    connection, timestamp, existing_only=True,
+                )
             return dict(connection.execute("SELECT * FROM effect_receipts WHERE id=?", (receipt_id,)).fetchone())
 
     def resolve_effect_recovery(

@@ -203,6 +203,9 @@
           >
             Agents <span id="agent-tab-count">0</span>
           </button>
+          <button role="tab" id="tab-efficiency" aria-selected="false" aria-controls="view-efficiency" data-view="efficiency">
+            Token usage
+          </button>
         </nav>
         <div class="scope-bar" id="scope-bar" hidden aria-live="polite">
           <span>Showing goal: <strong id="scope-goal-title"></strong></span
@@ -337,6 +340,26 @@
             <p>Recorded agents and their last known state.</p>
           </div>
           <div class="agent-grid" id="agents-grid"></div>
+        </section>
+
+        <section class="view-section" id="view-efficiency" role="tabpanel" aria-labelledby="tab-efficiency" hidden>
+          <div class="section-heading">
+            <div><p class="eyebrow">Efficiency</p><h2>Where the tokens go</h2></div>
+            <p>All recorded executions across this project.</p>
+          </div>
+          <p id="efficiency-coverage" class="efficiency-note"></p>
+          <div id="efficiency-metrics" class="efficiency-metrics"></div>
+          <div class="panel efficiency-panel">
+            <h3>Input and output</h3>
+            <div id="efficiency-mix" class="efficiency-mix" role="img"></div>
+            <p id="efficiency-mix-label" class="efficiency-note"></p>
+            <p class="efficiency-note">Cached input is part of input. It is never counted twice or subtracted from total tokens.</p>
+          </div>
+          <div class="panel efficiency-panel">
+            <h3>Usage by role and model</h3>
+            <div class="table-wrap"><table><thead><tr><th scope="col">Role / model</th><th scope="col">Measured records</th><th scope="col">Total tokens</th></tr></thead><tbody id="efficiency-roles"></tbody></table></div>
+            <p class="efficiency-note">Savings need a paired comparison with the same task and acceptance checks. This dashboard shows recorded usage; it does not estimate a baseline.</p>
+          </div>
         </section>
 
         <section

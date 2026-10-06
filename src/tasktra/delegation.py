@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from .compiler import Catalog
+from .compiler import Catalog, CatalogError, resolve_projection
 from .config import ConfigError, ProjectConfig
-from .model_policy import CodexModelPolicy, ModelPolicyError, RoleModelMetadata
+from .model_policy import CodexModelPolicy, ModelPolicyError, RoleModelMetadata, profile_reasoning_effort
 from .routing import build_brief, route_task
 
 
@@ -42,16 +42,49 @@ def effective_model_policy(catalog: Catalog, config: ProjectConfig) -> CodexMode
 
 def projection_overrides(catalog: Catalog, config: ProjectConfig) -> tuple[CodexModelPolicy, Mapping[str, Mapping[str, str]]]:
     """Return the one resolved override input shared by every projection path."""
+    try:
+        resolve_projection(
+            catalog,
+            config.enabled_packs or ("core",),
+            projection_roles=config.projection_roles,
+            projection_skills=config.projection_skills,
+        )
+    except CatalogError as error:
+        raise DelegationError(str(error)) from error
     unknown = set(config.codex_role_overrides) - set(catalog.roles)
     if unknown:
         raise DelegationError(f"agents.codex has unknown role(s): {', '.join(sorted(unknown))}")
-    return effective_model_policy(catalog, config), config.codex_role_overrides
+    effective: dict[str, Mapping[str, str]] = {}
+    for role_id, role in catalog.roles.items():
+        try:
+            metadata = RoleModelMetadata(role.model_tier, role.reasoning_effort, role.sandbox_mode)
+            effort = profile_reasoning_effort(config.codex_effort_profile, metadata)
+        except ModelPolicyError as error:
+            raise DelegationError(f"role {role_id} has invalid metadata: {error}") from error
+        if effort != metadata.reasoning_effort:
+            effective[role_id] = {"reasoning_effort": effort}
+    for role_id, override in config.codex_role_overrides.items():
+        merged = dict(effective.get(role_id, {}))
+        merged.update(override)
+        effective[role_id] = merged
+    return effective_model_policy(catalog, config), effective
 
 
 def agent_profile(catalog: Catalog, config: ProjectConfig, role_id: str) -> AgentProfile:
     role = catalog.roles.get(role_id)
     if role is None:
         raise DelegationError(f"agents.codex has an unknown role: {role_id}")
+    try:
+        _, projected_roles, _ = resolve_projection(
+            catalog,
+            config.enabled_packs or ("core",),
+            projection_roles=config.projection_roles,
+            projection_skills=config.projection_skills,
+        )
+    except CatalogError as error:
+        raise DelegationError(str(error)) from error
+    if role_id not in projected_roles:
+        raise DelegationError(f"agent role is not projected by the enabled packs: {role_id}")
     try:
         metadata = RoleModelMetadata(role.model_tier, role.reasoning_effort, role.sandbox_mode)
     except ModelPolicyError as error:

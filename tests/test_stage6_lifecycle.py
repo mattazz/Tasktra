@@ -89,7 +89,7 @@ class LifecyclePlanningTests(unittest.TestCase):
             self.assertTrue(any(
                 item.get("component") == "runtime-state"
                 and item.get("lock_schema") == 10
-                and item.get("on_disk_schema") == 11
+                and item.get("on_disk_schema") == 12
                 for item in plan["conflicts"]
             ))
 
@@ -138,7 +138,7 @@ class LifecyclePlanningTests(unittest.TestCase):
 
             self.assertTrue(plan["ok"], plan["conflicts"])
             edge = next(item for item in plan["compatibility"] if item["component"] == "runtime-schema")
-            self.assertEqual((edge["from"], edge["to"]), (8, 11))
+            self.assertEqual((edge["from"], edge["to"]), (8, 12))
             self.assertIn("compound", edge["reason"])
 
     def test_upgrade_fails_visibly_for_unsupported_pack_runtime_and_major_edges(self):

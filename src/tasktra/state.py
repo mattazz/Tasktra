@@ -20,13 +20,13 @@ from uuid import uuid4
 
 from .identifiers import IdentifierError, require_identifier, require_optional_identifier
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 # The broader lifecycle belongs to the Stage 3 goal engine. Retaining only
 # planned state prevents an incomplete authority envelope from authorizing work.
 GOAL_STATUSES = {"planned", "active", "paused", "blocked", "complete", "stopped"}
 WORK_UNIT_STATUSES = {"planned", "eligible", "leased", "retry-wait", "blocked", "approval-required", "failed", "exhausted", "complete", "paused", "stopped"}
 VERIFICATION_POLICIES = {
-    "implementation-review", "research-review", "documentation-review", "deterministic-direct",
+    "implementation-review", "implementation-deterministic-review", "research-review", "documentation-review", "deterministic-direct",
 }
 APPROVAL_DECISIONS = {"approved", "rejected", "needs_human_review"}
 _LEGACY_IDENTITY = "legacy-unattributed"
@@ -190,11 +190,86 @@ def _decode(value: str | None, default: Any) -> Any:
     return default if value is None else json.loads(value)
 
 
+def _acceptance_checks(value: Any, *, required: bool) -> list[list[str]]:
+    """Validate a bounded, canonical list of configured command argv arrays."""
+    if value is None:
+        if required:
+            raise StateError("implementation-deterministic-review requires nonempty acceptance_checks")
+        return []
+    if not isinstance(value, list) or (required and not value) or len(value) > 32:
+        raise StateError("acceptance_checks must be a bounded nonempty list for implementation-deterministic-review")
+    normalized: list[list[str]] = []
+    for command in value:
+        if not isinstance(command, list) or not command or len(command) > 32:
+            raise StateError("each acceptance check must be a nonempty bounded argv array")
+        if not all(isinstance(argument, str) and argument and len(argument) <= 4096 for argument in command):
+            raise StateError("acceptance check argv values must be nonempty bounded strings")
+        normalized.append(list(command))
+    if len({_encode(command) for command in normalized}) != len(normalized):
+        raise StateError("acceptance_checks must be distinct")
+    return normalized
+
+
+def validate_deterministic_review_completion_evidence(
+    workflow: Mapping[str, Any], acceptance_checks: Any, evidence: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Return the short-policy proof bound to the reviewed patch and commands.
+
+    The caller may retain additional outcome data, but no boolean or prose is
+    accepted as a substitute for exact passed command receipts and the patch
+    digest the independent reviewer received.
+    """
+    checks = _acceptance_checks(acceptance_checks, required=True)
+    if not isinstance(evidence, Mapping):
+        raise StateError("implementation-deterministic-review requires completion evidence")
+    validation, artifacts = evidence.get("validation"), evidence.get("artifacts")
+    if not isinstance(validation, list) or not validation or len(validation) > 64:
+        raise StateError("completion evidence requires bounded validation receipts")
+    if len(validation) % len(checks):
+        raise StateError("validation receipts must contain complete configured acceptance-check groups")
+    if not isinstance(artifacts, Mapping):
+        raise StateError("completion evidence requires artifacts")
+    patch_sha256 = artifacts.get("patch_sha256")
+    if not isinstance(patch_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", patch_sha256):
+        raise StateError("completion evidence artifacts.patch_sha256 must be a lowercase SHA-256")
+    normalized_validation: list[dict[str, Any]] = []
+    for index, receipt in enumerate(validation):
+        expected = checks[index % len(checks)]
+        if not isinstance(receipt, Mapping):
+            raise StateError("validation receipt must be an object")
+        if receipt.get("argv") != expected:
+            raise StateError("validation receipt argv does not match immutable acceptance_checks")
+        if receipt.get("status") != "passed" or receipt.get("exit_code") != 0:
+            raise StateError("validation receipt must be passed with exit_code 0")
+        if receipt.get("patch_sha256") != patch_sha256:
+            raise StateError("validation receipt patch_sha256 does not match final artifacts")
+        normalized_validation.append({
+            "argv": list(expected), "status": "passed", "exit_code": 0,
+            "patch_sha256": patch_sha256,
+        })
+    try:
+        final_handoff = workflow["accepted_handoffs"][-1]
+        references = final_handoff["evidence_refs"]
+    except (KeyError, IndexError, TypeError) as error:
+        raise StateError("completion workflow lacks final reviewer evidence") from error
+    digests = {
+        item.get("id"): item.get("locator")
+        for item in references if isinstance(item, Mapping)
+    }
+    for identifier in ("result-digest", "patch-digest"):
+        digest = digests.get(identifier)
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise StateError(f"completion workflow lacks a valid {identifier}")
+    if digests["patch-digest"] != patch_sha256:
+        raise StateError("completion evidence patch_sha256 does not match reviewed patch-digest")
+    return {"validation": normalized_validation, "artifacts": {"patch_sha256": patch_sha256}}
+
+
 def _row(row: sqlite3.Row | None) -> dict[str, Any] | None:
     if row is None:
         return None
     result = dict(row)
-    for key in ("scope", "resource_scope", "provenance", "authority", "acceptance", "metadata", "receipt", "contract", "evidence", "payload", "observation"):
+    for key in ("scope", "resource_scope", "provenance", "authority", "acceptance", "metadata", "receipt", "contract", "evidence", "payload", "observation", "acceptance_checks", "completion_evidence_json"):
         if key in result:
             result[key] = _decode(result[key], {} if key in {"scope", "resource_scope", "provenance", "authority", "metadata", "receipt", "observation"} else [])
     return result
@@ -672,6 +747,28 @@ class StateStore:
                 raise StateError(f"cannot migrate invalid work-unit verification policy: {invalid['id']}")
             connection.execute("PRAGMA user_version = 11")
             current = 11
+        if current < 12:
+            # Version 12 adds an explicit, shorter implementation route only
+            # for work units whose authority names it.  Existing rows retain
+            # their recorded policy; no title, outcome, or missing tester is
+            # interpreted as permission to weaken that policy.
+            work_columns = {row[1] for row in connection.execute("PRAGMA table_info(work_units)")}
+            if "acceptance_checks" not in work_columns:
+                connection.execute(
+                    "ALTER TABLE work_units ADD COLUMN acceptance_checks TEXT NOT NULL DEFAULT '[]'"
+                )
+            workflow_columns = {row[1] for row in connection.execute("PRAGMA table_info(workflow_evidence)")}
+            if "completion_evidence_json" not in workflow_columns:
+                connection.execute("ALTER TABLE workflow_evidence ADD COLUMN completion_evidence_json TEXT")
+            invalid = connection.execute(
+                "SELECT id FROM work_units WHERE verification_policy NOT IN "
+                "('implementation-review','implementation-deterministic-review',"
+                "'research-review','documentation-review','deterministic-direct') LIMIT 1"
+            ).fetchone()
+            if invalid is not None:
+                raise StateError(f"cannot migrate invalid work-unit verification policy: {invalid['id']}")
+            connection.execute("PRAGMA user_version = 12")
+            current = 12
         return SCHEMA_VERSION
 
     @staticmethod
@@ -1049,7 +1146,8 @@ class StateStore:
 
     def create_work_unit(self, *, goal_id: str, title: str, scope: dict[str, Any] | None = None,
                          work_unit_id: str | None = None, checkpoint_id: str | None = None,
-                         verification_policy: str = "implementation-review") -> dict[str, Any]:
+                         verification_policy: str = "implementation-review",
+                         acceptance_checks: list[list[str]] | None = None) -> dict[str, Any]:
         if not title.strip():
             raise StateError("Work unit title must be non-empty")
         goal_id = _identifier(goal_id, label="goal_id")
@@ -1057,6 +1155,10 @@ class StateStore:
         checkpoint_id = _optional_identifier(checkpoint_id, label="checkpoint_id")
         if verification_policy not in VERIFICATION_POLICIES:
             raise StateError("work-unit verification_policy is not supported")
+        normalized_checks = _acceptance_checks(
+            acceptance_checks,
+            required=verification_policy == "implementation-deterministic-review",
+        )
         with self._connection() as connection:
             self._prepare_write(connection)
             goal = connection.execute("SELECT status FROM goals WHERE id=?", (goal_id,)).fetchone()
@@ -1102,8 +1204,8 @@ class StateStore:
                 raise StateError("work unit checkpoint_id requires an authority envelope")
             try:
                 connection.execute(
-                    "INSERT INTO work_units (id,goal_id,title,status,scope,checkpoint_id,verification_policy,created_at,updated_at) VALUES(?,?,?,'planned',?,?,?,?,?)",
-                    (identifier, goal_id, title, _encode(persisted_scope), checkpoint_id, verification_policy, timestamp, timestamp),
+                    "INSERT INTO work_units (id,goal_id,title,status,scope,checkpoint_id,verification_policy,acceptance_checks,created_at,updated_at) VALUES(?,?,?,'planned',?,?,?,?,?,?)",
+                    (identifier, goal_id, title, _encode(persisted_scope), checkpoint_id, verification_policy, _encode(normalized_checks), timestamp, timestamp),
                 )
                 self._append_event_in_transaction(connection, "work_unit.created", goal_id=goal_id, work_unit_id=identifier, payload={"title": title, "checkpoint_id": checkpoint_id, "verification_policy": verification_policy})
             except sqlite3.IntegrityError as error:
@@ -1622,6 +1724,13 @@ class StateStore:
                 raise StateError(f"cannot attest invalid work-unit status: {unit['id']}")
             if unit["verification_policy"] not in VERIFICATION_POLICIES:
                 raise StateError(f"cannot attest unsupported work-unit verification policy: {unit['id']}")
+            try:
+                _acceptance_checks(
+                    _decode(unit["acceptance_checks"], None),
+                    required=unit["verification_policy"] == "implementation-deterministic-review",
+                )
+            except (TypeError, ValueError, json.JSONDecodeError) as error:
+                raise StateError(f"cannot attest invalid work-unit acceptance_checks: {unit['id']}") from error
             if unit["verification_policy"] != "implementation-review":
                 try:
                     from .authority import validate_authority_envelope, verification_policy_allowed
@@ -1659,7 +1768,7 @@ class StateStore:
             from .workflow import load_workflow, validate_workflow_completion_token
         except ImportError as error:  # pragma: no cover
             raise StateError("workflow validation is unavailable") from error
-        for evidence in connection.execute("SELECT w.*,u.goal_id,u.verification_policy FROM workflow_evidence w JOIN work_units u ON u.id=w.work_unit_id"):
+        for evidence in connection.execute("SELECT w.*,u.goal_id,u.verification_policy,u.acceptance_checks FROM workflow_evidence w JOIN work_units u ON u.id=w.work_unit_id"):
             if hashlib.sha256(evidence["workflow_json"].encode("utf-8")).hexdigest() != evidence["workflow_sha256"]:
                 raise StateError(f"cannot attest workflow hash mismatch: {evidence['work_unit_id']}")
             try:
@@ -1672,6 +1781,27 @@ class StateStore:
             workflow_policy = "implementation-review" if workflow.get("version") == 1 else workflow.get("verification_policy")
             if workflow_policy != evidence["verification_policy"]:
                 raise StateError(f"cannot attest workflow with a mismatched verification policy: {evidence['work_unit_id']}")
+            if workflow_policy == "implementation-deterministic-review":
+                try:
+                    proof = validate_deterministic_review_completion_evidence(
+                        workflow, _decode(evidence["acceptance_checks"], None),
+                        _decode(evidence["completion_evidence_json"], None),
+                    )
+                    if _encode(proof) != evidence["completion_evidence_json"]:
+                        raise ValueError("completion evidence is not canonical")
+                    outcome = connection.execute(
+                        "SELECT outcome_json FROM work_attempts WHERE work_unit_id=? AND outcome_class='success' ORDER BY attempt_no DESC LIMIT 1",
+                        (evidence["work_unit_id"],),
+                    ).fetchone()
+                    if outcome is not None:
+                        recorded_proof = validate_deterministic_review_completion_evidence(
+                            workflow, _decode(evidence["acceptance_checks"], None),
+                            _decode(outcome["outcome_json"], None),
+                        )
+                        if recorded_proof != proof:
+                            raise ValueError("completion evidence does not match successful attempt outcome")
+                except (TypeError, ValueError, KeyError, json.JSONDecodeError) as error:
+                    raise StateError(f"cannot attest invalid deterministic-review completion evidence: {evidence['work_unit_id']}") from error
         for checkpoint in connection.execute("SELECT * FROM goal_checkpoints"):
             if checkpoint["status"] not in {"pending", "reached"}:
                 raise StateError(f"cannot attest invalid checkpoint status: {checkpoint['goal_id']}/{checkpoint['checkpoint_id']}")
@@ -1979,7 +2109,9 @@ class StateStore:
                     if len(matching) != 1 or matching[0]["outcome"] != intent["status"]:
                         raise StateError(f"cannot attest inconsistent provider receipt state: {intent['idempotency_key']}")
                 continue
-            if intent["protocol_version"] != 1 or intent["status"] not in {"pending", "reconciliation-required", "received"}:
+            if intent["protocol_version"] != 1 or intent["status"] not in {
+                "pending", "reconciliation-required", "received", "recovery-required",
+            }:
                 raise StateError(f"cannot attest invalid effect status: {intent['idempotency_key']}")
             try:
                 request = _decode(intent["request_json"], {})
@@ -1991,11 +2123,143 @@ class StateStore:
             if not isinstance(performer, str) or not isinstance(payload, dict) or hashlib.sha256(canonical.encode("utf-8")).hexdigest() != intent["request_sha256"]:
                 raise StateError(f"cannot attest mismatched effect request: {intent['idempotency_key']}")
             receipt = connection.execute("SELECT * FROM effect_receipts WHERE intent_key=?", (intent["idempotency_key"],)).fetchone()
-            if (intent["status"] == "received") != (receipt is not None):
+            receipt_required = intent["status"] in {"received", "recovery-required"}
+            if receipt_required != (receipt is not None):
                 raise StateError(f"cannot attest inconsistent effect receipt state: {intent['idempotency_key']}")
             if receipt is not None:
                 if receipt["performed_by"] != performer or not receipt["outcome"]:
                     raise StateError(f"cannot attest invalid effect receipt: {intent['idempotency_key']}")
+                outcome = receipt["outcome"]
+                if intent["status"] == "received":
+                    if outcome in {"applied", "success", "failed-before-effect"}:
+                        pass
+                    elif outcome in {"indeterminate", "recovery-required"}:
+                        recovery_events = connection.execute(
+                            """SELECT * FROM events WHERE event_type='effect.recovery_resolved'
+                               AND goal_id=? AND (work_unit_id IS ? OR work_unit_id=?)""",
+                            (intent["goal_id"], intent["work_unit_id"], intent["work_unit_id"]),
+                        ).fetchall()
+                        matching_events: list[tuple[sqlite3.Row, dict[str, Any]]] = []
+                        for event in recovery_events:
+                            try:
+                                payload = _decode(event["payload"], {})
+                                if (
+                                    set(payload) != {
+                                        "idempotency_key", "resolution", "performer_id",
+                                        "evidence_sha256", "evidence",
+                                    }
+                                    or payload["idempotency_key"] != intent["idempotency_key"]
+                                    or payload["resolution"] not in {"applied", "failed-before-effect"}
+                                    or not isinstance(payload["performer_id"], str)
+                                    or not isinstance(payload["evidence"], dict)
+                                    or not isinstance(payload["evidence_sha256"], str)
+                                    or not re.fullmatch(r"[0-9a-f]{64}", payload["evidence_sha256"])
+                                ):
+                                    continue
+                                canonical_evidence = json.dumps(
+                                    payload["evidence"], sort_keys=True, separators=(",", ":"),
+                                    ensure_ascii=False, allow_nan=False,
+                                )
+                                if hashlib.sha256(canonical_evidence.encode("utf-8")).hexdigest() != payload["evidence_sha256"]:
+                                    continue
+                                audit = connection.execute(
+                                    """SELECT sequence FROM audit_events WHERE legacy_event_id=? AND event_type=?
+                                       AND goal_id=? AND (work_unit_id IS ? OR work_unit_id=?) AND payload=?""",
+                                    (event["id"], event["event_type"], event["goal_id"], event["work_unit_id"], event["work_unit_id"], event["payload"]),
+                                ).fetchone()
+                                contract_event = None if audit is None else connection.execute(
+                                    """SELECT e.payload FROM events e JOIN audit_events a ON a.legacy_event_id=e.id
+                                       WHERE e.event_type='goal.contract_defined' AND e.goal_id=?
+                                         AND a.sequence<? ORDER BY a.sequence DESC LIMIT 1""",
+                                    (intent["goal_id"], audit["sequence"]),
+                                ).fetchone()
+                                try:
+                                    historical_contract = (
+                                        None if contract_event is None
+                                        else _decode(contract_event["payload"], {}).get("envelope_sha256")
+                                    )
+                                    if not isinstance(historical_contract, str):
+                                        raise ValueError
+                                    unit_scope = None
+                                    if intent["work_unit_id"] is not None:
+                                        unit = connection.execute(
+                                            "SELECT scope FROM work_units WHERE id=?", (intent["work_unit_id"],)
+                                        ).fetchone()
+                                        unit_scope = None if unit is None else _decode(unit["scope"], {})
+                                        if not isinstance(unit_scope, dict):
+                                            raise ValueError
+                                    event_at = _timestamp(event["created_at"])
+                                except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+                                    continue
+                                approvals = connection.execute(
+                                    """SELECT * FROM transition_approvals
+                                       WHERE goal_id=? AND action='effect-recovery-resolve'
+                                         AND performer_id=? AND decision='approved' AND approver_kind='human'
+                                         AND approver_id!=? AND effect='local-reversible-write'
+                                         AND envelope_sha256=? AND valid_until IS NOT NULL
+                                         AND (work_unit_id IS NULL OR work_unit_id=?)""",
+                                    (
+                                        intent["goal_id"], payload["performer_id"], payload["performer_id"],
+                                        historical_contract, intent["work_unit_id"],
+                                    ),
+                                ).fetchall()
+                                approval_is_durable = False
+                                if audit is not None:
+                                    for approval in approvals:
+                                        try:
+                                            approval_scope = _decode(approval["scope"], {})
+                                            created_at = _timestamp(approval["created_at"])
+                                            valid_until = _timestamp(approval["valid_until"])
+                                            revoked_at = (
+                                                None if approval["revoked_at"] is None else _timestamp(approval["revoked_at"])
+                                            )
+                                            # The approval scope is the durable historical
+                                            # goal scope for a goal-bound recovery. `_authorize`
+                                            # required exact equality when it recorded the event;
+                                            # comparing to a later replacement contract would
+                                            # rewrite that historical binding. Unit-bound effects
+                                            # still prove coverage against their immutable scope.
+                                            scope_matches = (
+                                                StateStore._scope_within_contract(unit_scope, approval_scope)
+                                                if unit_scope is not None
+                                                else StateStore._scope_within_contract(approval_scope, approval_scope)
+                                            )
+                                            if not (
+                                                isinstance(approval_scope, dict)
+                                                and scope_matches
+                                                and created_at <= event_at < valid_until
+                                                and (revoked_at is None or event_at < revoked_at)
+                                            ):
+                                                continue
+                                        except (TypeError, ValueError, json.JSONDecodeError):
+                                            continue
+                                        approval_events = connection.execute(
+                                            """SELECT e.payload FROM events e JOIN audit_events a ON a.legacy_event_id=e.id
+                                               WHERE e.event_type='transition_approval.recorded' AND e.goal_id=?
+                                                 AND a.sequence<?""",
+                                            (intent["goal_id"], audit["sequence"]),
+                                        ).fetchall()
+                                        for approval_event in approval_events:
+                                            recorded = _decode(approval_event["payload"], {})
+                                            if recorded == {
+                                                "action": "effect-recovery-resolve", "approval_id": approval["id"],
+                                            }:
+                                                approval_is_durable = True
+                                                break
+                                        if approval_is_durable:
+                                            break
+                                if audit is not None and approval_is_durable:
+                                    matching_events.append((event, payload))
+                            except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+                                continue
+                        if len(matching_events) != 1:
+                            raise StateError(
+                                f"cannot attest unresolved indeterminate effect receipt: {intent['idempotency_key']}"
+                            )
+                    else:
+                        raise StateError(f"cannot attest incompatible effect receipt outcome: {intent['idempotency_key']}")
+                elif outcome not in {"indeterminate", "recovery-required"}:
+                    raise StateError(f"cannot attest incompatible effect receipt outcome: {intent['idempotency_key']}")
                 for name in ("before_sha256", "after_sha256"):
                     digest = receipt[name]
                     if digest is not None and (len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest)):
@@ -2116,7 +2380,7 @@ class StateStore:
         stored_result: dict[str, Any] | None = None
         with self._connection() as connection:
             runtime_schema = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            compatibility_write = runtime_schema in {8, 9}
+            compatibility_write = runtime_schema in {8, 9, 10, 11}
             if compatibility_write:
                 # A self-hosted upgrade needs one authorization record before
                 # the current schema can exist. Keep this bridge deliberately
@@ -2490,6 +2754,14 @@ class StateStore:
                     issues.append("unsealed authoritative current-state manifest")
                 elif manifest != self._state_manifest_hash(connection):
                     issues.append("authoritative current-state manifest tampered")
+            if len(issues) < limit:
+                try:
+                    # Hashes establish provenance; this second pass verifies
+                    # that recorded short-policy proof still has the required
+                    # command, receipt, and reviewed-artifact semantics.
+                    self._validate_current_state_for_attestation(connection)
+                except StateError as error:
+                    issues.append(f"current-state evidence invalid: {error}")
         return {"ok": not issues, "issues": issues, "checked": expected - 1}
 
     def append_event(self, event_type: str, *, goal_id: str | None = None, work_unit_id: str | None = None,

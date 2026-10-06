@@ -67,6 +67,17 @@ class WorkflowTests(unittest.TestCase):
         token = workflow_completion_token(state)
         self.assertEqual(validate_workflow_completion_token(state, token), token)
 
+    def test_deterministic_implementation_policy_has_immutable_implementer_reviewer_route(self):
+        state = new_workflow(SOURCE, verification_policy="implementation-deterministic-review")
+        self.assertEqual(policy_roles("implementation-deterministic-review"), ("implementer", "reviewer"))
+        state = accept_handoff(state, handoff("implement-result", actor_id="implementer-one"))
+        self.assertEqual((state["current_role"], state["status"]), ("reviewer", "ready"))
+        with self.assertRaisesRegex(WorkflowError, "prior workflow actor"):
+            accept_handoff(state, handoff("review-result", role="reviewer", actor_id="implementer-one"))
+        completed = accept_handoff(state, handoff("review-result", role="reviewer", actor_id="reviewer-one"))
+        self.assertTrue(is_workflow_complete(completed))
+        self.assertEqual([item["from_role"] for item in completed["transitions"]], ["implementer", "reviewer"])
+
     def test_invalid_or_cross_source_handoffs_cannot_advance_workflow(self):
         state = new_workflow(SOURCE)
         invalid = handoff("bad")

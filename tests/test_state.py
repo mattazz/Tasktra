@@ -9,6 +9,26 @@ from tasktra.contracts import validate_named
 
 
 class StateTests(unittest.TestCase):
+    def test_v11_sealed_ledger_migrates_without_rewriting_legacy_policy(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "state.sqlite"
+            store = StateStore(path)
+            store.create_goal(title="Ship", description="Keep the legacy route", goal_id="g1")
+            store.create_work_unit(goal_id="g1", work_unit_id="legacy-work", title="Implement")
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute("PRAGMA user_version = 11")
+                connection.commit()
+            finally:
+                connection.close()
+
+            evidence = store.migrate_with_evidence()
+
+            self.assertEqual((evidence["before_schema"], evidence["after_schema"]), (11, SCHEMA_VERSION))
+            self.assertTrue(Path(str(evidence["backup_path"])).is_file())
+            self.assertEqual(store.get_work_unit("legacy-work")["verification_policy"], "implementation-review")
+            self.assertTrue(store.verify_audit()["ok"])
+
     def test_planned_goal_budget_and_audit(self):
         with TemporaryDirectory() as directory:
             store = StateStore(Path(directory) / "state.sqlite")

@@ -80,7 +80,7 @@ class AuthorityError(ContractError):
 
 
 VERIFICATION_POLICIES = frozenset({
-    "implementation-review", "research-review", "documentation-review", "deterministic-direct",
+    "implementation-review", "implementation-deterministic-review", "research-review", "documentation-review", "deterministic-direct",
 })
 
 

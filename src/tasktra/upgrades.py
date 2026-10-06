@@ -82,6 +82,7 @@ def apply_upgrade(
         catalog, selected, codex_model_policy=codex_model_policy,
         codex_role_overrides=codex_role_overrides, project_routes=config.routes,
         project_root=project,
+        projection_roles=config.projection_roles, projection_skills=config.projection_skills,
     )
     _verify_previewed_projection(normalized, projection.files)
     prior_manifest = _optional_manifest(project)
@@ -156,6 +157,7 @@ def apply_upgrade(
             )
         _write_canonical_projection(
             project, catalog_root, catalog, config, projection, prior_manifest, allowed_deletes,
+            expected_runtime_schema=runtime_to,
         )
         declared_commands = tuple(
             tuple(str(arg) for arg in command)
@@ -219,6 +221,7 @@ def apply_upgrade(
                     )
                 _write_canonical_projection(
                     project, catalog_root, catalog, config, projection, read_manifest(project), set(),
+                    expected_runtime_schema=runtime_after,
                 )
                 drift = check_drift(project, projection, managed_paths=set(projection.files))
                 if not drift.clean:
@@ -443,6 +446,8 @@ def _write_canonical_projection(
     projection: object,
     prior_manifest: GeneratedManifest | None,
     allowed_deletes: set[str],
+    *,
+    expected_runtime_schema: int,
 ) -> None:
     prior = {item.path: item for item in prior_manifest.files} if prior_manifest is not None else {}
     desired_paths = {relative.as_posix() for relative in projection.files}
@@ -492,7 +497,10 @@ def _write_canonical_projection(
             "handoff": 1,
             "lesson-proposal": 1,
             "routing": 1,
-            "runtime": StateStore(config.database_path(project)).inspect_schema_version(),
+            # Validate the complete target artifact set before committing the
+            # live database migration. Readers may observe an upgrade in progress;
+            # a failed validation restores the prior lock with the snapshot.
+            "runtime": expected_runtime_schema,
             "telemetry": 1,
             "work-item": 1,
             "workflow": 1,

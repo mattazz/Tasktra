@@ -17,14 +17,16 @@ from .identifiers import IdentifierError, require_identifier, require_optional_i
 _POLICIES: dict[str, tuple[str, ...]] = {
     # The published Stage 2 contract remains the default for old work units.
     "implementation-review": ("implementer", "tester", "reviewer"),
+    # A deliberately selected, authority-gated route for implementation work
+    # whose deterministic acceptance is configured by the supervisor.  It
+    # never results from an absent tester handoff.
+    "implementation-deterministic-review": ("implementer", "reviewer"),
     "research-review": ("author", "reviewer"),
     "documentation-review": ("author", "reviewer"),
     # This is intentionally a separately selected and authority-gated policy;
     # it is never inferred from a missing workflow.
     "deterministic-direct": (),
 }
-_NEXT_ROLE = {role: roles[index + 1] if index + 1 < len(roles) else None
-              for roles in _POLICIES.values() for index, role in enumerate(roles)}
 _WORKFLOW_COMPLETE = _POLICIES["implementation-review"]
 MAX_WORKFLOW_BYTES = 256 * 1024
 
@@ -39,6 +41,21 @@ def policy_roles(verification_policy: str) -> tuple[str, ...]:
         return _POLICIES[verification_policy]
     except KeyError as error:
         raise WorkflowError("workflow verification policy is not supported") from error
+
+
+def _next_role(policy: str, role: str) -> str | None:
+    """Return a transition only within one closed policy sequence.
+
+    Roles such as ``implementer`` occur in more than one policy, so a global
+    role-to-role map would make the shorter deterministic-review route depend
+    on dictionary construction order.
+    """
+    roles = policy_roles(policy)
+    try:
+        index = roles.index(role)
+    except ValueError as error:
+        raise WorkflowError("workflow has no eligible current role") from error
+    return roles[index + 1] if index + 1 < len(roles) else None
 
 
 def _validate_source_identifiers(source: Mapping[str, Any]) -> None:
@@ -106,8 +123,7 @@ def _validate_workflow(value: Mapping[str, Any]) -> dict[str, Any]:
             raise WorkflowError("workflow transition role does not match the required sequence")
         if transition["handoff_id"] != handoff_id or transition["handoff_status"] != handoff["status"]["state"]:
             raise WorkflowError("workflow transition does not match its accepted handoff")
-        index = roles.index(expected_role)
-        expected_target = roles[index + 1] if handoff["status"]["state"] == "completed" and index + 1 < len(roles) else None
+        expected_target = _next_role(policy, expected_role) if handoff["status"]["state"] == "completed" else None
         if transition["to_role"] != expected_target:
             raise WorkflowError("workflow transition target is invalid for the handoff status")
         expected_role = expected_target
@@ -163,8 +179,6 @@ def accept_handoff(state: Mapping[str, Any], handoff: Mapping[str, Any]) -> dict
     if current["status"] != "ready":
         raise WorkflowError(f"workflow is not ready to accept a handoff: {current['status']}")
     role = current["current_role"]
-    if role not in _NEXT_ROLE:
-        raise WorkflowError("workflow has no eligible current role")
     try:
         accepted = validate_handoff(handoff)
     except HandoffError as error:
@@ -177,8 +191,7 @@ def accept_handoff(state: Mapping[str, Any], handoff: Mapping[str, Any]) -> dict
     handoff_status = accepted["status"]["state"]
     policy = "implementation-review" if current["version"] == 1 else current["verification_policy"]
     roles = _POLICIES[policy]
-    index = roles.index(role)
-    target = roles[index + 1] if handoff_status == "completed" and index + 1 < len(roles) else None
+    target = _next_role(policy, role) if handoff_status == "completed" else None
     next_state = copy.deepcopy(current)
     next_state["accepted_handoffs"].append(accepted)
     next_state["transitions"].append({

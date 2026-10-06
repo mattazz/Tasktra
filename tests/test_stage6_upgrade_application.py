@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from contextlib import closing
 from dataclasses import replace
 from hashlib import sha256
 import json
@@ -31,7 +32,7 @@ from tasktra.manifest import (
 )
 from tasktra.migrations import MigrationError, write_prepared_runtime_recovery
 from tasktra.migrations import CommittedRuntimeRecoveryRequired
-from tasktra.state import SCHEMA_VERSION, StateStore
+from tasktra.state import SCHEMA_VERSION, StateStore, _now
 from tasktra.upgrades import UpgradeError, apply_upgrade, rollback_upgrade, upgrade_plan_digest
 
 
@@ -283,6 +284,41 @@ class UpgradeApplicationTests(unittest.TestCase):
                 self._apply(project, config, plan)
 
             self.assertEqual({path: self._bytes(project, path) for path in tracked}, before)
+
+    def test_target_lock_is_validated_before_v11_database_commit(self):
+        for fails in (False, True):
+            with self.subTest(validation_fails=fails), TemporaryDirectory() as directory:
+                project, config, _ = self._project(Path(directory))
+                database = config.database_path(project)
+                with closing(sqlite3.connect(database)) as connection, connection:
+                    connection.row_factory = sqlite3.Row
+                    connection.execute("ALTER TABLE work_units DROP COLUMN acceptance_checks")
+                    connection.execute("ALTER TABLE workflow_evidence DROP COLUMN completion_evidence_json")
+                    connection.execute("PRAGMA user_version=11")
+                    StateStore._seal_current_state_in_transaction(connection, _now(), existing_only=True)
+                lock = replace(read_lockfile(project), schema_versions=(("runtime", 11),))
+                write_lockfile(project, lock)
+                check = (
+                    "import json,sqlite3;from pathlib import Path;"
+                    f"assert json.loads(Path('.tasktra/tasktra.lock').read_text())['schema_versions']['runtime']=={SCHEMA_VERSION};"
+                    "c=sqlite3.connect('file:.tasktra/runtime/tasktra.sqlite?mode=ro',uri=True);"
+                    "assert c.execute('PRAGMA user_version').fetchone()[0]==11;c.close();"
+                    + ("raise SystemExit(7)" if fails else "")
+                )
+                config = replace(config, validation_commands=((sys.executable, "-c", check),))
+                plan = preview_upgrade(project, self.catalog, current_lock=lock,
+                                       validation_commands=config.validation_commands).as_dict()
+                before = {path: self._bytes(project, path) for path in
+                          (".tasktra/tasktra.lock", ".tasktra/runtime/tasktra.sqlite")}
+                if fails:
+                    with self.assertRaisesRegex(MigrationError, "configured validation failed"):
+                        self._apply(project, config, plan)
+                    self.assertEqual({path: self._bytes(project, path) for path in before}, before)
+                else:
+                    result = self._apply(project, config, plan)
+                    self.assertEqual(dict(read_lockfile(project).schema_versions)["runtime"], SCHEMA_VERSION)
+                    self.assertEqual(StateStore(database).inspect_schema_version(), SCHEMA_VERSION)
+                    self.assertFalse(result["migration"]["rollback_available"])
 
     def test_runtime_migration_receipts_exact_backup_and_disables_automatic_rollback(self):
         with TemporaryDirectory() as directory:

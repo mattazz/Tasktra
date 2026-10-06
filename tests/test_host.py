@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from tasktra.host import CodexEventStream, CodexHostAdapter, HostError, host_environment
+from tasktra.worker_profiles import CliCapabilities, WorkerContext
 
 
 def event(value):
@@ -33,6 +34,68 @@ class HostStreamTests(unittest.TestCase):
         self.assertEqual(result.thread_id, "thread-one")
         configurations = [calls[0][index + 1] for index, argument in enumerate(calls[0][:-1]) if argument == "-c"]
         self.assertIn("project_doc_fallback_filenames=[]", configurations)
+
+    def test_explicit_focused_context_adds_only_bounded_server_overrides_and_receipt(self):
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            feed = kwargs["on_stdout_chunk"]
+            feed(event({"type": "thread.started", "thread_id": "thread-profile"}))
+            feed(event({"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps({
+                "status": "completed", "summary": "Done.", "findings": [], "changed_paths": [],
+            })}}))
+            feed(event({"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}}))
+            return SimpleNamespace(returncode=0, timed_out=False, output_limited=False, input_uncertain=False, dispatched=True)
+
+        context = WorkerContext(focused=True, observed_mcp_servers=("unused",), disable_mcp_servers=("unused",))
+        host = CodexHostAdapter(
+            runner_factory=lambda **kwargs: SimpleNamespace(run=run), worker_context=context,
+            cli_capabilities=CliCapabilities(checked=True, supports_config_overrides=True),
+        )
+        with TemporaryDirectory() as temporary, patch("tasktra.host.shutil.which", return_value="codex"):
+            result = host.run(prompt="Inspect the artifact.", workspace=Path(temporary), model=None, effort=None,
+                              sandbox="read-only", timeout_seconds=5, on_started=lambda _: None, on_tick=lambda: None)
+        self.assertIn("mcp_servers.unused.enabled=false", calls[0])
+        self.assertEqual(result.launch_profile["requested_config_overrides"], ["mcp_servers.unused.enabled=false"])
+        self.assertEqual(result.launch_profile["effective_tool_reduction"], "unverified")
+
+    def test_unsupported_named_profile_fails_before_worker_dispatch(self):
+        host = CodexHostAdapter(
+            worker_context=WorkerContext(user_profile="focused"), cli_capabilities=CliCapabilities(checked=True),
+        )
+        with TemporaryDirectory() as temporary, patch("tasktra.host.shutil.which", return_value="codex"):
+            with self.assertRaisesRegex(HostError, "named-user-profile"):
+                host.run(prompt="Inspect the artifact.", workspace=Path(temporary), model=None, effort=None,
+                         sandbox="read-only", timeout_seconds=5, on_started=lambda _: None, on_tick=lambda: None)
+
+    def test_capability_help_is_checked_once_per_adapter_before_named_profile_launches(self):
+        help_calls, worker_calls = [], []
+
+        def help_run(argv, **kwargs):
+            help_calls.append(argv)
+            return SimpleNamespace(returncode=0, timed_out=False, output_limited=False, dispatched=True,
+                                   stdout=b"--profile --config")
+
+        def worker_run(argv, **kwargs):
+            worker_calls.append(argv)
+            feed = kwargs["on_stdout_chunk"]
+            feed(event({"type": "thread.started", "thread_id": f"thread-{len(worker_calls)}"}))
+            feed(event({"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps({
+                "status": "completed", "summary": "Done.", "findings": [], "changed_paths": [],
+            })}}))
+            feed(event({"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}}))
+            return SimpleNamespace(returncode=0, timed_out=False, output_limited=False, input_uncertain=False, dispatched=True)
+
+        host = CodexHostAdapter(runner_factory=lambda **kwargs: SimpleNamespace(run=worker_run),
+                                worker_context=WorkerContext(user_profile="focused"))
+        with TemporaryDirectory() as temporary, patch("tasktra.host.shutil.which", return_value="codex"), \
+                patch("tasktra.host.ArgvProcessRunner", side_effect=lambda **kwargs: SimpleNamespace(run=help_run)):
+            for _ in range(2):
+                host.run(prompt="Inspect the artifact.", workspace=Path(temporary), model=None, effort=None,
+                         sandbox="read-only", timeout_seconds=5, on_started=lambda _: None, on_tick=lambda: None)
+        self.assertEqual(help_calls, [["codex", "--help"], ["codex", "exec", "--help"]])
+        self.assertTrue(all("--profile" in argv for argv in worker_calls))
 
     def test_host_environment_drops_credentials_leases_and_arbitrary_capabilities(self):
         supplied = {

@@ -255,6 +255,8 @@ def compile_catalog(
     *,
     codex_model_policy: CodexModelPolicy | None = None,
     codex_role_overrides: Mapping[str, Mapping[str, str]] | None = None,
+    projection_roles: Iterable[str] | None = None,
+    projection_skills: Iterable[str] | None = None,
     project_routes: Iterable[ProjectRoute] = (),
     project_root: Path | str | None = None,
 ) -> Projection:
@@ -263,7 +265,9 @@ def compile_catalog(
     Writes are intentionally separate in :func:`write_projection`, which lets
     callers preview changes before modifying a project.
     """
-    packs = resolve_packs(catalog, enabled_packs)
+    packs, role_ids, skill_ids = resolve_projection(
+        catalog, enabled_packs, projection_roles=projection_roles, projection_skills=projection_skills,
+    )
     model_policy = codex_model_policy or catalog.codex_model_policy
     if model_policy is None:
         raise CatalogError("catalog must define a Codex model policy")
@@ -273,8 +277,6 @@ def compile_catalog(
         raise CatalogError(
             "Codex role overrides reference unknown role(s): " + ", ".join(sorted(unknown_overrides))
         )
-    role_ids = _selected(packs, catalog.packs, "roles")
-    skill_ids = _selected(packs, catalog.packs, "skills")
     routes = tuple(project_routes)
     project_agents = _discover_project_agents(catalog, project_root)
     _validate_project_routes(catalog, role_ids, skill_ids, routes, project_agents, project_root)
@@ -296,6 +298,25 @@ def compile_catalog(
         files[PurePosixPath(".agents", "skills", skill_id, "SKILL.md")] = content
         files[PurePosixPath(".claude", "skills", skill_id, "SKILL.md")] = content
     return Projection(files, packs)
+
+
+def resolve_projection(
+    catalog: Catalog,
+    enabled_packs: Iterable[str] = ("core",),
+    *,
+    projection_roles: Iterable[str] | None = None,
+    projection_skills: Iterable[str] | None = None,
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """Resolve the enabled catalog subset shared by compilation and planning."""
+    packs = resolve_packs(catalog, enabled_packs)
+    role_ids = _select_projection_items(
+        _selected(packs, catalog.packs, "roles"), projection_roles, "role"
+    )
+    skill_ids = _select_projection_items(
+        _selected(packs, catalog.packs, "skills"), projection_skills, "skill"
+    )
+    _require_core_safety_skills(packs, skill_ids, projection_skills)
+    return packs, role_ids, skill_ids
 
 
 def _pack_plan(catalog: Catalog, packs: tuple[str, ...]) -> str:
@@ -937,6 +958,38 @@ def _selected(packs: Iterable[str], definitions: Mapping[str, Pack], attribute: 
             if item not in selected:
                 selected.append(item)
     return tuple(selected)
+
+
+def _select_projection_items(
+    enabled: tuple[str, ...], selectors: Iterable[str] | None, kind: str,
+) -> tuple[str, ...]:
+    """Return enabled catalog items in caller-selected order when requested."""
+    if selectors is None:
+        return enabled
+    requested = tuple(selectors)
+    duplicate = sorted({item for item in requested if requested.count(item) > 1})
+    if duplicate:
+        raise CatalogError(f"projection {kind} selector contains duplicates: {', '.join(duplicate)}")
+    unavailable = sorted(set(requested) - set(enabled))
+    if unavailable:
+        raise CatalogError(
+            f"projection {kind} selector requires enabled pack item(s): {', '.join(unavailable)}"
+        )
+    return requested
+
+
+def _require_core_safety_skills(
+    packs: tuple[str, ...], skills: tuple[str, ...], selectors: Iterable[str] | None,
+) -> None:
+    """Keep the goal, execution, and halt procedures reachable in core projections."""
+    if selectors is None or "core" not in packs:
+        return
+    required = {"tasktra-goal", "tasktra-run", "tasktra-stop"}
+    missing = sorted(required - set(skills))
+    if missing:
+        raise CatalogError(
+            "projection skill selector must retain core safety skills: " + ", ".join(missing)
+        )
 
 
 def _discover_project_agents(

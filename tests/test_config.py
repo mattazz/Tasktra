@@ -136,6 +136,41 @@ commands = [["python", "-m", "unittest", "tests.test_config"]]
             config = load_project_config(root)
             self.assertFalse(config.include_pack_validation_defaults)
 
+    def test_projection_selectors_and_effort_profile_are_optional_and_validated(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            destination = config_path(root)
+            destination.parent.mkdir()
+            destination.write_text(
+                """[project]
+name = "Example"
+config_version = 1
+
+[projection]
+roles = ["scout", "writer"]
+skills = ["tasktra-goal", "tasktra-run", "tasktra-stop"]
+
+[agents.codex]
+effort_profile = "efficient"
+""",
+                encoding="utf-8",
+            )
+            config = load_project_config(root)
+            self.assertEqual(config.projection_roles, ("scout", "writer"))
+            self.assertEqual(config.projection_skills, ("tasktra-goal", "tasktra-run", "tasktra-stop"))
+            self.assertEqual(config.codex_effort_profile, "efficient")
+
+            destination.write_text(destination.read_text(encoding="utf-8").replace(
+                'roles = ["scout", "writer"]', 'roles = []'
+            ), encoding="utf-8")
+            self.assertEqual(load_project_config(root).projection_roles, ())
+
+            destination.write_text(destination.read_text(encoding="utf-8").replace(
+                'effort_profile = "efficient"', 'effort_profile = "fast"'
+            ), encoding="utf-8")
+            with self.assertRaisesRegex(ConfigError, "effort_profile"):
+                load_project_config(root)
+
     def test_rejects_legacy_string_validation_command_clearly(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

@@ -50,6 +50,39 @@ def completed_workflow():
     return state
 
 
+def deterministic_review_workflow(work_unit_id: str, *, patch_sha256: str = "a" * 64):
+    source = {"goal_id": "goal-1", "work_unit_id": work_unit_id}
+    state = new_workflow(source, verification_policy="implementation-deterministic-review")
+    for role in ("implementer", "reviewer"):
+        handoff = {
+            "kind": HANDOFF_KIND, "version": HANDOFF_VERSION, "handoff_id": f"{work_unit_id}-{role}",
+            "source": source, "producer": {"role": role, "actor_id": f"{role}-one"},
+            "human_summary": "Completed bounded work.", "status": {"state": "completed", "summary": "Passed."},
+            "verified_facts": [{"statement": "Check passed.", "evidence_ids": ["check"]}], "inferences": [], "changed_paths": [],
+            "validation_results": [{"name": "check", "outcome": "passed", "detail": "Passed.", "evidence_ids": ["check"]}],
+            "evidence_refs": [
+                {"id": "check", "kind": "command", "locator": "python -m unittest", "summary": "Check."},
+                {"id": "result-digest", "kind": "note", "locator": "b" * 64, "summary": "Host response."},
+                {"id": "patch-digest", "kind": "note", "locator": patch_sha256, "summary": "Reviewed patch."},
+            ],
+            "blockers": [], "downstream_brief": {"objective": "Continue.", "context": [], "constraints": [], "recommended_next_steps": []},
+            "requested_actions": [],
+        }
+        state = accept_handoff(state, handoff)
+    return state
+
+
+def deterministic_completion_evidence(patch_sha256: str = "a" * 64, *, argv=None,
+                                      status: str = "passed", exit_code: int = 0):
+    return {
+        "validation": [{
+            "argv": ["python", "-m", "unittest"] if argv is None else argv,
+            "status": status, "exit_code": exit_code, "patch_sha256": patch_sha256,
+        }],
+        "artifacts": {"patch_sha256": patch_sha256},
+    }
+
+
 class AutonomyTests(unittest.TestCase):
     def setUp(self):
         self._initialize()
@@ -140,6 +173,71 @@ class AutonomyTests(unittest.TestCase):
         replacement = envelope()
         with self.assertRaisesRegex(StateError, "revoke an existing work unit verification policy"):
             store.define_goal_contract("goal-1", replacement, actor_id="owner", at=NOW)
+
+    def test_contract_replacement_cannot_revoke_existing_deterministic_review_policy(self):
+        self.directory.cleanup()
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        store = AutonomyStore(f"{directory.name}/state.sqlite")
+        store.create_goal(goal_id="goal-1", title="Goal", description="Goal", acceptance=["Done."])
+        authorized = envelope()
+        authorized["allowed_actions"].append("verify-implementation-deterministic-review")
+        store.define_goal_contract("goal-1", authorized, actor_id="owner", at=NOW)
+        store.create_work_unit(
+            goal_id="goal-1", work_unit_id="deterministic-review-unit", title="Deterministic review",
+            scope={"paths": ["src"], "exclusions": []},
+            verification_policy="implementation-deterministic-review",
+            acceptance_checks=[["python", "-m", "unittest"]],
+        )
+        replacement = envelope()
+        with self.assertRaisesRegex(StateError, "revoke an existing work unit verification policy"):
+            store.define_goal_contract("goal-1", replacement, actor_id="owner", at=NOW)
+
+    def test_short_policy_manual_completion_requires_bound_deterministic_receipts(self):
+        self.directory.cleanup()
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        store = AutonomyStore(f"{directory.name}/state.sqlite")
+        store.create_goal(goal_id="goal-1", title="Goal", description="Goal", acceptance=["Done."])
+        authorized = envelope()
+        authorized["allowed_actions"].append("verify-implementation-deterministic-review")
+        store.define_goal_contract("goal-1", authorized, actor_id="owner", at=NOW)
+        with self.assertRaisesRegex(StateError, "requires nonempty acceptance_checks"):
+            store.create_work_unit(
+                goal_id="goal-1", work_unit_id="missing-checks", title="Missing checks",
+                scope={"paths": ["src"], "exclusions": []},
+                verification_policy="implementation-deterministic-review",
+            )
+        store.create_work_unit(
+            goal_id="goal-1", work_unit_id="short-completion", title="Checked change",
+            scope={"paths": ["src"], "exclusions": []},
+            verification_policy="implementation-deterministic-review",
+            acceptance_checks=[["python", "-m", "unittest"]],
+        )
+        workflow = deterministic_review_workflow("short-completion")
+        cases = (
+            (None, "requires completion evidence"),
+            (deterministic_completion_evidence(argv=["python", "-m", "pytest"]), "argv does not match"),
+            (deterministic_completion_evidence(status="failed", exit_code=1), "must be passed"),
+            (deterministic_completion_evidence("c" * 64), "reviewed patch-digest"),
+        )
+        for evidence, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(AutonomyError, message):
+                    store.record_workflow_completion(
+                        goal_id="goal-1", work_unit_id="short-completion", workflow=workflow,
+                        completion_evidence=evidence, at=NOW,
+                    )
+        completed = store.record_workflow_completion(
+            goal_id="goal-1", work_unit_id="short-completion", workflow=workflow,
+            completion_evidence=deterministic_completion_evidence(), at=NOW,
+        )
+        self.assertEqual(completed["work_unit_id"], "short-completion")
+        with store._connection(write=False) as connection:
+            stored = connection.execute(
+                "SELECT completion_evidence_json FROM workflow_evidence WHERE work_unit_id='short-completion'"
+            ).fetchone()[0]
+        self.assertIn('"patch_sha256":"' + "a" * 64 + '"', stored)
 
     def test_caller_supplied_claim_token_is_never_returned(self):
         token = "s" * 32
@@ -261,11 +359,93 @@ class AutonomyTests(unittest.TestCase):
         with self.assertRaisesRegex(AutonomyError, "no current approval"):
             self.store.resolve_effect_recovery(idempotency_key="uncertain", resolution="applied", evidence={"manual": True},
                                                performer_id="recovery-worker", envelope_sha256=self.digest, at=NOW)
-        self.store.record_transition_approval(goal_id="goal-1", action="effect-recovery-resolve", effect=LOCAL_REVERSIBLE_WRITE,
-                                              envelope_sha256=self.digest, approver_id="human", performer_id="recovery-worker", valid_until=expiry, at=NOW)
+        recovery_approval = self.store.record_transition_approval(goal_id="goal-1", action="effect-recovery-resolve", effect=LOCAL_REVERSIBLE_WRITE,
+                                              envelope_sha256=self.digest, approver_id="human", performer_id="recovery-worker", valid_until=expiry)
         resolved = self.store.resolve_effect_recovery(idempotency_key="uncertain", resolution="applied", evidence={"manual": True},
                                                       performer_id="recovery-worker", envelope_sha256=self.digest, at=NOW)
         self.assertEqual(resolved["status"], "received")
+        # Revocation after the durable recovery event cannot rewrite history.
+        self.store.revoke_transition_approval(recovery_approval["id"], actor_id="human", at=NOW + timedelta(days=2))
+        self.assertTrue(self.store.verify_audit()["ok"])
+
+        # A later replan records a different current envelope but must not
+        # retroactively invalidate the already-resolved local effect.
+        self.store.stop_goal("goal-1", actor_id="owner", at=NOW + timedelta(days=3))
+        self.store.set_goal_status("goal-1", "planned")
+        replacement = json.loads(json.dumps(self.envelope))
+        replacement["quality_requirements"].append("Retain recovery history.")
+        replacement_digest = authority_envelope_sha256(replacement)
+        self.store.define_goal_contract("goal-1", replacement, actor_id="owner", at=NOW + timedelta(days=3))
+        self.store.record_transition_approval(
+            goal_id="goal-1", action="goal-activate", effect=LOCAL_REVERSIBLE_WRITE,
+            envelope_sha256=replacement_digest, approver_id="human", performer_id="owner",
+            valid_until=NOW + timedelta(days=4), at=NOW + timedelta(days=3),
+        )
+        self.store.activate_goal("goal-1", actor_id="owner", envelope_sha256=replacement_digest, at=NOW + timedelta(days=3))
+        self.assertTrue(self.store.verify_audit()["ok"])
+
+    def test_recovery_audit_rejects_approval_expired_or_revoked_before_event(self):
+        effect_expiry = NOW + timedelta(days=10)
+        self.store.record_transition_approval(
+            goal_id="goal-1", action="effect-write", effect=LOCAL_REVERSIBLE_WRITE,
+            envelope_sha256=self.digest, approver_id="steward", approver_kind="steward",
+            performer_id="worker", valid_until=effect_expiry, at=NOW,
+        )
+        clock = datetime.now(timezone.utc)
+
+        def forge_recovery(key: str, *, approval_at: datetime, valid_until: datetime,
+                           revoked_at: datetime | None = None) -> None:
+            self.store.prepare_effect(
+                idempotency_key=key, goal_id="goal-1", work_unit_id=None,
+                effect_class=LOCAL_REVERSIBLE_WRITE, operation="effect-write",
+                request={"path": f"src/{key}"}, envelope_sha256=self.digest,
+                performer_id="worker", at=NOW,
+            )
+            self.store.record_effect_receipt(
+                idempotency_key=key, outcome="indeterminate", evidence={"probe": key},
+                performer_id="worker", at=NOW,
+            )
+            approval = self.store.record_transition_approval(
+                goal_id="goal-1", action="effect-recovery-resolve", effect=LOCAL_REVERSIBLE_WRITE,
+                envelope_sha256=self.digest, approver_id="human", performer_id="recovery-worker",
+                valid_until=valid_until, at=approval_at,
+            )
+            if revoked_at is not None:
+                self.store.revoke_transition_approval(approval["id"], actor_id="human", at=revoked_at)
+            evidence = {"manual": key}
+            evidence_json = json.dumps(evidence, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            payload = {
+                "idempotency_key": key, "resolution": "applied", "performer_id": "recovery-worker",
+                "evidence_sha256": sha256(evidence_json.encode("utf-8")).hexdigest(), "evidence": evidence,
+            }
+            with self.store._connection() as connection:
+                connection.execute("UPDATE effect_intents SET status='received' WHERE idempotency_key=?", (key,))
+                StateStore._append_event_in_transaction(
+                    connection, "effect.recovery_resolved", goal_id="goal-1", payload=payload,
+                )
+                StateStore._seal_current_state_in_transaction(connection, NOW.isoformat().replace("+00:00", "Z"))
+
+        forge_recovery(
+            "expired-recovery", approval_at=clock - timedelta(hours=2),
+            valid_until=clock - timedelta(hours=1),
+        )
+        forge_recovery(
+            "revoked-recovery", approval_at=clock - timedelta(hours=2),
+            valid_until=clock + timedelta(hours=1), revoked_at=clock - timedelta(hours=1),
+        )
+        audit = self.store.verify_audit()
+        self.assertFalse(audit["ok"])
+        self.assertTrue(any("expired-recovery" in issue for issue in audit["issues"]))
+        # Remove the first forged terminal mapping so the second temporal
+        # violation is independently observable through the same public audit.
+        with self.store._connection() as connection:
+            connection.execute(
+                "UPDATE effect_intents SET status='recovery-required' WHERE idempotency_key='expired-recovery'"
+            )
+            StateStore._seal_current_state_in_transaction(connection, NOW.isoformat().replace("+00:00", "Z"))
+        audit = self.store.verify_audit()
+        self.assertFalse(audit["ok"])
+        self.assertTrue(any("revoked-recovery" in issue for issue in audit["issues"]))
 
     def test_narrowed_approval_scope_cannot_cover_outside_or_excluded_work(self):
         expiry = NOW + timedelta(days=1)

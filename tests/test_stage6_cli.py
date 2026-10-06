@@ -8,6 +8,7 @@ from hashlib import sha256
 import io
 import json
 from pathlib import Path
+import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -15,7 +16,7 @@ from tasktra.cli import main
 from tasktra.authority import authority_envelope_sha256
 from tasktra.autonomy import AutonomyStore, LOCAL_REVERSIBLE_WRITE
 from tasktra.config import initialize_project, load_project_config
-from tasktra.state import StateStore
+from tasktra.state import SCHEMA_VERSION, StateStore
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -217,6 +218,76 @@ class Stage6CliTests(unittest.TestCase):
             self.assertEqual(store.inspect_effect("upgrade-authorized")["receipt"]["outcome"], "success")
             self.assertEqual(store.inspect_effect("rollback-authorized")["receipt"]["outcome"], "success")
             self.assertEqual(store.verify_audit()["issues"], [])
+
+    def test_public_upgrade_apply_bridges_a_sealed_schema_eleven_ledger(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            initialize_project(root, name="CLI schema eleven upgrade")
+            compiled_code, _ = payload(
+                "compile", "--root", str(root), "--catalog", str(CATALOG_ROOT), "--trust-catalog",
+            )
+            self.assertEqual(compiled_code, 0)
+            database = load_project_config(root).database_path(root)
+            StateStore(database).migrate()
+            store = AutonomyStore(database)
+            contract = {
+                "kind": "tasktra.authority-envelope", "version": 1, "goal_id": "upgrade-goal",
+                "outcome": "Apply one reviewed Tasktra upgrade.", "motivation": "Schema eleven bridge coverage.",
+                "author_id": "owner", "acceptance_criteria": [{"id": "done", "statement": "Upgrade verified."}],
+                "scope": {"paths": ["."], "exclusions": []}, "allowed_actions": ["goal-activate", "local-effect"],
+                "allowed_effects": [LOCAL_REVERSIBLE_WRITE], "prohibited_actions": [], "quality_requirements": [],
+                "budgets": {"tokens": 1000, "attempts": 3, "elapsed_seconds": 300, "concurrency": 1},
+                "dependencies": [], "checkpoints": [], "stop_conditions": [], "escalation_conditions": [],
+            }
+            digest = authority_envelope_sha256(contract)
+            now = datetime.now(timezone.utc)
+            store.create_goal(goal_id="upgrade-goal", title="Upgrade", description="Upgrade", acceptance=["Upgrade verified."])
+            store.define_goal_contract("upgrade-goal", contract, actor_id="owner")
+            store.record_transition_approval(
+                goal_id="upgrade-goal", action="goal-activate", effect=LOCAL_REVERSIBLE_WRITE,
+                envelope_sha256=digest, approver_id="human", performer_id="owner", valid_until=now + timedelta(days=1),
+            )
+            store.activate_goal("upgrade-goal", actor_id="owner", envelope_sha256=digest)
+            store.create_work_unit(goal_id="upgrade-goal", work_unit_id="upgrade-work", title="Upgrade", scope={"paths": ["."], "exclusions": []})
+
+            # Model the sealed public v11 runtime shape: it has verification
+            # policy but not the v12 acceptance/proof columns.
+            connection = sqlite3.connect(database, isolation_level=None)
+            connection.row_factory = sqlite3.Row
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute("ALTER TABLE work_units DROP COLUMN acceptance_checks")
+                connection.execute("ALTER TABLE workflow_evidence DROP COLUMN completion_evidence_json")
+                StateStore._seal_current_state_in_transaction(connection, "2035-01-01T00:00:00Z", existing_only=True)
+                connection.execute("PRAGMA user_version = 11")
+                connection.commit()
+            finally:
+                connection.close()
+            lock_path = root / ".tasktra" / "tasktra.lock"
+            lock = json.loads(lock_path.read_text(encoding="utf-8"))
+            lock["schema_versions"]["runtime"] = 11
+            lock_path.write_text(json.dumps(lock, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+            # This is the only old-schema write: the bridge still requires an
+            # exact steward-approved local reversible effect.
+            store.record_transition_approval(
+                goal_id="upgrade-goal", work_unit_id="upgrade-work", action="local-effect",
+                effect=LOCAL_REVERSIBLE_WRITE, envelope_sha256=digest, approver_id="goal-steward",
+                performer_id="worker", approver_kind="steward", authority_clause="exact reviewed upgrade plan",
+                evidence=["upgrade-plan-reviewed"], valid_until=now + timedelta(days=1),
+            )
+            preview_code, preview = payload(
+                "upgrade", "--root", str(root), "preview", "--catalog", str(CATALOG_ROOT), "--trust-catalog",
+            )
+            self.assertEqual((preview_code, preview["ok"]), (0, True), preview)
+            code, result = payload(
+                "upgrade", "--root", str(root), "apply", "--catalog", str(CATALOG_ROOT), "--trust-catalog",
+                "--plan-sha256", preview["plan_sha256"], "--goal-id", "upgrade-goal", "--work-unit-id", "upgrade-work",
+                "--envelope-sha256", digest, "--actor", "worker", "--idempotency-key", "upgrade-v11", "--confirm",
+            )
+            self.assertEqual((code, result["ok"], result["effect_receipt"]["outcome"]), (0, True, "success"), result)
+            self.assertEqual(StateStore(database).inspect_schema_version(), SCHEMA_VERSION)
+            self.assertTrue(AutonomyStore(database).verify_audit()["ok"])
 
     def test_telemetry_requires_opt_in_and_only_exports_locally(self) -> None:
         with TemporaryDirectory() as temporary:

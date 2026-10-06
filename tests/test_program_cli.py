@@ -39,6 +39,7 @@ class ProgramCliTests(unittest.TestCase):
             "allowed_actions": [
                 "goal-activate", "local-effect", "work-claim", "effect-recovery-resolve",
                 "verify-research-review", "verify-documentation-review", "verify-deterministic-direct",
+                "verify-implementation-deterministic-review",
             ],
             "allowed_effects": ["local-reversible-write"], "prohibited_actions": [],
             "quality_requirements": [],
@@ -131,8 +132,10 @@ class ProgramCliTests(unittest.TestCase):
         self.assertEqual(result["effect"]["receipt"]["outcome"], "indeterminate")
 
     def test_work_and_workflow_commands_accept_explicit_verification_policies(self):
+        profile = self.root / ".tasktra/project.toml"
+        profile.write_text(profile.read_text(encoding="utf-8").replace("commands = []", 'commands = [["python", "-c", "raise SystemExit(0)"]]'), encoding="utf-8")
         scope = self.write_json("scope.json", {"paths": ["."], "exclusions": []})
-        for policy in ("implementation-review", "research-review", "documentation-review", "deterministic-direct"):
+        for policy in ("implementation-review", "implementation-deterministic-review", "research-review", "documentation-review", "deterministic-direct"):
             with self.subTest(policy=policy):
                 code, result = payload(
                     "work", "--root", str(self.root), "create", "program-goal", "Scoped work", "--id", f"unit-{policy}",
@@ -140,6 +143,8 @@ class ProgramCliTests(unittest.TestCase):
                 )
                 self.assertEqual(code, 0, result)
                 self.assertEqual(result["work_unit"]["verification_policy"], policy)
+                if policy == "implementation-deterministic-review":
+                    self.assertEqual(result["work_unit"]["acceptance_checks"], [["python", "-c", "raise SystemExit(0)"]])
                 code, result = payload("workflow", "create", "--goal-id", "program-goal", "--verification-policy", policy)
                 self.assertEqual(code, 0, result)
                 self.assertEqual(result["workflow"].get("verification_policy", "implementation-review"), policy)

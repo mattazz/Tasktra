@@ -1125,3 +1125,12 @@ body.motion-off * {
     flex-direction: column;
   }
 }
+/* Usage counters remain legible on a phone and never imply unmeasured savings. */
+.efficiency-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin: 1rem 0; }
+.efficiency-metric { padding: 1.2rem; }
+.efficiency-value { display: block; font-size: clamp(1.5rem, 3vw, 2.2rem); color: var(--ink); margin-top: .65rem; }
+.efficiency-note { color: var(--muted); line-height: 1.65; font-size: .86rem; }
+.efficiency-panel { padding: 1.35rem; margin-top: 1rem; }
+.efficiency-mix { display: flex; overflow: hidden; border-radius: .5rem; height: 1.4rem; background: #253348; margin-top: 1rem; }
+.efficiency-input { background: #6de6c5; }
+.efficiency-output { background: #a99df8; }

@@ -59,6 +59,38 @@ class UpgradeBootstrapTests(unittest.TestCase):
             connection.close()
         return store, digest
 
+    def _schema_eleven_store(self, root: Path) -> tuple[AutonomyStore, str]:
+        store = AutonomyStore(root / "tasktra.sqlite")
+        store.migrate()
+        store.create_goal(
+            goal_id="upgrade-goal", title="Upgrade", description="Upgrade",
+            acceptance=["Upgraded."],
+        )
+        contract = envelope()
+        digest = authority_envelope_sha256(contract)
+        now = datetime.now(timezone.utc)
+        store.define_goal_contract("upgrade-goal", contract, actor_id="owner", at=now)
+        store.record_transition_approval(
+            goal_id="upgrade-goal", action="goal-activate", effect=LOCAL_REVERSIBLE_WRITE,
+            envelope_sha256=digest, approver_id="human", performer_id="owner",
+            valid_until=now + timedelta(hours=1), at=now,
+        )
+        store.activate_goal("upgrade-goal", actor_id="owner", envelope_sha256=digest, at=now)
+        connection = sqlite3.connect(store.path)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("ALTER TABLE work_units DROP COLUMN acceptance_checks")
+            connection.execute("ALTER TABLE workflow_evidence DROP COLUMN completion_evidence_json")
+            connection.execute("PRAGMA user_version = 11")
+            StateStore._seal_current_state_in_transaction(
+                connection, _now(), existing_only=True,
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        return store, digest
+
     def test_exact_steward_approval_and_effect_can_bootstrap_schema_eight(self) -> None:
         with TemporaryDirectory() as directory:
             store, digest = self._schema_eight_store(Path(directory))
@@ -84,6 +116,108 @@ class UpgradeBootstrapTests(unittest.TestCase):
 
             self.assertEqual((migration["before_schema"], migration["after_schema"]), (8, SCHEMA_VERSION))
             self.assertTrue(Path(str(migration["backup_path"])).is_file())
+            self.assertTrue(store.verify_audit()["ok"])
+
+    def test_schema_eleven_bridge_records_only_bound_upgrade_failure_receipt(self) -> None:
+        with TemporaryDirectory() as directory:
+            store, digest = self._schema_eleven_store(Path(directory))
+            store.record_transition_approval(
+                goal_id="upgrade-goal", action="local-effect", effect=LOCAL_REVERSIBLE_WRITE,
+                envelope_sha256=digest, approver_id="goal-steward",
+                performer_id="coordinator", approver_kind="steward",
+                authority_clause="exact reviewed upgrade plan",
+                evidence=["upgrade-plan-reviewed"],
+                valid_until=datetime.now(timezone.utc) + timedelta(hours=1),
+                approval_id="upgrade-local-effect-schema-eleven",
+            )
+            plan_sha256 = "c" * 64
+            store.prepare_effect(
+                idempotency_key="upgrade-schema-eleven-failure", goal_id="upgrade-goal", work_unit_id=None,
+                effect_class=LOCAL_REVERSIBLE_WRITE, operation="local-effect",
+                request={"action": "upgrade-apply", "plan_sha256": plan_sha256},
+                envelope_sha256=digest, performer_id="coordinator",
+            )
+            evidence = {
+                "action": "upgrade-apply", "plan_sha256": plan_sha256,
+                "error": "migration failed before schema change",
+            }
+            with self.assertRaisesRegex(AutonomyError, "only permits a bound upgrade terminal failure"):
+                store.record_effect_receipt(
+                    idempotency_key="upgrade-schema-eleven-failure", outcome="success",
+                    evidence=evidence, performer_id="coordinator",
+                )
+            with self.assertRaisesRegex(AutonomyError, "only permits a bound upgrade terminal failure"):
+                store.record_effect_receipt(
+                    idempotency_key="upgrade-schema-eleven-failure", outcome="indeterminate",
+                    evidence={**evidence, "plan_sha256": "d" * 64}, performer_id="coordinator",
+                )
+            receipt = store.record_effect_receipt(
+                idempotency_key="upgrade-schema-eleven-failure", outcome="indeterminate",
+                evidence=evidence, performer_id="coordinator",
+            )
+            self.assertEqual(receipt["outcome"], "indeterminate")
+            connection = sqlite3.connect(store.path)
+            connection.row_factory = sqlite3.Row
+            try:
+                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 11)
+                status, evidence_json = connection.execute(
+                    "SELECT i.status,r.evidence_json FROM effect_intents i JOIN effect_receipts r ON r.intent_key=i.idempotency_key "
+                    "WHERE i.idempotency_key='upgrade-schema-eleven-failure'"
+                ).fetchone()
+                self.assertEqual(status, "recovery-required")
+                self.assertIn("migration failed before schema change", evidence_json)
+                StateStore._assert_audit_chain_in_transaction(connection)
+                StateStore._assert_current_state_integrity_in_transaction(connection, existing_only=True)
+            finally:
+                connection.close()
+            migration = store.migrate_with_evidence()
+            self.assertEqual((migration["before_schema"], migration["after_schema"]), (11, SCHEMA_VERSION))
+            self.assertTrue(store.verify_audit()["ok"])
+
+            # The seal is deliberately refreshed here to isolate semantic
+            # validation from the distinct seal-tampering detector.
+            connection = sqlite3.connect(store.path)
+            connection.row_factory = sqlite3.Row
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "UPDATE effect_intents SET status='received' WHERE idempotency_key=?",
+                    ("upgrade-schema-eleven-failure",),
+                )
+                StateStore._seal_current_state_in_transaction(connection, _now())
+                connection.commit()
+            finally:
+                connection.close()
+            audit = store.verify_audit()
+            self.assertFalse(audit["ok"])
+            self.assertTrue(any("unresolved indeterminate effect receipt" in issue for issue in audit["issues"]))
+
+    def test_schema_eleven_failed_before_effect_receipt_migrates_as_closed(self) -> None:
+        with TemporaryDirectory() as directory:
+            store, digest = self._schema_eleven_store(Path(directory))
+            store.record_transition_approval(
+                goal_id="upgrade-goal", action="local-effect", effect=LOCAL_REVERSIBLE_WRITE,
+                envelope_sha256=digest, approver_id="goal-steward",
+                performer_id="coordinator", approver_kind="steward",
+                authority_clause="exact reviewed upgrade plan", evidence=["upgrade-plan-reviewed"],
+                valid_until=datetime.now(timezone.utc) + timedelta(hours=1),
+            )
+            plan_sha256 = "e" * 64
+            store.prepare_effect(
+                idempotency_key="upgrade-schema-eleven-closed", goal_id="upgrade-goal", work_unit_id=None,
+                effect_class=LOCAL_REVERSIBLE_WRITE, operation="local-effect",
+                request={"action": "upgrade-apply", "plan_sha256": plan_sha256},
+                envelope_sha256=digest, performer_id="coordinator",
+            )
+            store.record_effect_receipt(
+                idempotency_key="upgrade-schema-eleven-closed", outcome="failed-before-effect",
+                evidence={
+                    "action": "upgrade-apply", "plan_sha256": plan_sha256,
+                    "error": "migration did not begin",
+                }, performer_id="coordinator",
+            )
+            store.migrate_with_evidence()
+            self.assertEqual(store.inspect_effect("upgrade-schema-eleven-closed")["status"], "received")
             self.assertTrue(store.verify_audit()["ok"])
 
     def test_bridge_denies_broader_approval_and_denies_effect_without_approval(self) -> None:

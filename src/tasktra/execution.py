@@ -559,13 +559,37 @@ class ExecutionStore:
         with self._connection() as connection:
             return self._public(self._row(connection, work_id))
 
-    def report(self) -> dict[str, Any]:
+    def iter_records(self) -> Iterator[dict[str, Any]]:
+        """Stream a consistent, read-only full-ledger snapshot for aggregation."""
+        if not self.path.exists():
+            return
+        self._require_database()
+        connection = sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("PRAGMA query_only = ON")
+            connection.execute("BEGIN")
+            for row in connection.execute("SELECT * FROM execution ORDER BY work_id"):
+                yield self._public(row)
+        finally:
+            connection.close()
+
+    def report(self, *, limit: int | None = None) -> dict[str, Any]:
+        if limit is not None and (not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 5000):
+            raise ExecutionError("execution report limit must be between 1 and 5000")
         if not self.path.exists():
             return {"kind": "tasktra.agent-execution-report", "schema_version": _SCHEMA,
                     "work_count": 0, "executions": [], "asserted_executions": [], "verified_executions": []}
         self._require_database()
-        with self._connection() as connection:
-            records = [self._public(row) for row in connection.execute("SELECT * FROM execution ORDER BY work_id")]
+        # Reports must not create files or perform schema maintenance.
+        connection = sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            total = connection.execute("SELECT count(*) FROM execution").fetchone()[0]
+            query = "SELECT * FROM execution ORDER BY work_id" + (" LIMIT ?" if limit is not None else "")
+            records = [self._public(row) for row in connection.execute(query, (limit,) if limit is not None else ())]
+        finally:
+            connection.close()
         asserted = [{"work_id": item["work_id"], **item["asserted"]} for item in records
                     if (item["start_provenance"] == "manual-assertion"
                         or item["finish_provenance"] == "manual-assertion")]
@@ -573,7 +597,8 @@ class ExecutionStore:
                     if item["verified"]["provenance"] is not None]
         return {"kind": "tasktra.agent-execution-report", "schema_version": _SCHEMA,
                 "work_count": len(records), "executions": records,
-                "asserted_executions": asserted, "verified_executions": verified}
+                "asserted_executions": asserted, "verified_executions": verified,
+                "total_work_count": total, "truncated": total > len(records)}
 
 
 class HostExecutionAdapter:

@@ -10,6 +10,13 @@ from typing import Mapping
 MODEL_TIERS = frozenset({"fast", "balanced", "deep", "exceptional"})
 REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
 SANDBOX_MODES = frozenset({"read-only", "workspace-write", "danger-full-access"})
+EFFORT_PROFILES = frozenset({"existing", "efficient"})
+
+# Efficient is deliberately tier based so newly added roles receive the same
+# bounded policy without maintaining a second, incomplete list of role names.
+_EFFICIENT_EFFORT_BY_TIER = MappingProxyType({
+    "fast": "low", "balanced": "medium", "deep": "high", "exceptional": "high",
+})
 
 
 class ModelPolicyError(ValueError):
@@ -51,6 +58,14 @@ class CodexModelPolicy:
     def model_for(self, model_tier: str) -> str:
         _registered(model_tier, "model_tier", MODEL_TIERS)
         return self.tier_models[model_tier]
+
+
+def profile_reasoning_effort(profile: str, metadata: RoleModelMetadata) -> str:
+    """Resolve an opt-in effort profile while preserving catalog defaults."""
+    _registered(profile, "effort_profile", EFFORT_PROFILES)
+    if profile == "existing":
+        return metadata.reasoning_effort
+    return _EFFICIENT_EFFORT_BY_TIER[metadata.model_tier]
 
 
 def _registered(value: object, label: str, allowed: frozenset[str]) -> None:

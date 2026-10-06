@@ -784,6 +784,58 @@
       $("detail-panel").hidden = true;
     }
   }
+  function renderEfficiency(snapshot) {
+    const report = snapshot.efficiency;
+    const totals = report?.totals;
+    const known = totals?.known || {};
+    const knownRecords = report?.coverage?.actual_usage_records;
+    const hasUsage = Number.isFinite(knownRecords) && knownRecords > 0;
+    $("efficiency-coverage").textContent = !report
+      ? (state.demo ? "Usage comparison is unavailable for demonstration data." : "Recorded usage is unavailable.")
+      : !hasUsage ? "No measured usage yet. Planned work does not count as a completed execution."
+      : `${number(knownRecords)} record${knownRecords === 1 ? "" : "s"} with measured usage · ${number(totals.unknown_records)} with unknown usage. ${totals.complete ? "Ledger coverage is complete." : "Coverage is incomplete; totals are partial."}`;
+    const metrics = $("efficiency-metrics");
+    metrics.replaceChildren();
+    [
+      ["Recorded tokens", hasUsage ? known.total_tokens : null],
+      ["Cached input", hasUsage ? totals.subsets?.cached_input_tokens : null],
+      ["Failed / cancelled spend", hasUsage ? totals.non_success_terminal_tokens : null],
+      ["Unknown usage records", totals?.unknown_records],
+    ].forEach(([label, value]) => {
+      const card = el("article", "panel efficiency-metric");
+      card.append(el("p", "eyebrow", label), el("strong", "efficiency-value", number(value)));
+      metrics.append(card);
+    });
+    const input = hasUsage ? known.input_tokens : null;
+    const output = hasUsage ? known.output_tokens : null;
+    const mix = $("efficiency-mix");
+    mix.replaceChildren();
+    if (Number.isFinite(input) && Number.isFinite(output) && input + output > 0) {
+      const inBar = el("span", "efficiency-input");
+      const outBar = el("span", "efficiency-output");
+      inBar.style.width = `${100 * input / (input + output)}%`;
+      outBar.style.width = `${100 * output / (input + output)}%`;
+      mix.append(inBar, outBar);
+    }
+    const label = `${number(input)} input · ${number(output)} output`;
+    mix.setAttribute("aria-label", label);
+    $("efficiency-mix-label").textContent = label;
+    const body = $("efficiency-roles");
+    body.replaceChildren();
+    (report?.by_role_model || []).forEach((group) => {
+      const row = el("tr");
+      row.append(el("td", "", `${readable(group.role)} / ${group.model || "Unknown model"}`),
+        el("td", "", `${number(group.actual_usage_records)} of ${number(group.records)}`),
+        el("td", "", group.actual_usage_records > 0 ? number(group.total_tokens) : "Unavailable"));
+      body.append(row);
+    });
+    if (!body.children.length) {
+      const cell = el("td", "efficiency-note", "No measured role usage available.");
+      cell.colSpan = 3;
+      const row = el("tr"); row.append(cell); body.append(row);
+    }
+  }
+
   function render(snapshot) {
     const project = snapshot.project?.name || "This project";
     const runtime = snapshot.runtime || {};
@@ -822,6 +874,7 @@
     updateJobFilterOptions(snapshot);
     renderJobs(snapshot);
     renderAgents(snapshot);
+    renderEfficiency(snapshot);
     refreshDetail(snapshot);
     const empty = hasNoTrackedWork(snapshot) && !state.demo;
     $("empty-state").hidden = !empty;
@@ -830,7 +883,7 @@
     });
     document.querySelector(".dashboard-grid").hidden =
       empty || state.activeView !== "overview";
-    ["overview", "goals", "jobs", "agents"].forEach((name) => {
+    ["overview", "goals", "jobs", "agents", "efficiency"].forEach((name) => {
       $(`view-${name}`).hidden = empty || name !== state.activeView;
     });
     const notices = [...snapshot.warnings.map((warning) => String(warning))];
@@ -857,7 +910,7 @@
   }
   function switchView(view) {
     state.activeView = view;
-    ["overview", "goals", "jobs", "agents"].forEach((name) => {
+    ["overview", "goals", "jobs", "agents", "efficiency"].forEach((name) => {
       const tab = $(`tab-${name}`);
       const panel = $(`view-${name}`);
       tab.setAttribute("aria-selected", String(name === view));
@@ -905,6 +958,7 @@
             },
       summary:
         input.summary && typeof input.summary === "object" ? input.summary : {},
+      efficiency: input.efficiency && typeof input.efficiency === "object" ? input.efficiency : null,
       goals: Array.isArray(input.goals) ? input.goals : [],
       jobs: Array.isArray(input.jobs) ? input.jobs : [],
       agents: Array.isArray(input.agents) ? input.agents : [],

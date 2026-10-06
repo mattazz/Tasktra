@@ -12,6 +12,7 @@ dist/
 
 # Tasktra execution state is local and may contain transient evidence.
 .tasktra/runtime/
+.tasktra/upgrades/
 
 # Generated previews are disposable until explicitly applied.
 .tasktra/preview/

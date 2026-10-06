@@ -16,7 +16,7 @@ from uuid import uuid4
 from .contracts import ContractError, validate_named
 from .identifiers import IdentifierError, require_identifier
 from .jira_sync import JiraSyncError, JiraSyncPolicy
-from .model_policy import MODEL_TIERS, REASONING_EFFORTS
+from .model_policy import EFFORT_PROFILES, MODEL_TIERS, REASONING_EFFORTS
 
 CONFIG_DIRECTORY = ".tasktra"
 CONFIG_FILENAME = "project.toml"
@@ -49,6 +49,9 @@ class ProjectConfig:
     catalog_trusted: bool = False
     codex_tier_models: Mapping[str, str] = field(default_factory=dict)
     codex_role_overrides: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
+    codex_effort_profile: str = "existing"
+    projection_roles: tuple[str, ...] | None = None
+    projection_skills: tuple[str, ...] | None = None
     routes: tuple[ProjectRoute, ...] = ()
     jira_sync: JiraSyncPolicy | None = None
     raw: dict = field(default_factory=dict, compare=False, repr=False)
@@ -179,13 +182,13 @@ def _argv_list(value: object, name: str) -> tuple[tuple[str, ...], ...]:
     return tuple(argv)
 
 
-def _codex_agents(value: object) -> tuple[Mapping[str, str], Mapping[str, Mapping[str, str]]]:
+def _codex_agents(value: object) -> tuple[Mapping[str, str], Mapping[str, Mapping[str, str]], str]:
     agents = _table(value, "agents") if value else {}
     if set(agents) - {"codex"}:
         raise ConfigError("agents permits only the codex table")
     codex = _table(agents.get("codex", {}), "agents.codex")
-    if set(codex) - {"model_tiers", "roles"}:
-        raise ConfigError("agents.codex permits only model_tiers and roles")
+    if set(codex) - {"model_tiers", "roles", "effort_profile"}:
+        raise ConfigError("agents.codex permits only model_tiers, roles, and effort_profile")
     tiers = _table(codex.get("model_tiers", {}), "agents.codex.model_tiers")
     parsed_tiers: dict[str, str] = {}
     for tier, model in tiers.items():
@@ -216,7 +219,28 @@ def _codex_agents(value: object) -> tuple[Mapping[str, str], Mapping[str, Mappin
                 raise ConfigError(f"agents.codex.roles.{role}.reasoning_effort is invalid")
             parsed["reasoning_effort"] = effort
         parsed_roles[role] = MappingProxyType(parsed)
-    return MappingProxyType(parsed_tiers), MappingProxyType(parsed_roles)
+    effort_profile = codex.get("effort_profile", "existing")
+    if not isinstance(effort_profile, str) or effort_profile not in EFFORT_PROFILES:
+        raise ConfigError("agents.codex.effort_profile must be existing or efficient")
+    return MappingProxyType(parsed_tiers), MappingProxyType(parsed_roles), effort_profile
+
+
+def _projection(value: object) -> tuple[tuple[str, ...] | None, tuple[str, ...] | None]:
+    projection = _table(value, "projection") if value else {}
+    if set(projection) - {"roles", "skills"}:
+        raise ConfigError("projection permits only roles and skills")
+
+    def selectors(key: str, pattern: str) -> tuple[str, ...] | None:
+        if key not in projection:
+            return None
+        values = _string_list(projection[key], f"projection.{key}")
+        if any(re.fullmatch(pattern, item) is None for item in values):
+            raise ConfigError(f"projection.{key} must contain valid identifiers")
+        if len({item.casefold() for item in values}) != len(values):
+            raise ConfigError(f"projection.{key} contains duplicates")
+        return values
+
+    return selectors("roles", r"[a-z0-9][a-z0-9-]*"), selectors("skills", r"[a-z0-9][a-z0-9._:-]*")
 
 
 def _routes(value: object) -> tuple[ProjectRoute, ...]:
@@ -288,7 +312,8 @@ def load_project_config(root: Path) -> ProjectConfig:
     catalog = _table(data.get("catalog", {}), "catalog")
     validation = _table(data.get("validation", {}), "validation")
     jira_sync_raw = data.get("jira_sync")
-    tier_models, role_overrides = _codex_agents(data.get("agents", {}))
+    tier_models, role_overrides, effort_profile = _codex_agents(data.get("agents", {}))
+    projection_roles, projection_skills = _projection(data.get("projection", {}))
     routes = _routes(data.get("routing", {}))
     name = project.get("name")
     version = project.get("config_version", 1)
@@ -324,6 +349,8 @@ def load_project_config(root: Path) -> ProjectConfig:
         concurrency_limit=concurrency, raw=data,
         catalog_trusted=catalog_trusted,
         codex_tier_models=tier_models, codex_role_overrides=role_overrides,
+        codex_effort_profile=effort_profile,
+        projection_roles=projection_roles, projection_skills=projection_skills,
         routes=routes,
         jira_sync=jira_sync,
     )

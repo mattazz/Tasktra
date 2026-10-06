@@ -141,6 +141,11 @@ class PortalSnapshotTests(unittest.TestCase):
         self.assertFalse(agents["fresh"]["lease_stale"])
         self.assertTrue(agents["complete"]["lease_stale"])
 
+        ledger.finish("complete", "succeeded", unknown_reason="usage-unavailable")
+        finished = {agent["work_id"]: agent for agent in portal_snapshot(self.root)["agents"]}["complete"]
+        self.assertEqual(finished["state"], "succeeded")
+        self.assertFalse(finished["lease_stale"])
+
     def test_stage_receipt_uses_parent_work_lease_and_paused_parent_is_not_running(self) -> None:
         self.store.create_goal(goal_id="goal-one", title="One", description="One")
         self.store.create_work_unit(goal_id="goal-one", work_unit_id="work-one", title="Work")

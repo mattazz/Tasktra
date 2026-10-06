@@ -11,6 +11,7 @@ from unittest.mock import patch
 from tasktra.autonomy import AutonomyStore, LOCAL_REVERSIBLE_WRITE
 from tasktra.authority import authority_envelope_sha256
 from tasktra.host import HostResult
+from tasktra.config import load_project_config
 from tasktra.execution import ExecutionError, ExecutionStore
 from tasktra.supervisor import RunError, run_work
 
@@ -56,7 +57,7 @@ def envelope(goal_id="goal-one"):
         "acceptance_criteria": [{"id": "done", "statement": "Done."}],
         "scope": {"paths": ["."], "exclusions": []},
         "allowed_actions": ["goal-activate", "work-claim", "work-complete", "goal-complete",
-                            "verify-deterministic-direct", "verify-documentation-review"],
+                            "verify-deterministic-direct", "verify-documentation-review", "verify-implementation-deterministic-review"],
         "allowed_effects": [LOCAL_REVERSIBLE_WRITE], "prohibited_actions": [], "quality_requirements": ["Test."],
         "budgets": {"tokens": 1000, "attempts": 4, "elapsed_seconds": 300, "concurrency": 1},
         "dependencies": [], "checkpoints": [], "stop_conditions": ["Stop."], "escalation_conditions": ["Escalate."],
@@ -99,10 +100,19 @@ class SupervisorTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def run_supervised(self, host, *, apply=True, unit="unit-one"):
+    def run_supervised(self, host, *, apply=True, unit="unit-one", context_mode="compact"):
         return run_work(self.root, goal_id="goal-one", work_unit_id=unit, performer_id="runner",
                         envelope_sha256=self.digest, profile_for_role=lambda role: (None, None),
-                        token_reservation=100, timeout_seconds=30, apply=apply, host=host)
+                        token_reservation=100, timeout_seconds=30, apply=apply, host=host, context_mode=context_mode)
+
+    def test_legacy_context_keeps_constraints_and_failed_context_receipt(self):
+        host = FakeHost([("thread-one", response(status="blocked", findings=["Needs work"]), dict(USAGE))])
+        result = self.run_supervised(host, context_mode="legacy")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["contexts"][0]["mode"], "legacy")
+        self.assertIn('"acceptance": ["Done."]', host.calls[0]["prompt"])
+        self.assertIn('"checkpoint_id": null', host.calls[0]["prompt"])
+        self.assertIn('"allowed_effects": ["local-reversible-write"]', host.calls[0]["prompt"])
 
     def test_preview_is_non_mutating_and_exact_unit_selection_is_reported(self):
         host = FakeHost([])
@@ -443,6 +453,34 @@ class SupervisorTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual([call["sandbox"] for call in host.calls], ["workspace-write", "read-only"])
         self.assertEqual(self.store.get_work_unit("docs-one")["status"], "complete")
+
+    def test_short_policy_checks_patch_before_review_and_records_context(self):
+        self.store.create_work_unit(goal_id="goal-one", work_unit_id="short-one", title="Small change",
+                                    scope={"paths": ["."], "exclusions": []}, verification_policy="implementation-deterministic-review",
+                                    acceptance_checks=[list(command) for command in load_project_config(self.root).validation_commands])
+        for action in ("work-claim", "work-complete"):
+            self.store.record_transition_approval(goal_id="goal-one", work_unit_id="short-one", action=action,
+                effect=LOCAL_REVERSIBLE_WRITE, envelope_sha256=self.digest, approver_id="steward-two",
+                approver_kind="steward", performer_id="runner", valid_until=NOW + timedelta(days=1), at=NOW)
+        prompts = []
+        def inspect(call):
+            prompts.append(call["prompt"])
+            if len(prompts) == 1:
+                (Path(call["workspace"]) / "answer.py").write_text("def answer(): return 42\n", encoding="utf-8")
+            else:
+                self.assertIn('"path":"answer.py"', call["prompt"])
+                self.assertIn('"status":"passed"', call["prompt"])
+                self.assertIn('"quality_requirements":["Test."]', call["prompt"])
+                self.assertNotIn("Stage result.", call["prompt"])
+        host = FakeHost([("implement-thread", response(), dict(USAGE)), ("review-thread", response(), dict(USAGE))], during_run=inspect)
+        result = self.run_supervised(host, unit="short-one")
+        self.assertTrue(result["ok"], result)
+        self.assertEqual([call["sandbox"] for call in host.calls], ["workspace-write", "read-only"])
+        self.assertEqual(len(result["validation"]), 2)
+        self.assertEqual(len(result["contexts"]), 2)
+        self.assertEqual(result["contexts"][1]["mode"], "compact")
+        self.assertEqual(len(result["contexts"][1]["packet_sha256"]), 64)
+        self.assertEqual((self.root / "answer.py").read_text(), "def answer(): return 42\n")
 
     def test_no_host_authority_and_narrow_scope_prevent_dispatch(self):
         unavailable = FakeHost([], available=False)

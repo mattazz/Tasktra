@@ -382,6 +382,20 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument("candidate", help="bounded candidate JSON array")
     benchmark.add_argument("--scenario", action="append", default=[])
 
+    efficiency = subcommands.add_parser("efficiency", help="Inspect actual usage and compare quality-matched trials")
+    efficiency.add_argument("--root", default=".")
+    efficiency_commands = efficiency.add_subparsers(dest="efficiency_command", required=True)
+    efficiency_report = efficiency_commands.add_parser("report", help="Read local execution usage without model calls")
+    efficiency_trials = efficiency_commands.add_parser("compare", help="Compare recorded direct/current/optimized trials")
+    efficiency_trials.add_argument("path", help="bounded trial JSON array")
+    efficiency_trials.add_argument("--baseline", choices=("direct", "current"))
+    efficiency_trials.add_argument("--resolve-local-receipts", action="store_true", help="Resolve trial receipt IDs against the full local execution ledger")
+    context = subcommands.add_parser("context", help="Collect bounded source navigation with content hashes")
+    context.add_argument("--root", default=".")
+    context_commands = context.add_subparsers(dest="context_command", required=True)
+    context_inspect = context_commands.add_parser("inspect", help="Inspect exact files without an agent")
+    context_inspect.add_argument("--path", action="append", required=True)
+
     lesson = subcommands.add_parser("lesson", help="Create and independently review durable lesson proposals")
     lesson.add_argument("--root", default=".")
     lesson_commands = lesson.add_subparsers(dest="lesson_command", required=True)
@@ -451,6 +465,11 @@ def build_parser() -> argparse.ArgumentParser:
     work.add_argument("--root", default="."); work_commands = work.add_subparsers(dest="work_command", required=True)
     work_create = work_commands.add_parser("create"); work_create.add_argument("goal_id"); work_create.add_argument("title"); work_create.add_argument("--id"); work_create.add_argument("--scope", required=True, help="bounded closed JSON scope file"); work_create.add_argument("--checkpoint", help="contract checkpoint identifier")
     work_create.add_argument("--verification-policy", choices=sorted(VERIFICATION_POLICIES), default="implementation-review")
+    policy_plan = work_commands.add_parser("plan-policy", help="Recommend a policy from explicit requirements and current authority")
+    policy_plan.add_argument("goal_id")
+    policy_plan.add_argument("--work-type", required=True, choices=("implementation", "research", "documentation", "deterministic"))
+    policy_plan.add_argument("--exploratory-tests", action="store_true")
+    policy_plan.add_argument("--independent-review", action="store_true")
     assign_checkpoint = work_commands.add_parser("assign-checkpoint", help="Explicitly bind an unleased legacy work unit to a contract checkpoint")
     assign_checkpoint.add_argument("work_unit_id"); assign_checkpoint.add_argument("checkpoint_id"); assign_checkpoint.add_argument("--human-actor", required=True)
     claim = work_commands.add_parser("claim"); claim.add_argument("goal_id"); claim.add_argument("--actor", required=True); claim.add_argument("--envelope-sha256", required=True); claim.add_argument("--lease-seconds", type=int, default=300); claim.add_argument("--token-reservation", type=int, default=0); claim.add_argument("--repository", required=True); claim.add_argument("--revision", required=True); claim.add_argument("--branch", required=True); claim.add_argument("--workspace", required=True); claim.add_argument("--lease-token-env", default="TASKTRA_LEASE_TOKEN")
@@ -488,6 +507,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--envelope-sha256", required=True)
     run.add_argument("--token-reservation", type=int, default=100_000)
     run.add_argument("--timeout", type=int, default=900)
+    run.add_argument("--context-mode", choices=("compact", "legacy"), default="compact")
+    run.add_argument("--worker-context", help="bounded JSON with explicit worker profile and MCP identity selections")
     run.add_argument("--apply", action="store_true", help="Execute the reviewed bounded run; default is preview")
     audit = subcommands.add_parser("audit", help="Verify or export the runtime audit chain")
     audit.add_argument("--root", default=".")
@@ -920,6 +941,7 @@ def _compile(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     projection = compile_catalog(
         catalog, config.enabled_packs or ("core",), codex_model_policy=policy,
         codex_role_overrides=overrides, project_routes=config.routes, project_root=root,
+        projection_roles=config.projection_roles, projection_skills=config.projection_skills,
     )
     desired_manifest = build_generated_manifest(
         projection.files,
@@ -1249,6 +1271,8 @@ def _adopt(args: argparse.Namespace) -> dict[str, Any]:
         codex_model_policy=policy,
         codex_role_overrides=overrides,
         project_routes=config.routes if config is not None else (),
+        projection_roles=config.projection_roles if config is not None else None,
+        projection_skills=config.projection_skills if config is not None else None,
     ).as_dict()
 
 
@@ -1265,6 +1289,7 @@ def _upgrade_preview(args: argparse.Namespace) -> tuple[Path, Any, Any, Path, di
         codex_model_policy=policy,
         codex_role_overrides=overrides,
         project_routes=config.routes,
+        projection_roles=config.projection_roles, projection_skills=config.projection_skills,
     ).as_dict()
     return root, config, catalog, catalog_root, plan
 
@@ -1498,6 +1523,30 @@ def _benchmark(args: argparse.Namespace) -> dict[str, Any]:
         "measurements": [dict(item) for item in report.measurements],
         "estimated_token_savings": None,
     }
+
+
+def _efficiency(args: argparse.Namespace) -> dict[str, Any]:
+    from .efficiency import compare_trials, compare_verified_trials, summarize_executions
+
+    if args.efficiency_command == "compare":
+        value = _bounded_json_value(args.path)
+        if not isinstance(value, list):
+            raise ValueError("efficiency trials must be a JSON array")
+        store = ExecutionStore(_root(args.root))
+        report = (compare_verified_trials(value, receipt_resolver=store.get, execution_records=store.iter_records(), baseline_mode=args.baseline)
+                  if args.resolve_local_receipts else compare_trials(value, baseline_mode=args.baseline))
+        if args.resolve_local_receipts:
+            report["source"] = {"kind": "local-execution-ledger", "resolution": "read-only-local-records",
+                                "authentication": "local-host-and-rollout-provenance; not a cryptographic attestation"}
+        return {"ok": True, "action": "efficiency-compare", "report": report}
+    report = summarize_executions(ExecutionStore(_root(args.root)).iter_records())
+    return {"ok": True, "action": "efficiency-report", "report": report}
+
+
+def _context(args: argparse.Namespace) -> dict[str, Any]:
+    from .context import ContextCache
+
+    return {"ok": True, "action": "context-inspect", "evidence": ContextCache().inspect(_root(args.root), args.path)}
 
 
 def _lesson(args: argparse.Namespace) -> dict[str, Any]:
@@ -1795,9 +1844,27 @@ def _approval(args: argparse.Namespace) -> dict[str, Any]:
 
 def _work(args: argparse.Namespace) -> dict[str, Any]:
     root = _root(args.root); store = _autonomy(root)
+    if args.work_command == "plan-policy":
+        from .workflow_planning import plan_verification_policy
+
+        contract = store.get_goal_contract(args.goal_id)
+        if contract is None:
+            raise ValueError("policy planning requires a current goal contract")
+        actions = contract["contract"]["allowed_actions"]
+        allowed = {"implementation-review"} | {policy for policy in VERIFICATION_POLICIES if "verify-" + policy in actions}
+        config = load_project_config(root)
+        plan = plan_verification_policy(work_type=args.work_type,
+            deterministic_acceptance_available=bool(config.validation_commands),
+            independent_review_required=args.independent_review, exploratory_tests_required=args.exploratory_tests,
+            allowed_policies=allowed)
+        return {"ok": True, "action": "work-policy-plan", "mutation": "none", "plan": plan,
+                "envelope_sha256": contract["envelope_sha256"], "authority": "recommendation-only"}
     if args.work_command == "create":
         scope = _runtime_json(args.scope) if args.scope else {}
-        return {"ok": True, "work_unit": store.create_work_unit(goal_id=args.goal_id, title=args.title, work_unit_id=args.id, scope=scope, checkpoint_id=args.checkpoint, verification_policy=args.verification_policy)}
+        checks = ([list(command) for command in load_project_config(root).validation_commands]
+                  if args.verification_policy == "implementation-deterministic-review" else None)
+        return {"ok": True, "work_unit": store.create_work_unit(goal_id=args.goal_id, title=args.title, work_unit_id=args.id,
+            scope=scope, checkpoint_id=args.checkpoint, verification_policy=args.verification_policy, acceptance_checks=checks)}
     if args.work_command == "assign-checkpoint":
         return {"ok": True, "work_unit": store.assign_work_unit_checkpoint(args.work_unit_id, args.checkpoint_id, actor_id=args.human_actor, actor_kind="human")}
     if args.work_command == "claim":
@@ -1849,12 +1916,16 @@ def _effect(args: argparse.Namespace) -> dict[str, Any]:
 
 def _run(args: argparse.Namespace) -> dict[str, Any]:
     from .supervisor import run_work
+    from .host import CodexHostAdapter
+    from .worker_profiles import WorkerContext
 
     root = _root(args.root)
+    context = WorkerContext.from_mapping(_bounded_json_value(args.worker_context)) if args.worker_context else None
     return run_work(
         root, goal_id=args.goal_id, work_unit_id=args.work_unit_id, performer_id=args.actor,
         envelope_sha256=args.envelope_sha256, token_reservation=args.token_reservation,
-        timeout_seconds=args.timeout, apply=args.apply,
+        timeout_seconds=args.timeout, apply=args.apply, context_mode=args.context_mode,
+        host=CodexHostAdapter(worker_context=context),
         profile_for_role=lambda role: _execution_profile(root, role),
     )
 
@@ -1932,6 +2003,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "benchmark":
             output = _benchmark(args)
             code = 0 if output["ok"] else 1
+        elif args.command == "efficiency":
+            output, code = _efficiency(args), 0
+        elif args.command == "context":
+            output, code = _context(args), 0
         elif args.command == "lesson":
             output, code = _lesson(args), 0
         elif args.command == "goal":

@@ -180,6 +180,7 @@ Tasktra will turn such intent into explicit scope, acceptance criteria, authorit
 - [Roadmap and stage acceptance](docs/ROADMAP.md)
 - [Requirements coverage matrix](docs/REQUIREMENTS.md)
 - [Operations guide](docs/OPERATIONS.md)
+- [Token efficiency and controlled comparisons](docs/TOKEN_EFFICIENCY.md)
 - [Platform notes](docs/PLATFORM_NOTES.md)
 - [Release policy](docs/RELEASE_POLICY.md)
 - [Self-hosting evidence](docs/SELF_HOSTING.md)

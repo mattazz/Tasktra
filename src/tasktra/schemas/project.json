@@ -43,9 +43,17 @@
           "type": "object", "additionalProperties": false,
           "properties": {
             "model_tiers": {"type": "object", "additionalProperties": {"type": "string", "minLength": 1}},
-            "roles": {"type": "object", "additionalProperties": {"type": "object", "additionalProperties": false, "properties": {"model": {"type": "string", "minLength": 1}, "reasoning_effort": {"type": "string", "minLength": 1}}, "minProperties": 1}}
+            "roles": {"type": "object", "additionalProperties": {"type": "object", "additionalProperties": false, "properties": {"model": {"type": "string", "minLength": 1}, "reasoning_effort": {"type": "string", "minLength": 1}}, "minProperties": 1}},
+            "effort_profile": {"enum": ["existing", "efficient"]}
           }
         }
+      }
+    },
+    "projection": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "roles": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+        "skills": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true}
       }
     },
     "routing": {

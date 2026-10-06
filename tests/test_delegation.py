@@ -5,7 +5,7 @@ from pathlib import Path, PurePosixPath
 
 from tasktra.compiler import CatalogError, compile_catalog, load_catalog
 from tasktra.config import ConfigError, ProjectConfig, load_project_config
-from tasktra.delegation import DelegationError, delegation_plan, projection_overrides
+from tasktra.delegation import DelegationError, agent_profile, delegation_plan, projection_overrides
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -66,3 +66,33 @@ class DelegationTests(unittest.TestCase):
         self.assertEqual(plan["availability"], "host-unverified")
         self.assertEqual(plan["dispatch"], "codex-host-required")
         self.assertEqual(plan["agent"]["agent_type"], "scout")
+
+    def test_efficient_profile_matches_projection_and_explicit_override_wins(self):
+        catalog = load_catalog(ROOT / "catalog")
+        config = ProjectConfig(
+            name="test",
+            codex_effort_profile="efficient",
+            codex_role_overrides={"scout": {"reasoning_effort": "high"}},
+        )
+        policy, overrides = projection_overrides(catalog, config)
+        projection = compile_catalog(catalog, codex_model_policy=policy, codex_role_overrides=overrides)
+        scout = projection.files[PurePosixPath(".codex/agents/scout.toml")]
+        implementer = projection.files[PurePosixPath(".codex/agents/implementer.toml")]
+        self.assertIn('model_reasoning_effort = "high"', scout)
+        self.assertIn('model_reasoning_effort = "medium"', implementer)
+        self.assertEqual(agent_profile(catalog, config, "scout").reasoning_effort, "high")
+        self.assertEqual(agent_profile(catalog, config, "implementer").reasoning_effort, "medium")
+
+    def test_runtime_delegation_enforces_the_same_projection_selection(self):
+        catalog = load_catalog(ROOT / "catalog")
+        config = ProjectConfig(
+            name="test",
+            projection_roles=("scout",),
+            projection_skills=("tasktra-goal", "tasktra-run", "tasktra-stop"),
+        )
+        self.assertEqual(agent_profile(catalog, config, "scout").role, "scout")
+        with self.assertRaisesRegex(DelegationError, "not projected"):
+            agent_profile(catalog, config, "implementer")
+        invalid = ProjectConfig(name="test", projection_skills=("unknown-skill",))
+        with self.assertRaisesRegex(DelegationError, "requires enabled pack item"):
+            projection_overrides(catalog, invalid)
