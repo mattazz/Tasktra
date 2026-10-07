@@ -7,6 +7,7 @@ import sqlite3
 from tempfile import TemporaryDirectory
 from threading import Thread
 import unittest
+from unittest.mock import patch
 
 from tasktra.execution import ExecutionStore
 from tasktra.portal import _analytics, make_portal_server, portal_snapshot
@@ -444,6 +445,23 @@ class PortalHttpTests(unittest.TestCase):
         self.assertEqual(self.request("GET", "/api/snapshot?anything=1")[0], 404)
         self.assertEqual(self.request("GET", "/../state.sqlite")[0], 404)
         self.assertEqual(self.request("GET", "/not-a-route")[0], 404)
+
+    def test_agent_activity_route_is_bounded_local_and_read_only(self) -> None:
+        result = {"schema_version": 1, "work_id": "agent-one", "available": True, "events": []}
+        with patch("tasktra.portal.agent_activity", return_value=result) as activity:
+            status, headers, payload = self.request("GET", "/api/agent-activity?work_id=agent-one")
+            self.assertEqual((status, json.loads(payload)), (200, result))
+            self.assertEqual(headers["Cache-Control"], "no-store")
+            activity.assert_called_once_with(self.root.resolve(), "agent-one")
+            self.assertEqual(self.request("HEAD", "/api/agent-activity?work_id=agent-one")[2], b"")
+            activity.reset_mock()
+            for path in ("/api/agent-activity", "/api/agent-activity?work_id=", "/api/agent-activity?work_id=a&work_id=b", "/api/agent-activity?work_id=a&path=secret.jsonl", "/api/agent-activity?work_id=" + "x" * 129):
+                self.assertEqual(self.request("GET", path)[0], 404)
+            self.assertEqual(self.request("GET", "/api/agent-activity?work_id=agent-one", Host="evil.example")[0], 400)
+            self.assertEqual(self.request("GET", "/api/agent-activity?work_id=agent-one", Origin="http://evil.example")[0], 403)
+            self.assertEqual(self.request("POST", "/api/agent-activity?work_id=agent-one")[0], 405)
+            activity.assert_not_called()
+        self.assertFalse((self.root / ".tasktra/runtime").exists())
 
     def test_invalid_port_is_rejected_before_binding(self) -> None:
         with self.assertRaises(ValueError):

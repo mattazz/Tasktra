@@ -26,7 +26,8 @@ loopback and is intended for use on your own computer.
 - **Agents** shows execution records and workers associated with work leases.
   Filter by role, observed model, state, or search text, then sort by recent
   observation or tokens. Select an agent for routing, goal, timing, token
-  breakdown, and provenance details.
+  breakdown, and provenance details. The selected-agent panel also follows
+  reported progress and tool activity from an exactly linked local Codex rollout.
 - **Token usage** compares measured totals, averages, medians, cache utilization,
   uncached input, and recorded outcomes by model. Model, role, and time filters
   narrow the comparison. The hourly chart includes an expandable values table.
@@ -82,6 +83,34 @@ conflicting attribution. This command writes the optional execution ledger; view
 the portal never performs the repair automatically. Future descendants can resolve
 the relationship through their recorded parent.
 
+## Selected-agent activity
+
+Select an agent to open its activity panel. It combines project, recorded job and
+goal links, routing, heartbeat, recorded token usage, and a timestamped output
+feed. The feed refreshes while the panel is open and live updates are enabled.
+Pause updates or turn off follow-output to inspect earlier entries without losing
+your place. A missing job link is shown explicitly; the portal does not infer a
+job from message content.
+
+The feed shows public assistant progress messages, final output, and tool names
+with observed start/finish events. It never returns private analysis or reasoning,
+user/system/developer messages, tool arguments, or raw tool output. Text is rendered
+as text, not executable HTML. Reported progress is not a continuous view into the
+model's internal state, and silence does not establish that an agent is idle.
+
+Activity requires an existing Codex execution receipt with a registered thread,
+turn, and rollout path fingerprint. The server searches only the host's Codex
+sessions directory (`CODEX_HOME/sessions`, or `~/.codex/sessions`), then checks the
+exact path fingerprint, session identity, project directory, and turn before
+exposing events. HTTP callers can select a work ID; they cannot supply a file path
+or sessions directory. Unlinked records keep their normal details and explain
+why live activity is unavailable. No import or database write occurs while viewing.
+
+Reads and retained events are bounded. Truncated, growing, or unavailable logs are
+labeled; file modification time is never presented as agent activity. Live token
+observations, when the parser can verify them for the selected turn, are separate
+from the last imported ledger totals and are never added to them.
+
 ## Reading usage statistics
 
 Planned work is excluded from measured run statistics. Unknown usage remains
@@ -111,8 +140,8 @@ project's runtime separately with `python -m tasktra bootstrap --root <project>`
 For an older runtime schema, stop the portal and use Tasktra's normal bootstrap
 and diagnostic workflow before restarting.
 
-The server serves only bundled portal assets and a read-only `/api/snapshot`
-endpoint. It rejects foreign Host and Origin headers and exposes selected progress
+The server serves only bundled portal assets and read-only `/api/snapshot`
+and `/api/agent-activity?work_id=<recorded-work-id>` endpoints. It rejects foreign Host and Origin headers and exposes selected progress
 fields rather than raw audit payloads, lease tokens, authority contracts, or
 arbitrary project files. Project titles and descriptions are visible to the local
 browser; use the portal on a trusted local session. This is not a remotely hosted

@@ -344,6 +344,28 @@
             </div>
             <p>Recorded agents and their last known state.</p>
           </div>
+          <section class="panel agent-activity-panel" id="agent-activity-panel" aria-labelledby="agent-activity-title" tabindex="-1" hidden>
+            <div class="detail-heading">
+              <div>
+                <p class="eyebrow" id="agent-activity-kicker">Live activity</p>
+                <h3 id="agent-activity-title" tabindex="-1">Selected agent</h3>
+              </div>
+              <button class="icon-button" id="close-agent-activity" type="button" aria-label="Close selected agent activity">×</button>
+            </div>
+            <p id="agent-activity-context" class="agent-activity-context"></p>
+            <div class="agent-activity-summary" id="agent-activity-summary"></div>
+            <details class="technical-details" id="agent-activity-details">
+              <summary>Recorded agent details</summary>
+              <div class="detail-grid" id="agent-activity-details-content"></div>
+            </details>
+            <div class="agent-activity-controls">
+              <button class="text-button" id="agent-activity-follow" type="button" aria-pressed="true">Follow output: on</button>
+              <button class="text-button" id="agent-activity-goal" type="button" hidden>View goal</button>
+              <button class="text-button" id="agent-activity-job" type="button" hidden>View job</button>
+            </div>
+            <p id="agent-activity-status" class="efficiency-note" role="status" aria-live="polite"></p>
+            <ol class="agent-activity-feed" id="agent-activity-feed" aria-label="Reported progress and tool activity"></ol>
+          </section>
           <div class="toolbar" aria-label="Filter agents">
             <label class="search"><span class="sr-only">Search agents by role, name, or task</span><input id="agent-search" type="search" placeholder="Search role, name, or task" /></label>
             <label class="select-label">Role <select id="agent-role-filter"><option value="">All roles</option></select></label>

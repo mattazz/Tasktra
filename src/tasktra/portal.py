@@ -22,6 +22,7 @@ from .execution import ExecutionError, ExecutionStore
 from .efficiency import summarize_executions
 from .codex_usage import USAGE_FIELDS
 from .state import SCHEMA_VERSION
+from .portal_activity import agent_activity
 
 
 _MAX_GOALS = 200
@@ -290,7 +291,7 @@ def _lease_agents(project_root: Path, runtime: sqlite3.Connection, now: datetime
                 running += not stale
                 if len(items) < limit:
                     items.append({
-                        "id": row["owner_id"] or row["lease_holder"], "work_id": work_id,
+                        "id": row["owner_id"] or row["lease_holder"], "work_id": work_id, "job_id": work_id,
                         "goal_id": str(row["goal_id"]), "role": "worker", "state": "leased",
                         "model": None, "effort": None, "provenance": "work-lease", "total_tokens": None,
                         "heartbeat_at": row["heartbeat_at"], "lease_expires_at": expiry, "lease_stale": stale,
@@ -335,6 +336,7 @@ def _add_execution_agents(snapshot: dict[str, Any], execution_rows: list[sqlite3
         snapshot["agents"].append({
             "id": verified_agent or (row["agent_id"] if host_observation else None) or work_id, "work_id": work_id,
             "parent_work_id": None if parent_work_id == work_id else parent_work_id,
+            "job_id": parent_work_id if job is not None else None,
             "goal_id": job["goal_id"] if job is not None else row["goal_id"], "role": str(row["role"]), "state": state,
             "model": (verified_model if verified_model is not None else row["observed_model"] if host_observation else None) if observed else None,
             "effort": (verified_effort if verified_effort is not None else row["observed_effort"] if host_observation else None) if observed else None,
@@ -835,6 +837,22 @@ def make_portal_server(root: Path, *, port: int = 8765) -> ThreadingHTTPServer:
                     return
                 try:
                     body = json.dumps(portal_snapshot(project_root, **{key: values[0] for key, values in query.items()}), separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+                except ValueError:
+                    self._reject(HTTPStatus.NOT_FOUND)
+                    return
+                self.send_response(HTTPStatus.OK)
+                self._headers("application/json; charset=utf-8", api=True, length=len(body))
+                self.end_headers()
+                if self.command != "HEAD":
+                    self.wfile.write(body)
+                return
+            if parsed.path == "/api/agent-activity":
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                if set(query) != {"work_id"} or len(query["work_id"]) != 1 or not query["work_id"][0] or len(query["work_id"][0]) > 128:
+                    self._reject(HTTPStatus.NOT_FOUND)
+                    return
+                try:
+                    body = json.dumps(agent_activity(project_root, query["work_id"][0]), separators=(",", ":"), ensure_ascii=False).encode("utf-8")
                 except ValueError:
                     self._reject(HTTPStatus.NOT_FOUND)
                     return

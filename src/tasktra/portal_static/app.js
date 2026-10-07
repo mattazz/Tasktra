@@ -10,6 +10,7 @@
     motion: true,
     selectedGoalId: null,
     selected: null,
+    activity: { workId: null, agent: null, data: null, controller: null, timer: null, sequence: 0, follow: true, feedSignature: null, error: "" },
     analytics: { model: "", role: "", since: "" },
     agentFilters: { query: "", role: "", model: "", state: "", sort: "recent" },
     requestSequence: 0,
@@ -426,7 +427,7 @@
           textLine(
             "span",
             "",
-            `${titleCase(event.event_type || "recorded event")} · ${related}`,
+            `${titleCase(event.event_type || "recorded event")} \u00b7 ${related}`,
           ),
           textLine("time", "", localTime(event.created_at)),
         );
@@ -527,7 +528,7 @@
     }
   }
 
-  function switchView(view) {
+  function baseSwitchView(view) {
     state.activeView = view;
     ["overview", "goals", "jobs", "agents", "efficiency"].forEach((name) => {
       const tab = $(`tab-${name}`);
@@ -572,6 +573,7 @@
     state.demo = false;
     state.selectedGoalId = null;
     state.selected = null;
+    closeAgentActivity({ clear: true });
     $("detail-panel").hidden = true;
     state.snapshot = state.liveSnapshot || emptySnapshot();
     render(state.snapshot);
@@ -851,6 +853,7 @@
     state.demo = true;
     state.selectedGoalId = null;
     state.selected = null;
+    closeAgentActivity({ clear: true });
     $("detail-panel").hidden = true;
     window.clearTimeout(state.timer);
     if (state.controller) state.controller.abort();
@@ -876,7 +879,7 @@
       const record = current().agents.find(
         (agent) => agentKey(agent) === action.agentWorkId,
       );
-      if (record) showDetail("agent", record);
+      if (record) openAgentActivity(record);
       return;
     }
     const view =
@@ -968,7 +971,7 @@
     if (beat.kind === "none") return "No linked lease";
     const observed = beat.observed_at || record.heartbeat_at;
     if (!observed) return "No lease heartbeat recorded";
-    return beat.stale || record.lease_stale ? `Lease stale · observed ${relativeTime(observed)}` : `Lease observed ${relativeTime(observed)}`;
+    return beat.stale || record.lease_stale ? `Lease stale \u00b7 observed ${relativeTime(observed)}` : `Lease observed ${relativeTime(observed)}`;
   }
   function observedActivityLabel(record) {
     const observed = record.last_observed_at || record.finished_at || record.started_at;
@@ -1004,7 +1007,7 @@
       select.replaceChildren(el("option", "", "All recorded goals"));
       select.options[0].value = "";
       (snapshot.goal_options?.length ? snapshot.goal_options : snapshot.goals || []).forEach((goal) => {
-        const option = el("option", "", `${goal.title || goal.id} · ${titleCase(goal.status || "recorded")}`);
+        const option = el("option", "", `${goal.title || goal.id} \u00b7 ${titleCase(goal.status || "recorded")}`);
         option.value = goal.id;
         select.append(option);
       });
@@ -1058,13 +1061,13 @@
     setSelectOptions("agent-role-filter", all.map((agent) => agent.role), titleCase);
     setSelectOptions("agent-model-filter", all.map((agent) => agent.observed_model || agent.model), (value) => value);
     setSelectOptions("agent-state-filter", all.map((agent) => agent.state), titleCase);
-    $("agents-active-count").textContent = `${number(agents.length)} matching agent${agents.length === 1 ? "" : "s"} · ${number(agents.filter(agentIsActive).length)} currently recorded as active`;
+    $("agents-active-count").textContent = `${number(agents.length)} matching agent${agents.length === 1 ? "" : "s"} \u00b7 ${number(agents.filter(agentIsActive).length)} currently recorded as active`;
     const target = $("agents-grid"); if (isFocusedIn(target)) return;
     if (!agents.length) { target.replaceChildren(textLine("p", "record-subtitle", state.selectedGoalId ? "No agents match this goal and the selected filters." : "No agents match these filters.")); return; }
     target.replaceChildren(...agents.map((agent) => {
       const card = el("article", `agent-card ${agentIsActive(agent) ? "agent-active" : ""}`), top = el("div", "agent-card-top"), detail = el("button", "record-button"), foot = el("div", "agent-foot");
       top.append(agentAvatar(agent), status(agent.state)); detail.type = "button"; detail.dataset.action = "select-agent"; detail.dataset.agentWorkId = agentKey(agent);
-      detail.append(textLine("div", "agent-role", agent.role || agent.id), textLine("div", "agent-meta", [agent.observed_model || agent.model, agent.observed_effort || agent.effort].filter(Boolean).join(" · ") || "Model unavailable"));
+      detail.append(textLine("div", "agent-role", agent.role || agent.id), textLine("div", "agent-meta", [agent.observed_model || agent.model, agent.observed_effort || agent.effort].filter(Boolean).join(" \u00b7 ") || "Model unavailable"));
       foot.append(textLine("span", "agent-meta", observedActivityLabel(agent)), textLine("span", "agent-meta", Number.isFinite(agent.total_tokens) ? `${number(agent.total_tokens)} tokens` : "Usage unavailable")); card.append(top, detail, foot); return card;
     }));
   }
@@ -1100,17 +1103,17 @@
   }
   function renderEfficiency(snapshot) {
     const report = usageReport(snapshot), totals = report.summary || {}, coverage = report.coverage || {}, measured = totals.measured_records || 0;
-    $("efficiency-scope-description").textContent = `${state.selectedGoalId ? scopedTitle(snapshot) : "All recorded executions across this project"}${state.analytics.since ? " � Only measured token events within the selected time range" : ""}.`;
+    $("efficiency-scope-description").textContent = `${state.selectedGoalId ? scopedTitle(snapshot) : "All recorded executions across this project"}${state.analytics.since ? " \u00b7 Only measured token events within the selected time range" : ""}.`;
     setSelectOptions("usage-model-filter", report.options?.models || (report.by_model || []).map((item) => item.model), (value) => value);
     setSelectOptions("usage-role-filter", report.options?.roles || (snapshot.agents || []).map((agent) => agent.role), titleCase);
     $("usage-model-filter").value = state.analytics.model;
     $("usage-role-filter").value = state.analytics.role;
     $("usage-since-filter").value = state.analytics.since;
-    $("efficiency-coverage").textContent = measured ? `${number(measured)} measured run${measured === 1 ? "" : "s"} of ${number(totals.records ?? measured)} recorded · ${number(totals.unknown_records || 0)} usage record(s) unknown.` : state.selectedGoalId ? "No recorded usage for this goal. Counts are scoped; no global usage is shown." : "No measured usage yet. Planned work does not count as a completed execution.";
+    $("efficiency-coverage").textContent = measured ? `${number(measured)} measured run${measured === 1 ? "" : "s"} of ${number(totals.records ?? measured)} recorded \u00b7 ${number(totals.unknown_records || 0)} usage record(s) unknown.` : state.selectedGoalId ? "No recorded usage for this goal. Counts are scoped; no global usage is shown." : "No measured usage yet. Planned work does not count as a completed execution.";
     const metrics = $("efficiency-metrics"); metrics.replaceChildren();
     [["Recorded tokens", totals.total_tokens], ["Average measured run", Number.isFinite(totals.average_measured_tokens) ? Math.round(totals.average_measured_tokens) : null], ["Median measured run", totals.median_measured_tokens], ["Cache utilization", Number.isFinite(totals.cache_utilization_percent) ? pct(totals.cache_utilization_percent) : null], ["Uncached input", totals.uncached_input_tokens], ["Success rate", Number.isFinite(totals.success_rate_percent) ? pct(totals.success_rate_percent) : null]].forEach(([label, value]) => { const card = el("article", "panel efficiency-metric"); card.append(el("p", "eyebrow", label), el("strong", "efficiency-value", typeof value === "string" ? value : number(value))); metrics.append(card); });
     const input = totals.input_tokens, output = totals.output_tokens, mix = $("efficiency-mix"); mix.replaceChildren(); if (Number.isFinite(input) && Number.isFinite(output) && input + output) { const a = el("span", "efficiency-input"), b = el("span", "efficiency-output"); a.style.width = `${100 * input / (input + output)}%`; b.style.width = `${100 * output / (input + output)}%`; mix.append(a, b); }
-    const label = `${number(input)} input · ${number(output)} output · ${number(totals.cached_input_tokens)} cached input`; mix.setAttribute("aria-label", label); $("efficiency-mix-label").textContent = label;
+    const label = `${number(input)} input \u00b7 ${number(output)} output \u00b7 ${number(totals.cached_input_tokens)} cached input`; mix.setAttribute("aria-label", label); $("efficiency-mix-label").textContent = label;
     const body = $("efficiency-roles"); body.replaceChildren(); (report.by_model || []).forEach((group) => { const row = el("tr"), share = Number.isFinite(group.total_tokens) && Number.isFinite(totals.total_tokens) && totals.total_tokens ? pct(100 * group.total_tokens / totals.total_tokens) : "—"; row.append(el("td", "", group.model || "Unknown model"), el("td", "", `${number(group.measured_records)} / ${number(group.records)}`), el("td", "", `${number(group.total_tokens)} / ${share}`), el("td", "", `${number(group.average_measured_tokens)} / ${number(group.median_measured_tokens)}`), el("td", "", pct(group.cache_utilization_percent)), el("td", "", number(group.uncached_input_tokens)), el("td", "", `${number(group.successful_records)} / ${number(group.failed_records)} / ${number(group.cancelled_records)} of ${number((group.successful_records || 0) + (group.failed_records || 0) + (group.cancelled_records || 0))} finished`)); body.append(row); });
     if (!body.children.length) { const cell = el("td", "efficiency-note", "No measured model comparison available for this scope."); cell.colSpan = 7; const row = el("tr"); row.append(cell); body.append(row); }
     renderTimeline(report.time_series || [], coverage);
@@ -1122,7 +1125,7 @@
     const grid = el("div", "detail-grid");
     if (type === "agent") {
       const total = record.total_tokens, input = record.input_tokens, cached = record.cached_input_tokens, output = record.output_tokens;
-      grid.append(detailItem("State / outcome", [titleCase(record.state), record.outcome ? titleCase(record.outcome) : null].filter(Boolean).join(" · ")), detailItem("Job", record.job_title || "No linked job recorded"), detailItem("Goal lineage", record.goal_title || [...(current().goal_options || []), ...current().goals].find((goal) => goal.id === record.goal_id)?.title || record.goal_id || "Unassigned"), detailItem("Observed model / effort", [record.observed_model || record.model || "Unavailable", record.observed_effort || record.effort || "Unavailable"].join(" · ")), detailItem("Configured model / effort", [record.configured_model || "Unavailable", record.configured_effort || "Unavailable"].join(" · ")), detailItem("Token total", number(total)), detailItem("Input / uncached input", `${number(input)} / ${number(record.uncached_input_tokens)}`), detailItem("Cached input / utilization", `${number(cached)} / ${Number.isFinite(cached) && Number.isFinite(input) && input ? pct(100 * cached / input) : "—"}`), detailItem("Output", number(output)), detailItem("First usage observed", localTime(record.started_at)), detailItem("Last observed", localTime(record.last_observed_at)), detailItem("Lease heartbeat", leaseHeartbeatLabel(record)), detailItem("Usage evidence", record.unknown_reason === "rollout-image-line-over-limit" ? "Unavailable: an image entry exceeded the safe import limit" : record.unknown_reason || (Number.isFinite(total) ? "Measured usage available" : "No measured usage recorded")));
+      grid.append(detailItem("State / outcome", [titleCase(record.state), record.outcome ? titleCase(record.outcome) : null].filter(Boolean).join(" \u00b7 ")), detailItem("Job", record.job_title || "No linked job recorded"), detailItem("Goal lineage", record.goal_title || [...(current().goal_options || []), ...current().goals].find((goal) => goal.id === record.goal_id)?.title || record.goal_id || "Unassigned"), detailItem("Observed model / effort", [record.observed_model || record.model || "Unavailable", record.observed_effort || record.effort || "Unavailable"].join(" \u00b7 ")), detailItem("Configured model / effort", [record.configured_model || "Unavailable", record.configured_effort || "Unavailable"].join(" \u00b7 ")), detailItem("Token total", number(total)), detailItem("Input / uncached input", `${number(input)} / ${number(record.uncached_input_tokens)}`), detailItem("Cached input / utilization", `${number(cached)} / ${Number.isFinite(cached) && Number.isFinite(input) && input ? pct(100 * cached / input) : "—"}`), detailItem("Output", number(output)), detailItem("First usage observed", localTime(record.started_at)), detailItem("Last observed", localTime(record.last_observed_at)), detailItem("Lease heartbeat", leaseHeartbeatLabel(record)), detailItem("Usage evidence", record.unknown_reason === "rollout-image-line-over-limit" ? "Unavailable: an image entry exceeded the safe import limit" : record.unknown_reason || (Number.isFinite(total) ? "Measured usage available" : "No measured usage recorded")));
       const technical = el("details", "technical-details"), summary = el("summary", "", "Technical identifiers and provenance"), data = el("div", "detail-grid"); data.append(detailItem("Agent ID", record.id || "Unavailable"), detailItem("Work ID", record.work_id || "Unavailable"), detailItem("Thread ID", record.thread_id || "Unavailable"), detailItem("Turn ID", record.turn_id || "Unavailable"), detailItem("Parent work ID", record.parent_work_id || "Unavailable"), detailItem("Provenance", record.provenance || "Unavailable")); technical.append(summary, data); $("detail-content").replaceChildren(grid, el("p", "detail-note", "Observed activity comes from execution records. A lease heartbeat records Tasktra coordination; it does not establish whether a host process is still running."), technical);
     } else {
     if (type === "goal") {
@@ -1133,7 +1136,7 @@
               (checkpoint) =>
                 `${checkpoint.id || "Checkpoint"}: ${titleCase(checkpoint.status)}`,
             )
-            .join(" · ")
+            .join(" \u00b7 ")
         : "None recorded";
       grid.append(
         detailItem("State", titleCase(record.status)),
@@ -1226,6 +1229,7 @@
     state.selectedGoalId = id || null;
     savePreference("tasktra-goal-scope", state.selectedGoalId);
     state.selected = null;
+    closeAgentActivity({ clear: true });
     $("detail-panel").hidden = true;
     resetLocalFilters();
     if (state.demo) { renderDemoScope(); return; }
@@ -1291,11 +1295,11 @@
   }
   function render(snapshot) {
     const project = snapshot.project?.name || "This project", runtime = snapshot.runtime || {}, summary = snapshot.summary || {};
-    $("page-title").textContent = project; $("project-summary").textContent = `${number(summary.goals ?? snapshot.goals.length)} recorded goal${(summary.goals ?? snapshot.goals.length) === 1 ? "" : "s"} · ${number(summary.jobs ?? snapshot.jobs.length)} recorded job${(summary.jobs ?? snapshot.jobs.length) === 1 ? "" : "s"}.`;
-    $("last-updated").textContent = snapshot.generated_at ? `Last updated ${localTime(snapshot.generated_at)}` : "No snapshot timestamp available"; $("mode-label").textContent = state.demo ? "Representative demo · client only" : state.selectedGoalId ? `Goal scope · ${scopedTitle(snapshot)}` : "Live workspace"; $("footer-state").textContent = state.demo ? "Demo data remains in this browser only" : runtime.available ? "Reading local project state" : "Runtime state unavailable";
-    $("goal-tab-count").textContent = number(summary.goals ?? snapshot.goals.length); $("job-tab-count").textContent = number(summary.jobs ?? snapshot.jobs.length); $("agent-tab-count").textContent = number(summary.agents ?? snapshot.agents.length); syncGoalScope(snapshot); renderMetrics(snapshot); renderOverviewGoals(snapshot); renderOverviewAgents(snapshot); renderActivity(snapshot); renderGoals(snapshot); updateJobFilterOptions(snapshot); renderJobs(snapshot); renderAgents(snapshot); renderEfficiency(snapshot); refreshDetail(snapshot);
+    $("page-title").textContent = project; $("project-summary").textContent = `${number(summary.goals ?? snapshot.goals.length)} recorded goal${(summary.goals ?? snapshot.goals.length) === 1 ? "" : "s"} \u00b7 ${number(summary.jobs ?? snapshot.jobs.length)} recorded job${(summary.jobs ?? snapshot.jobs.length) === 1 ? "" : "s"}.`;
+    $("last-updated").textContent = snapshot.generated_at ? `Last updated ${localTime(snapshot.generated_at)}` : "No snapshot timestamp available"; $("mode-label").textContent = state.demo ? "Representative demo \u00b7 client only" : state.selectedGoalId ? `Goal scope \u00b7 ${scopedTitle(snapshot)}` : "Live workspace"; $("footer-state").textContent = state.demo ? "Demo data remains in this browser only" : runtime.available ? "Reading local project state" : "Runtime state unavailable";
+    $("goal-tab-count").textContent = number(summary.goals ?? snapshot.goals.length); $("job-tab-count").textContent = number(summary.jobs ?? snapshot.jobs.length); $("agent-tab-count").textContent = number(summary.agents ?? snapshot.agents.length); syncGoalScope(snapshot); renderMetrics(snapshot); renderOverviewGoals(snapshot); renderOverviewAgents(snapshot); renderActivity(snapshot); renderGoals(snapshot); updateJobFilterOptions(snapshot); renderJobs(snapshot); renderAgents(snapshot); syncActivityAgent(snapshot); renderEfficiency(snapshot); refreshDetail(snapshot);
     const empty = hasNoTrackedWork(snapshot) && !state.demo && !state.selectedGoalId; $("empty-state").hidden = !empty; document.querySelectorAll(".metrics,.view-tabs").forEach((node) => { node.hidden = empty; }); document.querySelector(".dashboard-grid").hidden = empty || state.activeView !== "overview"; ["overview", "goals", "jobs", "agents", "efficiency"].forEach((name) => { $(`view-${name}`).hidden = empty || name !== state.activeView; });
-    const notices = [...snapshot.warnings.map(String)]; if (!state.demo && runtime.emergency_stopped) notices.unshift(runtime.message || "Tasktra execution is emergency-stopped. Recorded state remains available."); else if (!state.demo && runtime.available === false) notices.unshift(runtime.message || "The Tasktra runtime is unavailable. The portal will retry."); else if (state.demo) notices.unshift("Representative sample data is visible only in this browser. Exit demo to return to your local project."); if (!state.live) notices.unshift("Live updates are paused. Use Refresh to request the newest local snapshot."); if (!state.lastError) setNotice(notices.join(" · "), notices.length ? "warning" : "");
+    const notices = [...snapshot.warnings.map(String)]; if (!state.demo && runtime.emergency_stopped) notices.unshift(runtime.message || "Tasktra execution is emergency-stopped. Recorded state remains available."); else if (!state.demo && runtime.available === false) notices.unshift(runtime.message || "The Tasktra runtime is unavailable. The portal will retry."); else if (state.demo) notices.unshift("Representative sample data is visible only in this browser. Exit demo to return to your local project."); if (!state.live) notices.unshift("Live updates are paused. Use Refresh to request the newest local snapshot."); if (!state.lastError) setNotice(notices.join(" \u00b7 "), notices.length ? "warning" : "");
   }
   function bindInsights() {
     $("goal-scope-select").addEventListener("change", (event) => changeGoalScope(event.target.value));
@@ -1304,9 +1308,107 @@
     [["usage-model-filter", "model"], ["usage-role-filter", "role"], ["usage-since-filter", "since"]].forEach(([id, key]) => $(id).addEventListener("change", (event) => { state.analytics[key] = event.target.value; state.selected = null; $("detail-panel").hidden = true; if (state.demo) render(current()); else fetchSnapshot({ force: true, replace: true }); }));
     $("clear-usage-filters").addEventListener("click", () => { state.analytics = { model: "", role: "", since: "" }; $("usage-model-filter").value = ""; $("usage-role-filter").value = ""; $("usage-since-filter").value = ""; if (state.demo) render(current()); else fetchSnapshot({ force: true, replace: true }); });
   }
-  function init() {
+  function baseInit() {
     state.live = loadPreference("tasktra-live", true); state.motion = loadPreference("tasktra-motion", !window.matchMedia("(prefers-reduced-motion: reduce)").matches); state.selectedGoalId = loadPreference("tasktra-goal-scope", null); document.body.classList.toggle("motion-off", !state.motion); $("motion-toggle").setAttribute("aria-pressed", String(state.motion)); $("live-toggle").setAttribute("aria-pressed", String(state.live)); $("live-toggle").textContent = `Live: ${state.live ? "on" : "paused"}`; bind(); bindInsights(); render(emptySnapshot()); setConnection("", "Connecting"); if (state.live) fetchSnapshot(); else { setConnection("offline", "Updates paused"); setNotice("Live updates are paused. Use Refresh to request the newest local snapshot.", "warning"); }
   }
+
+
+  function syncActivityAgent(snapshot) {
+    if (!state.activity.workId) return;
+    const updated = (snapshot.agents || []).find((agent) => agent.work_id === state.activity.workId);
+    if (!updated) { closeAgentActivity({ clear: true }); return; }
+    state.activity.agent = updated;
+    if (!$("agent-activity-panel").hidden) renderAgentActivity();
+  }
+  function switchView(view) {
+    if (view !== "agents" && state.activity.workId) closeAgentActivity({ clear: true });
+    baseSwitchView(view);
+  }
+  function activityGoal(agent) { return agent.goal_title || [...(current().goal_options || []), ...(current().goals || [])].find((goal) => goal.id === agent.goal_id)?.title || agent.goal_id || "Unassigned"; }
+  function activityDemo(agent) {
+    const now = new Date(), ago = (minutes) => new Date(now.getTime() - minutes * 60000).toISOString();
+    return { available: true, source: "verified-rollout", state: agent.state, phase: "working", last_activity_at: ago(1), usage: { observed_at: ago(1), input_tokens: 5600, cached_input_tokens: 2100, output_tokens: 1800, total_tokens: 7400 }, coverage: { partial: true, reason: "Representative sample only" }, events: [{ id: "sample-progress", timestamp: ago(5), kind: "progress", text: "Reviewed the recorded task context." }, { id: "sample-tool", timestamp: ago(3), kind: "tool", tool_name: "workspace search", text: "Checked the selected project files." }, { id: "sample-status", timestamp: ago(1), kind: "status", state: "working", text: "Reported progress is current in this sample." }] };
+  }
+  function clearAgentActivityTimer() { window.clearTimeout(state.activity.timer); state.activity.timer = null; }
+  function closeAgentActivity(options = {}) {
+    clearAgentActivityTimer(); state.activity.sequence += 1;
+    if (state.activity.controller) state.activity.controller.abort();
+    state.activity.controller = null; $("agent-activity-panel").hidden = true;
+    if (options.clear) Object.assign(state.activity, { workId: null, agent: null, data: null, feedSignature: null });
+  }
+  function activityItem(label, value) { const item = el("div", "detail-item"); item.append(el("b", "", label), el("span", "", value)); return item; }
+  function activityUsage(usage) { return usage && Number.isFinite(usage.total_tokens) ? `${number(usage.total_tokens)} total \u00b7 ${number(usage.input_tokens)} input \u00b7 ${number(usage.cached_input_tokens)} cached \u00b7 ${number(usage.output_tokens)} output` : "No reported usage"; }
+  function renderAgentActivityFeed(events) {
+    const feed = $("agent-activity-feed"), signature = JSON.stringify((events || []).map((event) => [event.id, event.timestamp, event.kind, event.text, event.tool_name, event.state]));
+    if (signature === state.activity.feedSignature) return;
+    const nearEnd = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 24, priorTop = feed.scrollTop;
+    state.activity.feedSignature = signature;
+    if (!(events || []).length) { feed.replaceChildren(el("li", "agent-activity-empty", "No reported progress yet.")); return; }
+    feed.replaceChildren(...events.map((event) => {
+      const item = el("li", `agent-activity-event activity-kind-${safeClass(event.kind)}`), parts = [];
+      if (event.kind === "tool" && event.tool_name) parts.push(`Tool: ${event.tool_name}`);
+      if (event.state) parts.push(titleCase(event.state));
+      if (event.text) parts.push(event.text);
+      item.append(el("div", "", parts.join(" \u00b7 ") || "Reported activity"), el("time", "", localTime(event.timestamp))); return item;
+    }));
+    feed.scrollTop = state.activity.follow ? feed.scrollHeight : priorTop;
+  }
+  function renderAgentActivity(focus = false) {
+    const panel = $("agent-activity-panel"), agent = state.activity.agent;
+    if (!agent) { panel.hidden = true; return; }
+    panel.hidden = false; $("agent-activity-title").textContent = agent.role || agent.id || "Selected agent"; $("agent-activity-kicker").textContent = state.demo ? "Sample reported progress" : "Live activity";
+    const data = state.activity.data, job = agent.job_id ? agent.job_title || agent.job_id : "No linked job recorded";
+    $("agent-activity-context").textContent = `${current().project?.name || "This project"} \u00b7 Goal: ${activityGoal(agent)} \u00b7 Job: ${job}`;
+    $("agent-activity-summary").replaceChildren(activityItem("State", titleCase(data?.state || agent.state || "unknown")), activityItem("Last reported phase", titleCase(data?.phase || "unknown")), activityItem("Last observed", localTime(data?.last_activity_at || agent.last_observed_at)), activityItem("Latest reported usage", activityUsage(data?.usage)), activityItem("Last imported total", Number.isFinite(agent.total_tokens) ? `${number(agent.total_tokens)} tokens` : "No imported total"));
+    $("agent-activity-details-content").replaceChildren(
+      activityItem("Observed model / effort", [agent.observed_model || agent.model || "Unavailable", agent.observed_effort || agent.effort || "Unavailable"].join(" \u00b7 ")),
+      activityItem("Requested model / effort", [agent.requested_model || "Unavailable", agent.requested_effort || "Unavailable"].join(" \u00b7 ")),
+      activityItem("Configured model / effort", [agent.configured_model || "Unavailable", agent.configured_effort || "Unavailable"].join(" \u00b7 ")),
+      activityItem("Imported token breakdown", `${number(agent.input_tokens)} input / ${number(agent.cached_input_tokens)} cached / ${number(agent.uncached_input_tokens)} uncached / ${number(agent.output_tokens)} output`),
+      activityItem("Lease heartbeat", leaseHeartbeatLabel(agent)), activityItem("Provenance", agent.provenance || "Unavailable"),
+      activityItem("Agent ID", agent.id || "Unavailable"), activityItem("Work ID", agent.work_id || "Unavailable"),
+      activityItem("Thread ID", agent.thread_id || "Unavailable"), activityItem("Turn ID", agent.turn_id || "Unavailable"),
+      activityItem("Parent work ID", agent.parent_work_id || "Unavailable"));
+    const goal = $("agent-activity-goal"), jobButton = $("agent-activity-job"); goal.hidden = !agent.goal_id; jobButton.hidden = !agent.job_id;
+    $("agent-activity-follow").setAttribute("aria-pressed", String(state.activity.follow)); $("agent-activity-follow").textContent = `Follow output: ${state.activity.follow ? "on" : "off"}`;
+    $("agent-activity-status").textContent = state.demo ? "Representative sample activity shown in this browser only." : !state.live ? "Live updates paused." : state.activity.error ? `${state.activity.error} Showing the last reported activity.` : !data ? "Loading reported progress..." : !data.available || data.source === "none" ? data.coverage?.reason ? `Reported activity unavailable: ${data.coverage.reason}.` : "Reported activity unavailable." : data.coverage?.partial ? `Reported progress may be partial${data.coverage.reason ? `: ${data.coverage.reason}` : "."}` : "Last checked activity is from the verified rollout.";
+    renderAgentActivityFeed(data?.events || []);
+    if (focus) { panel.scrollIntoView({ behavior: "smooth", block: "start" }); $("agent-activity-title").focus({ preventScroll: true }); }
+  }
+  function scheduleAgentActivity() { clearAgentActivityTimer(); if (state.activity.workId && state.live && !state.demo) state.activity.timer = window.setTimeout(fetchAgentActivity, POLL_MS); }
+  async function fetchAgentActivity(options = {}) {
+    const workId = state.activity.workId;
+    if (!workId || state.demo || (!state.live && !options.force)) return;
+    if (state.activity.controller) state.activity.controller.abort();
+    const controller = new AbortController(), sequence = ++state.activity.sequence, goalId = state.selectedGoalId, mode = state.modeGeneration;
+    state.activity.controller = controller;
+    try {
+      const response = await fetch(`/api/agent-activity?${new URLSearchParams({ work_id: workId }).toString()}`, { headers: { Accept: "application/json" }, signal: controller.signal, cache: "no-store" });
+      if (!response.ok) throw new Error(`Agent activity request returned ${response.status}`);
+      const data = await response.json();
+      if (sequence !== state.activity.sequence || goalId !== state.selectedGoalId || mode !== state.modeGeneration || state.activity.workId !== workId) return;
+      state.activity.error = ""; state.activity.data = data; renderAgentActivity();
+    } catch (error) {
+      if (sequence !== state.activity.sequence || error.name === "AbortError") return;
+      if (state.activity.data) state.activity.error = "Could not refresh reported activity.";
+      else state.activity.data = { available: false, source: "none", coverage: { partial: true, reason: "Could not refresh reported activity" }, events: [] };
+      renderAgentActivity();
+    } finally { if (state.activity.controller === controller) state.activity.controller = null; if (sequence === state.activity.sequence) scheduleAgentActivity(); }
+  }
+  function openAgentActivity(agent) {
+    state.selected = null; $("detail-panel").hidden = true; clearAgentActivityTimer(); if (state.activity.controller) state.activity.controller.abort(); state.activity.sequence += 1;
+    Object.assign(state.activity, { workId: agent.work_id || null, agent, data: state.demo ? activityDemo(agent) : null, feedSignature: null, error: "" });
+    switchView("agents"); renderAgentActivity(true); if (!state.demo && state.activity.workId) fetchAgentActivity({ force: true });
+  }
+  function refreshNow() { if (state.demo) { exitDemo(); return; } state.retryMs = POLL_MS; fetchSnapshot({ force: true }); fetchAgentActivity({ force: true }); }
+  function bindAgentActivity() {
+    $("close-agent-activity").addEventListener("click", () => closeAgentActivity({ clear: true }));
+    $("agent-activity-follow").addEventListener("click", () => { state.activity.follow = !state.activity.follow; if (state.activity.follow) $("agent-activity-feed").scrollTop = $("agent-activity-feed").scrollHeight; renderAgentActivity(); });
+    $("agent-activity-goal").addEventListener("click", () => { const goal = current().goals.find((item) => item.id === state.activity.agent?.goal_id); closeAgentActivity({ clear: true }); switchView("goals"); if (goal) showDetail("goal", goal); });
+    $("agent-activity-job").addEventListener("click", () => { const job = current().jobs.find((item) => item.id === state.activity.agent?.job_id); closeAgentActivity({ clear: true }); switchView("jobs"); if (job) showDetail("job", job); });
+    $("live-toggle").addEventListener("click", () => { if (state.live) fetchAgentActivity({ force: true }); else { clearAgentActivityTimer(); state.activity.sequence += 1; if (state.activity.controller) state.activity.controller.abort(); state.activity.controller = null; renderAgentActivity(); } });
+  }
+  function init() { baseInit(); bindAgentActivity(); }
 
   init();
 })();
