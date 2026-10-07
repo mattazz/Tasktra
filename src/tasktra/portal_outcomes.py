@@ -21,6 +21,7 @@ MAX_EVIDENCE_BYTES = 128 * 1024
 MAX_PORTAL_WORKFLOW_BYTES = 16 * 1024
 MAX_PORTAL_EVIDENCE_BYTES = 16 * 1024
 MAX_CHECKS = 200
+MAX_OBJECT_DEPTH = 32
 _SHA = re.compile(r"[0-9a-f]{40}")
 _GITHUB_SEGMENT = re.compile(r"[A-Za-z0-9_.-]+")
 _GITHUB_NUMBER = re.compile(r"[1-9][0-9]*")
@@ -64,7 +65,16 @@ def _object(value: Any, limit: int) -> dict[str, Any] | None:
     if not isinstance(value, str) or len(value.encode("utf-8")) > limit: return None
     try: result = json.loads(value)
     except (ValueError, UnicodeError, TypeError, RecursionError, OverflowError): return None
-    return result if isinstance(result, dict) else None
+    if not isinstance(result, dict): return None
+    # JSON decoder recursion limits differ across Python versions/platforms.
+    # Apply our own iterative bound so the same evidence has the same verdict.
+    pending = [(result, 1)]
+    while pending:
+        item, depth = pending.pop()
+        if depth > MAX_OBJECT_DEPTH: return None
+        children = item.values() if isinstance(item, dict) else item if isinstance(item, list) else ()
+        pending.extend((child, depth + 1) for child in children if isinstance(child, (dict, list)))
+    return result
 
 
 def _usage(value: Any) -> dict[str, int] | None:

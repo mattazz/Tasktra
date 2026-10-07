@@ -6,7 +6,7 @@ import json
 import sqlite3
 import unittest
 
-from tasktra.portal_outcomes import MAX_PORTAL_EVIDENCE_BYTES, MAX_PORTAL_WORKFLOW_BYTES, _safe_link, _safe_path, build_outcomes
+from tasktra.portal_outcomes import MAX_OBJECT_DEPTH, MAX_PORTAL_EVIDENCE_BYTES, MAX_PORTAL_WORKFLOW_BYTES, _safe_link, _safe_path, build_outcomes
 from tasktra.workflow import new_workflow, serialize_workflow, workflow_completion_token
 
 
@@ -138,3 +138,13 @@ class PortalOutcomesTests(unittest.TestCase):
                 self.assertFalse(out["jobs"][0]["verification"]["verified"])
                 self.assertTrue(out["jobs"][0]["evidence"]["partial"])
                 self.assertTrue(out["summary"]["partial"])
+
+    def test_evidence_depth_bound_is_independent_of_decoder_recursion_limit(self):
+        self.add()
+        for depth, valid in ((MAX_OBJECT_DEPTH - 1, True), (MAX_OBJECT_DEPTH, False)):
+            payload = '{"deep":' + '[' * depth + '0' + ']' * depth + '}'
+            with self.subTest(depth=depth):
+                self.db.execute("UPDATE workflow_evidence SET completion_evidence_json=?", (payload,))
+                out = build_outcomes(self.db, [], goal_id="goal")
+                self.assertEqual(out["jobs"][0]["verification"]["verified"], valid)
+                self.assertEqual(out["jobs"][0]["evidence"]["partial"], not valid)
