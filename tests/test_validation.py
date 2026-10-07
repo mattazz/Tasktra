@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import os
 import subprocess
 import sys
@@ -16,6 +17,61 @@ def python_argv(source: str) -> list[str]:
 
 
 class ValidationTests(unittest.TestCase):
+    def test_retained_failure_stops_work_and_survives_a_later_success(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            report_path = root / ".tasktra/runtime/validation/latest.json"
+            results = run_validations(root, [python_argv("print('first')"), python_argv("import sys; print('failure evidence'); sys.exit(3)"), python_argv("raise AssertionError('must not run')")], report_path=report_path)
+            self.assertEqual([item.status for item in results], ["passed", "failed"])
+            failed = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(failed["status"], "failed")
+            self.assertEqual(failed["checks"][1]["exit_code"], 3)
+            self.assertIn("failure evidence", failed["checks"][1]["stdout"])
+            self.assertIsNotNone(failed["finished_at"])
+            history = report_path.parent / "history" / (failed["report_id"] + ".json")
+            run_validations(root, [python_argv("print('success')")], report_path=report_path)
+            self.assertEqual(json.loads(history.read_text(encoding="utf-8")), failed)
+            latest = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(latest["status"], "passed")
+            self.assertNotEqual(latest["report_id"], failed["report_id"])
+
+    def test_truncated_failure_stays_failed_and_discloses_partial_report(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            report_path = root / "latest.json"
+            run_validations(root, [python_argv(f"import sys; print('x' * {MAX_CAPTURE_CHARS * 2}); sys.exit(7)")], report_path=report_path)
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "failed")
+            self.assertTrue(report["partial"])
+            self.assertTrue(report["checks"][0]["stdout_truncated"])
+            self.assertLessEqual(len(report["checks"][0]["stdout"]), MAX_CAPTURE_CHARS)
+
+    def test_report_write_failure_is_visible_and_preview_never_writes(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            report_path = root / "validation/latest.json"
+            validation_plan([python_argv("print('preview')")])
+            self.assertFalse(report_path.parent.exists())
+            with patch("tasktra.validation.os.replace", side_effect=PermissionError("denied")):
+                with self.assertRaisesRegex(ValidationError, "retain validation report"):
+                    run_validations(root, [python_argv("print('done')")], report_path=report_path)
+            self.assertFalse(report_path.exists())
+            self.assertEqual(list(root.rglob("*.tmp")), [])
+
+    def test_report_rejects_a_link_even_when_its_target_is_inside_project(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            destination = root / "actual"
+            destination.mkdir()
+            linked = root / "linked"
+            try:
+                linked.symlink_to(destination, target_is_directory=True)
+            except OSError:
+                self.skipTest("symbolic links are unavailable on this host")
+            with self.assertRaisesRegex(ValidationError, "symbolic link|reparse"):
+                run_validations(root, [python_argv("print('must not run')")], report_path=linked / "latest.json")
+            self.assertEqual(list(destination.iterdir()), [])
+
     def test_permission_denied_cleanup_requires_no_live_group_members(self):
         cases = (
             ("42 Z\n42 Z+\n7 S\n", True),

@@ -1233,3 +1233,33 @@ body.motion-off * {
 .relationship-map-detail-heading h3 { margin: 0; }
 .relationship-map-legend-job-group { color: var(--blue); }
 .relationship-map-legend-job-group > span:first-child { border-style: dashed; border-radius: .2rem; }
+
+
+.attention-panel { margin: 1.2rem 0; padding: 1.25rem; border-color: #ff8a654d; }
+.attention-total { display: inline-flex; min-width: 1.65rem; justify-content: center; padding: .1rem .42rem; border-radius: 1rem; background: #ff8a6524; color: #ffd2c3; font-size: .78rem; vertical-align: middle; }
+.attention-toolbar { padding-bottom: .65rem; }
+.attention-list { margin: .35rem 0 0; padding: 0; list-style: none; border-top: 1px solid #ffffff12; }
+.attention-item { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: .7rem; align-items: start; padding: .9rem 0; border-bottom: 1px solid #ffffff0b; }
+.attention-item .status { margin-top: .12rem; }
+.attention-title { color: var(--ink); font-size: .86rem; font-weight: 720; }
+.attention-detail { margin: .25rem 0 0; color: var(--muted); font-size: .78rem; line-height: 1.5; }
+.attention-meta { margin-top: .34rem; color: var(--dim); font-size: .68rem; }
+.attention-action { margin-top: .05rem; white-space: nowrap; }
+.attention-empty { margin: .85rem 0 .1rem; color: var(--muted); font-size: .82rem; }
+.diagnostics-panel { margin: 1rem 0; padding: 1.15rem 1.25rem; }
+.diagnostics-panel > summary { cursor: pointer; color: var(--ink); font-size: 1rem; font-weight: 720; }
+.diagnostics-scope { margin-left: .5rem; color: var(--muted); font-size: .72rem; font-weight: 400; }
+.diagnostics-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .7rem; margin-top: 1rem; }
+.diagnostics-validation { margin-top: 1rem; padding-top: .9rem; border-top: 1px solid #ffffff12; }
+.diagnostics-validation h3 { margin: 0 0 .6rem; font-size: .9rem; }
+.diagnostics-checks { margin: 0; padding-left: 1.1rem; color: var(--muted); font-size: .76rem; line-height: 1.65; }
+@media (max-width: 850px) { .diagnostics-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .attention-item { grid-template-columns: auto minmax(0, 1fr); }.attention-action { grid-column: 2; justify-self: start; }.diagnostics-grid { grid-template-columns: 1fr; }.diagnostics-scope { display: block; margin: .25rem 0 0; } }
+
+.attention-list { max-height: 35rem; overflow-y: auto; overscroll-behavior: contain; padding-right: .35rem; }
+.attention-list:focus-visible { outline: 2px solid var(--mint); outline-offset: 3px; }
+.attention-error .status { color: #ff9999; background: #ff6b6b20; }
+.attention-warning .status { color: #ffd48a; background: #f3b65520; }
+.attention-info .status { color: #91c8ff; background: #74baff20; }
+
+.attention-meta { overflow-wrap: anywhere; }

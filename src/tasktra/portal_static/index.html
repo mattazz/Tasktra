@@ -228,6 +228,26 @@
           id="metrics"
         ></section>
 
+        <section class="panel attention-panel" id="attention-panel" aria-labelledby="attention-heading">
+          <div class="panel-heading">
+            <div><p class="eyebrow">Action queue</p><h2 id="attention-heading">Needs attention <span id="attention-total" class="attention-total">0</span></h2></div>
+            <p id="attention-scope" class="efficiency-note">Recorded project scope</p>
+          </div>
+          <div class="toolbar attention-toolbar" aria-label="Filter attention items">
+            <label class="select-label">Severity <select id="attention-severity-filter"><option value="">All severities</option><option value="error">Errors</option><option value="warning">Warnings</option><option value="info">Information</option></select></label>
+            <label class="select-label">Category <select id="attention-category-filter"><option value="">All categories</option></select></label>
+            <button class="text-button" id="attention-clear-filters" type="button">Clear filters</button>
+          </div>
+          <p id="attention-summary" class="efficiency-note" aria-live="polite"></p>
+          <ol class="attention-list" id="attention-list" tabindex="0" aria-label="Recorded attention items"></ol>
+          <p id="attention-empty" class="attention-empty" hidden>No attention items match these filters.</p>
+        </section>
+        <details class="panel diagnostics-panel" id="diagnostics-panel">
+          <summary id="diagnostics-summary">Diagnostics <span class="diagnostics-scope">Build, runtime and validation are project-wide; coverage and telemetry follow the selected scope</span></summary>
+          <div id="diagnostics-content"></div>
+          <div id="diagnostics-validation" class="diagnostics-validation"></div>
+        </details>
+
         <section class="dashboard-grid">
           <div
             class="panel primary-panel"
@@ -483,6 +503,7 @@
     <script src="/vendor-cose-base-2.2.0.js" defer></script>
     <script src="/vendor-cytoscape-fcose-2.2.0.js" defer></script>
     <script src="/relationship-map.js" defer></script>
+    <script src="/portal-insights.js" defer></script>
     <script src="/app.js" defer></script>
   </body>
 </html>

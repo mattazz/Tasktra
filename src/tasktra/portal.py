@@ -23,6 +23,7 @@ from .efficiency import summarize_executions
 from .codex_usage import USAGE_FIELDS
 from .state import SCHEMA_VERSION
 from .portal_activity import agent_activity
+from .portal_insights import build_insights, project_key
 
 
 _MAX_GOALS = 200
@@ -35,6 +36,7 @@ _STATIC_ROUTES = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "application/javascript; charset=utf-8"),
+    "/portal-insights.js": ("portal-insights.js", "application/javascript; charset=utf-8"),
     "/relationship-map.js": ("relationship-map.js", "application/javascript; charset=utf-8"),
     "/vendor-cytoscape-3.34.3.min.js": ("vendor-cytoscape-3.34.3.min.js", "application/javascript; charset=utf-8"),
     "/vendor-layout-base-2.0.1.js": ("vendor-layout-base-2.0.1.js", "application/javascript; charset=utf-8"),
@@ -65,6 +67,19 @@ def _empty_snapshot(name: str, message: str | None = None) -> dict[str, Any]:
         },
         "goals": [], "jobs": [], "agents": [], "events": [], "warnings": [],
     }
+
+
+def _with_insights(snapshot: dict[str, Any], root: Path, *, goal_id: str | None,
+                   runtime_schema_version: int | None = None) -> dict[str, Any]:
+    """Attach Phase 1 safe projections on every snapshot return path."""
+    project = snapshot.get("project")
+    if isinstance(project, dict):
+        project["key"] = project_key(root)
+    snapshot["insights"] = build_insights(
+        snapshot, root, goal_id=goal_id, runtime_schema_version=runtime_schema_version,
+        expected_schema_version=SCHEMA_VERSION,
+    )
+    return snapshot
 
 
 def _sqlite_readonly(path: Path) -> sqlite3.Connection:
@@ -539,9 +554,13 @@ def portal_snapshot(root: Path, *, goal_id: str | None = None, model: str | None
         project_root = project_root.resolve(strict=True)
         config = load_project_config(project_root)
     except (ConfigError, OSError, RuntimeError, ValueError):
-        return _empty_snapshot(project_root.name or "Tasktra", "Project configuration is unavailable.")
+        return _with_insights(
+            _empty_snapshot(project_root.name or "Tasktra", "Project configuration is unavailable."),
+            project_root, goal_id=goal_id,
+        )
 
     snapshot = _empty_snapshot(config.name, "Runtime database is unavailable.")
+    runtime_schema_version: int | None = None
     snapshot["filters"] = {"goal_id": goal_id, "model": model, "role": role, "since": since}
     snapshot["goal_options"] = []
     snapshot["global_summary"] = dict(snapshot["summary"])
@@ -554,23 +573,24 @@ def portal_snapshot(root: Path, *, goal_id: str | None = None, model: str | None
         database = config.database_path(project_root)
         if not database.is_file():
             _add_execution_only_agents(snapshot, project_root)
-            return snapshot
+            return _with_insights(snapshot, project_root, goal_id=goal_id)
         connection = _sqlite_readonly(database)
     except (ConfigError, OSError, sqlite3.Error):
         warnings.append("Runtime database could not be opened read-only.")
         _add_execution_only_agents(snapshot, project_root)
-        return snapshot
+        return _with_insights(snapshot, project_root, goal_id=goal_id)
 
     try:
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        runtime_schema_version = version
         if version != SCHEMA_VERSION:
             snapshot["runtime"]["message"] = f"Runtime schema {version} requires migration to {SCHEMA_VERSION}."
-            return snapshot
+            return _with_insights(snapshot, project_root, goal_id=goal_id, runtime_schema_version=version)
         tables = _tables(connection)
         needed = {"goals", "work_units", "budgets", "runtime_control", "audit_events", "goal_checkpoints", "acceptance_evidence"}
         if not needed.issubset(tables):
             warnings.append("Runtime database has an unsupported schema.")
-            return snapshot
+            return _with_insights(snapshot, project_root, goal_id=goal_id, runtime_schema_version=version)
 
         now = _utc_now()
         option_rows, _ = _limited_rows(connection, "SELECT id,title,status FROM goals ORDER BY updated_at DESC,id", (), _MAX_GOALS)
@@ -761,10 +781,10 @@ def portal_snapshot(root: Path, *, goal_id: str | None = None, model: str | None
         except (ExecutionError, OSError, sqlite3.Error, ValueError):
             snapshot["analytics"] = None
         _apply_goal_scope(snapshot, goal_id)
-        return snapshot
+        return _with_insights(snapshot, project_root, goal_id=goal_id, runtime_schema_version=version)
     except (sqlite3.Error, ValueError, TypeError, KeyError):
         warnings.append("Runtime database could not be read safely.")
-        return snapshot
+        return _with_insights(snapshot, project_root, goal_id=goal_id, runtime_schema_version=runtime_schema_version)
     finally:
         connection.close()
 

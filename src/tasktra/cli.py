@@ -639,7 +639,10 @@ def _validate_project(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     root = _root(args.root)
     config = load_project_config(root)
     results = (
-        run_validations(root, config.validation_commands, timeout_seconds=args.timeout)
+        run_validations(
+            root, config.validation_commands, timeout_seconds=args.timeout,
+            report_path=root / ".tasktra" / "runtime" / "validation" / "latest.json",
+        )
         if args.run
         else validation_plan(config.validation_commands)
     )

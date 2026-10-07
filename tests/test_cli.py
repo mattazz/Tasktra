@@ -97,10 +97,18 @@ class CliTests(unittest.TestCase):
             code, payload = run_cli("validate", "--root", str(root))
             self.assertEqual(code, 0)
             self.assertEqual(payload["commands"][0]["status"], "planned")
+            report_path = root / ".tasktra/runtime/validation/latest.json"
+            self.assertFalse(report_path.exists())
             code, payload = run_cli("validate", "--root", str(root), "--run")
             self.assertEqual(code, 0)
             self.assertEqual(payload["commands"][0]["status"], "passed")
             self.assertIn("123", payload["commands"][0]["stdout"])
+            retained = report_path.read_bytes()
+            report = json.loads(retained)
+            self.assertEqual(report["status"], "passed")
+            self.assertTrue((report_path.parent / "history" / (report["report_id"] + ".json")).is_file())
+            self.assertEqual(run_cli("validate", "--root", str(root))[0], 0)
+            self.assertEqual(report_path.read_bytes(), retained)
 
     def test_local_work_item_cli_create_list_show_and_update(self):
         with TemporaryDirectory() as directory:
