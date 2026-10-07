@@ -9,11 +9,13 @@ import json
 import os
 from pathlib import Path
 import stat
+import sqlite3
 import sys
 import sysconfig
 import tempfile
 import tomllib
 from typing import Any, Sequence
+from urllib.parse import quote
 
 from . import __version__
 from .adoption import preview_initialization
@@ -374,6 +376,10 @@ def build_parser() -> argparse.ArgumentParser:
     execution_finish.add_argument("--unknown-reason")
     execution_finish.add_argument("--rollout")
     execution_finish.add_argument("--fallback-reason")
+    execution_attribute = execution_commands.add_parser("attribute-goal", help="Record an explicit goal attribution for an execution anchor and descendants")
+    execution_attribute.add_argument("work_id")
+    execution_attribute.add_argument("goal_id")
+    execution_attribute.add_argument("--reason", required=True)
     execution_show = execution_commands.add_parser("show", help="Read one local execution record")
     execution_show.add_argument("work_id")
     execution_commands.add_parser("report", help="Summarize measured and unknown work without estimating savings")
@@ -1460,6 +1466,25 @@ def _execution_profile(root: Path, role_id: str) -> tuple[str | None, str | None
     return model, effort
 
 
+def _require_runtime_goal(root: Path, goal_id: str) -> None:
+    """Validate a CLI attribution target without opening or migrating StateStore."""
+    config = load_project_config(root)
+    database = config.database_path(root)
+    if not database.is_file():
+        raise ExecutionError("goal attribution requires an existing runtime goal")
+    uri = "file:" + quote(database.as_posix(), safe="/:") + "?mode=ro"
+    try:
+        connection = sqlite3.connect(uri, uri=True)
+        try:
+            row = connection.execute("SELECT 1 FROM goals WHERE id=?", (goal_id,)).fetchone()
+        finally:
+            connection.close()
+    except sqlite3.Error as error:
+        raise ExecutionError("goal attribution requires a readable runtime goal") from error
+    if row is None:
+        raise ExecutionError("goal attribution target does not exist in runtime")
+
+
 def _execution(args: argparse.Namespace) -> dict[str, Any]:
     root = _root(args.root)
     store = ExecutionStore(root)
@@ -1493,6 +1518,9 @@ def _execution(args: argparse.Namespace) -> dict[str, Any]:
             rollout_path=Path(args.rollout) if args.rollout else None,
             fallback_reason=args.fallback_reason,
         )
+    elif action == "attribute-goal":
+        _require_runtime_goal(root, args.goal_id)
+        record = store.attribute_goal(args.work_id, args.goal_id, args.reason)
     elif action == "show":
         record = store.get(args.work_id)
     elif action == "report":

@@ -8,6 +8,7 @@ stored or displayed.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from hashlib import sha256
 import json
 import os
@@ -145,6 +146,9 @@ class RolloutObservation:
     source_sha256: str
     response_fingerprints: tuple[str, ...] = ()
     source_bytes: int = 0
+    usage_events: tuple[dict[str, Any], ...] = ()
+    observed_started_at: str | None = None
+    last_observed_at: str | None = None
 
 
 def _response_fingerprint(turn_id: str | None, response_id: str, usage: dict[str, int]) -> str:
@@ -217,6 +221,19 @@ def _safe_agent_path(payload: dict[str, Any]) -> str | None:
     return candidate
 
 
+def _event_time(value: Any) -> str | None:
+    """Return a normalized outer JSONL timestamp when it is an actual UTC instant."""
+    if not isinstance(value, str) or len(value) > 64:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
 def _context_from_payload(payload: dict[str, Any]) -> tuple[str, str] | None:
     model, effort = payload.get("model"), payload.get("effort")
     if not isinstance(model, str) or not model.strip():
@@ -253,7 +270,8 @@ def _read_rollout(
     safe_agent_id: str | None = None
     contexts: dict[str, tuple[str, str]] = {}
     responses: dict[tuple[str | None, str], dict[str, int]] = {}
-    cumulative: list[dict[str, int]] = []
+    cumulative: list[tuple[dict[str, int], str | None]] = []
+    response_events: list[dict[str, Any]] = []
     saw_response_record = False
     bytes_read = 0
     digest = sha256()
@@ -333,11 +351,13 @@ def _read_rollout(
                         raise RolloutUsageError(
                             f"conflicting duplicate response {response_id!r} for turn {record_turn!r}"
                         )
+                    if existing is None:
+                        response_events.append({"at": _event_time(event.get("timestamp")), "usage": usage})
                     responses[key] = usage
                 elif event_type == "event_msg" and payload.get("type") == "token_count":
                     info = payload.get("info")
                     if isinstance(info, dict) and "total_token_usage" in info:
-                        cumulative.append(_usage_from_object(info["total_token_usage"]))
+                        cumulative.append((_usage_from_object(info["total_token_usage"]), _event_time(event.get("timestamp"))))
     except OSError as exc:
         raise RolloutUsageError(f"cannot read rollout source: {source}") from exc
 
@@ -350,6 +370,7 @@ def _read_rollout(
         saw_response_record,
         digest.hexdigest(),
         bytes_read,
+        response_events,
     )
 
 
@@ -376,6 +397,7 @@ def scan_rollout(
         saw_response_record,
         source_sha256,
         source_bytes,
+        response_events,
     ) = _read_rollout(source, thread_id, turn_id)
 
     if metadata_ids != {thread_id}:
@@ -421,6 +443,9 @@ def scan_rollout(
                 for (record_turn, response_id), usage in responses.items()
             )),
             source_bytes=source_bytes,
+            usage_events=tuple(response_events),
+            observed_started_at=next((item["at"] for item in response_events if item["at"] is not None), None),
+            last_observed_at=next((item["at"] for item in reversed(response_events) if item["at"] is not None), None),
         )
 
     if saw_response_record:
@@ -429,11 +454,14 @@ def scan_rollout(
         raise RolloutUsageError("turn_id requires token_usage_record events")
     if cumulative:
         previous: dict[str, int] | None = None
-        for snapshot in cumulative:
+        cumulative_events: list[dict[str, Any]] = []
+        for snapshot, observed_at in cumulative:
             if previous is not None and any(
                 snapshot[field] < previous[field] for field in USAGE_FIELDS
             ):
                 raise RolloutUsageError("cumulative token_count counters decrease")
+            delta = dict(snapshot) if previous is None else {field: snapshot[field] - previous[field] for field in USAGE_FIELDS}
+            cumulative_events.append({"at": observed_at, "usage": delta})
             previous = snapshot
         return RolloutObservation(
             thread_id=thread_id,
@@ -441,12 +469,15 @@ def scan_rollout(
             agent_id=agent_id,
             model=None,
             effort=None,
-            usage=cumulative[-1],
+            usage=cumulative[-1][0],
             schema="event_msg/token_count",
             response_count=1,
             source_sha256=source_sha256,
             response_fingerprints=(),
             source_bytes=source_bytes,
+            usage_events=tuple(cumulative_events),
+            observed_started_at=next((item["at"] for item in cumulative_events if item["at"] is not None), None),
+            last_observed_at=next((item["at"] for item in reversed(cumulative_events) if item["at"] is not None), None),
         )
 
     return RolloutObservation(

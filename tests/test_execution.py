@@ -337,5 +337,37 @@ class ExecutionStoreTests(unittest.TestCase):
             self.store.import_codex_rollout("work-one", self.rollout())
 
 
+    def test_explicit_goal_attribution_propagates_only_planned_descendants(self):
+        self.store.plan("anchor", "coordinator", None, None, attribution_reason="parent-attribution")
+        self.store.plan("child", "worker", None, None, parent_work_id="anchor")
+        attributed = self.store.attribute_goal("anchor", "goal-one", "evidence-script")
+        self.assertEqual([(item["work_id"], item["goal_id"]) for item in attributed], [("anchor", "goal-one"), ("child", "goal-one")])
+        self.assertEqual(self.store.attribute_goal("anchor", "goal-one", "evidence-script")[0]["goal_id"], "goal-one")
+        with self.assertRaisesRegex(ExecutionError, "immutable"):
+            self.store.attribute_goal("anchor", "other-goal", "evidence-script")
+
+
+    def test_explicit_attribution_initializes_optional_columns_on_older_ledger(self):
+        self.store.plan("legacy-anchor", "coordinator", None, None, attribution_reason="parent-attribution")
+        connection = sqlite3.connect(self.store.path)
+        try:
+            for column in ("goal_id", "goal_attribution_reason", "usage_events_json", "observed_started_at", "last_observed_at"):
+                connection.execute(f"ALTER TABLE execution DROP COLUMN {column}")
+            connection.commit()
+        finally:
+            connection.close()
+        attributed = self.store.attribute_goal("legacy-anchor", "goal-one", "verified-director-scripts")
+        self.assertEqual(attributed[0]["goal_id"], "goal-one")
+
+
+    def test_new_descendants_inherit_explicit_anchor_goal_attribution(self):
+        self.store.plan("anchor-inherit", "coordinator", None, None, attribution_reason="parent-attribution")
+        self.store.attribute_goal("anchor-inherit", "goal-one", "verified-director-scripts")
+        self.store.plan("child-inherit", "worker", None, None, parent_work_id="anchor-inherit")
+        self.store.plan("grandchild-inherit", "worker", None, None, parent_work_id="child-inherit")
+        self.assertEqual(self.store.get("child-inherit")["goal_id"], "goal-one")
+        self.assertEqual(self.store.get("grandchild-inherit")["goal_id"], "goal-one")
+
+
 if __name__ == "__main__":
     unittest.main()

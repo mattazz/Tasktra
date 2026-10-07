@@ -24,8 +24,17 @@ loopback and is intended for use on your own computer.
 - **Jobs** shows work units, including waiting, running, blocked, and completed
   work. Search and status filters help narrow the list. Select a job for details.
 - **Agents** shows execution records and workers associated with work leases.
+  Filter by role, observed model, state, or search text, then sort by recent
+  observation or tokens. Select an agent for routing, goal, timing, token
+  breakdown, and provenance details.
+- **Token usage** compares measured totals, averages, medians, cache utilization,
+  uncached input, and recorded outcomes by model. Model, role, and time filters
+  narrow the comparison. The hourly chart includes an expandable values table.
 
-Select a goal to narrow the dashboard to that goal. The live view refreshes every
+Select a goal card or use **Goal scope** to narrow jobs, agents, usage, activity,
+and summary counts to that goal. Empty goals remain empty. Changing goals resets
+local filters; clearing an agent, job, or usage filter keeps the goal selected.
+Filters survive refreshes and tab changes. The live view refreshes every
 three seconds. Pause updates when inspecting a snapshot; refresh manually when
 needed. Motion can be turned off, and the interface respects reduced-motion
 preferences. If a refresh fails, the last successful view remains visible with a
@@ -55,8 +64,43 @@ A planned execution is not a running agent. A started execution means the ledger
 records a start; it is not independent proof that an operating-system process is
 still alive. Lease heartbeat and expiry help identify stale workers. An expired
 lease is labeled stale rather than silently treated as fresh progress. Execution
-records are linked to goals only when their work ID matches a recorded work unit.
-Animations illustrate these recorded states; they are not additional telemetry.
+records inherit goals through recorded work-unit or execution ancestry, or an
+explicit goal attribution. A missing lease heartbeat means no matching lease
+observation was recorded; it does not establish that the agent is inactive.
+Finished receipts show the heartbeat as not applicable. Observed execution activity
+is displayed separately. Animations illustrate recorded states only.
+
+If verified historical records lack a goal relationship, explicitly attribute the
+anchor execution to an existing goal after checking the source evidence:
+
+```powershell
+python -m tasktra execution --root C:\src\my-project attribute-goal <work-id> <goal-id> --reason verified-task-lineage
+```
+
+Attribution also applies to existing descendants, is immutable, and rejects a
+conflicting attribution. This command writes the optional execution ledger; viewing
+the portal never performs the repair automatically. Future descendants can resolve
+the relationship through their recorded parent.
+
+## Reading usage statistics
+
+Planned work is excluded from measured run statistics. Unknown usage remains
+unknown, including imports rejected by the safe parser. Cached input is a subset
+of input: total tokens equal input plus output. Cache utilization is the fraction
+of input tokens served from cache, not a request hit rate or a billing estimate.
+Outcome percentages use finished receipts; they do not establish task quality.
+
+Time filters total actual measured token-event deltas in the selected interval.
+A run spanning the boundary contributes only its in-range events. Averages and
+medians are per measured execution in that selection. Older imports can lack
+complete event timing, so all-time totals may exceed chart totals; coverage notes
+show this gap. Reimporting the same registered rollout can enrich timestamps while
+preserving receipt identity and append-only usage checks. The portal never guesses
+timestamps or counts undated tokens as zero.
+
+Model comparisons describe recorded work. Different tasks, outcomes, and acceptance
+criteria are not controlled experiments; these figures do not prove token savings.
+See [controlled comparisons](TOKEN_EFFICIENCY.md) for that workflow.
 
 ## Local and read-only
 

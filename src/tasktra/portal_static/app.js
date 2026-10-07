@@ -10,6 +10,9 @@
     motion: true,
     selectedGoalId: null,
     selected: null,
+    analytics: { model: "", role: "", since: "" },
+    agentFilters: { query: "", role: "", model: "", state: "", sort: "recent" },
+    requestSequence: 0,
     activeView: "overview",
     requestInFlight: false,
     retryMs: POLL_MS,
@@ -53,7 +56,7 @@
         });
   };
   const relativeTime = (value) => {
-    if (!value) return "No heartbeat";
+    if (!value) return "Not recorded";
     const ms = Date.now() - new Date(value).getTime();
     if (Number.isNaN(ms)) return "Unavailable";
     const min = Math.round(Math.abs(ms) / 60000);
@@ -140,38 +143,6 @@
     );
     return card;
   }
-  function renderMetrics(snapshot) {
-    const summary = snapshot.summary || {};
-    const goals = summary.goals ?? snapshot.goals.length;
-    const jobs = summary.jobs ?? snapshot.jobs.length;
-    const agents = summary.agents ?? snapshot.agents.length;
-    $("metrics").replaceChildren(
-      metric(
-        "Global active goals",
-        number(summary.active_goals ?? 0),
-        `${number(goals)} recorded`,
-        "accent",
-      ),
-      metric(
-        "Global jobs in motion",
-        number(summary.running_jobs ?? 0),
-        `${number(jobs)} recorded`,
-        "",
-      ),
-      metric(
-        "Global blocked attention",
-        number(summary.blocked_jobs ?? 0),
-        "Jobs needing a decision",
-        summary.blocked_jobs ? "alert" : "",
-      ),
-      metric(
-        "Global agent constellation",
-        number(summary.running_agents ?? 0),
-        `${number(agents)} recorded`,
-        "",
-      ),
-    );
-  }
   function progressBar(percent) {
     const value = Number.isFinite(percent)
       ? Math.max(0, Math.min(100, percent))
@@ -243,7 +214,7 @@
     target.replaceChildren(...rows);
   }
   function agentIsActive(agent) {
-    return ["started", "leased"].includes(agent.state) && !agent.lease_stale;
+    return ["started", "leased"].includes(agent.state) && !agent.lease_stale && !agent.heartbeat?.stale;
   }
   function agentAvatar(agent) {
     const avatar = el(
@@ -531,239 +502,10 @@
     });
     select.value = statuses.includes(prior) || prior === "all" ? prior : "all";
   }
-  function renderJobs(snapshot) {
-    const target = $("jobs-body");
-    if (isFocusedIn(target)) return;
-    const jobs = selectedJobs(snapshot);
-    if (!jobs.length) {
-      const cell = el(
-        "td",
-        "record-subtitle",
-        state.selectedGoalId
-          ? "No jobs match this goal and filter."
-          : "No jobs match these filters.",
-      );
-      cell.colSpan = 6;
-      const row = el("tr");
-      row.append(cell);
-      target.replaceChildren(row);
-      return;
-    }
-    target.replaceChildren(
-      ...jobs.map((job) => {
-        const row = el("tr");
-        const name = el("td");
-        name.append(
-          textLine("div", "record-title", job.title || job.id),
-          textLine("div", "record-subtitle", job.id),
-        );
-        const stateCell = el("td");
-        stateCell.append(status(job.status));
-        const owner = el("td", "", job.owner_id || "Unassigned");
-        const beat = el(
-          "td",
-          job.lease_stale ? "stale" : "",
-          job.lease_stale ? "Lease stale" : relativeTime(job.heartbeat_at),
-        );
-        const attempts = el("td", "", number(job.attempt_count ?? 0));
-        const action = el("td");
-        const button = el("button", "text-button details-trigger", "Details");
-        button.type = "button";
-        button.dataset.action = "select-job";
-        button.dataset.jobId = job.id;
-        action.append(button);
-        row.append(name, stateCell, owner, beat, attempts, action);
-        return row;
-      }),
-    );
-  }
-  function renderAgents(snapshot) {
-    const target = $("agents-grid");
-    if (isFocusedIn(target)) return;
-    const agents = snapshot.agents.filter(
-      (agent) =>
-        !state.selectedGoalId || agent.goal_id === state.selectedGoalId,
-    );
-    if (!agents.length) {
-      target.replaceChildren(
-        textLine(
-          "p",
-          "record-subtitle",
-          state.selectedGoalId
-            ? "No agents are associated with this goal."
-            : "No agents have been recorded.",
-        ),
-      );
-      return;
-    }
-    target.replaceChildren(
-      ...agents.map((agent) => {
-        const card = el(
-          "article",
-          `agent-card ${agentIsActive(agent) ? "agent-active" : ""}`,
-        );
-        const top = el("div", "agent-card-top");
-        top.append(agentAvatar(agent), status(agent.state));
-        const detail = el("button", "record-button");
-        detail.type = "button";
-        detail.dataset.action = "select-agent";
-        detail.dataset.agentId = agent.id;
-        detail.dataset.agentWorkId = agentKey(agent);
-        detail.append(
-          textLine("div", "agent-role", agent.role || agent.id),
-          textLine(
-            "div",
-            "agent-meta",
-            [agent.model, agent.effort].filter(Boolean).join(" · ") ||
-              "Model unavailable",
-          ),
-        );
-        const foot = el("div", "agent-foot");
-        foot.append(
-          textLine(
-            "span",
-            "agent-meta",
-            agent.lease_stale
-              ? "Lease stale"
-              : relativeTime(agent.heartbeat_at),
-          ),
-          textLine(
-            "span",
-            "agent-meta",
-            agent.total_tokens === null || agent.total_tokens === undefined
-              ? "Usage unavailable"
-              : `${number(agent.total_tokens)} tokens`,
-          ),
-        );
-        card.append(top, detail, foot);
-        return card;
-      }),
-    );
-  }
   function detailItem(label, value) {
     const node = el("div", "detail-item");
     node.append(el("b", "", label), el("span", "", value));
     return node;
-  }
-  function showDetail(type, record, shouldFocus = true) {
-    state.selected = {
-      type,
-      id: type === "agent" ? agentKey(record) : record.id,
-    };
-    const title =
-      type === "goal"
-        ? record.title || record.id
-        : type === "job"
-          ? record.title || record.id
-          : record.role || record.id;
-    $("detail-kind").textContent = `${titleCase(type)} record`;
-    $("detail-title").textContent = title;
-    const grid = el("div", "detail-grid");
-    if (type === "goal") {
-      const budget = record.budget || {};
-      const checkpoints = record.checkpoints?.length
-        ? record.checkpoints
-            .map(
-              (checkpoint) =>
-                `${checkpoint.id || "Checkpoint"}: ${titleCase(checkpoint.status)}`,
-            )
-            .join(" · ")
-        : "None recorded";
-      grid.append(
-        detailItem("State", titleCase(record.status)),
-        detailItem(
-          "Progress",
-          Number.isFinite(record.progress_percent)
-            ? `${Math.round(record.progress_percent)}%`
-            : "Unavailable",
-        ),
-        detailItem(
-          "Acceptance",
-          `${record.acceptance_recorded || 0}/${record.acceptance_total || 0} recorded`,
-        ),
-        detailItem("Checkpoints", checkpoints),
-        detailItem(
-          "Budget consumed",
-          budget.consumed_tokens === undefined
-            ? "Unavailable"
-            : number(budget.consumed_tokens),
-        ),
-        detailItem(
-          "Budget total",
-          budget.total_tokens === null || budget.total_tokens === undefined
-            ? "Unavailable"
-            : number(budget.total_tokens),
-        ),
-        detailItem(
-          "Reserved",
-          budget.reserved_tokens === undefined
-            ? "Unavailable"
-            : number(budget.reserved_tokens),
-        ),
-        detailItem("Updated", localTime(record.updated_at)),
-        detailItem("Created", localTime(record.created_at)),
-      );
-    } else if (type === "job") {
-      grid.append(
-        detailItem("State", titleCase(record.status)),
-        detailItem("Owner", record.owner_id || "Unassigned"),
-        detailItem("Attempts", number(record.attempt_count ?? 0)),
-        detailItem("Heartbeat", relativeTime(record.heartbeat_at)),
-        detailItem(
-          "Lease",
-          record.lease_stale
-            ? "Stale"
-            : record.lease_expires_at
-              ? `Expires ${localTime(record.lease_expires_at)}`
-              : "Unavailable",
-        ),
-        detailItem(
-          "Last outcome",
-          record.last_outcome_class
-            ? titleCase(record.last_outcome_class)
-            : "Unavailable",
-        ),
-        detailItem("Updated", localTime(record.updated_at)),
-        detailItem("Goal", record.goal_id || "Unlinked"),
-      );
-    } else {
-      grid.append(
-        detailItem("State", titleCase(record.state)),
-        detailItem("Role", record.role || "Unavailable"),
-        detailItem("Agent ID", record.id || "Unavailable"),
-        detailItem("Work ID", record.work_id || "Unavailable"),
-        detailItem("Model", record.model || "Unavailable"),
-        detailItem("Effort", record.effort || "Unavailable"),
-        detailItem(
-          "Usage",
-          record.total_tokens === null || record.total_tokens === undefined
-            ? "Unavailable"
-            : `${number(record.total_tokens)} tokens`,
-        ),
-        detailItem("Heartbeat", relativeTime(record.heartbeat_at)),
-        detailItem(
-          "Lease",
-          record.lease_stale
-            ? "Stale"
-            : record.lease_expires_at
-              ? `Expires ${localTime(record.lease_expires_at)}`
-              : "Unavailable",
-        ),
-        detailItem("Provenance", record.provenance || "Unavailable"),
-      );
-    }
-    const content = $("detail-content");
-    content.replaceChildren(grid);
-    if (record.lease_stale)
-      content.append(
-        textLine(
-          "p",
-          "detail-note",
-          "The lease is stale, so this record may no longer represent an active worker.",
-        ),
-      );
-    $("detail-panel").hidden = false;
-    if (shouldFocus) $("detail-title").focus({ preventScroll: true });
   }
   function refreshDetail(snapshot) {
     if (!state.selected) return;
@@ -784,130 +526,7 @@
       $("detail-panel").hidden = true;
     }
   }
-  function renderEfficiency(snapshot) {
-    const report = snapshot.efficiency;
-    const totals = report?.totals;
-    const known = totals?.known || {};
-    const knownRecords = report?.coverage?.actual_usage_records;
-    const hasUsage = Number.isFinite(knownRecords) && knownRecords > 0;
-    $("efficiency-coverage").textContent = !report
-      ? (state.demo ? "Usage comparison is unavailable for demonstration data." : "Recorded usage is unavailable.")
-      : !hasUsage ? "No measured usage yet. Planned work does not count as a completed execution."
-      : `${number(knownRecords)} record${knownRecords === 1 ? "" : "s"} with measured usage · ${number(totals.unknown_records)} with unknown usage. ${totals.complete ? "Ledger coverage is complete." : "Coverage is incomplete; totals are partial."}`;
-    const metrics = $("efficiency-metrics");
-    metrics.replaceChildren();
-    [
-      ["Recorded tokens", hasUsage ? known.total_tokens : null],
-      ["Cached input", hasUsage ? totals.subsets?.cached_input_tokens : null],
-      ["Failed / cancelled spend", hasUsage ? totals.non_success_terminal_tokens : null],
-      ["Unknown usage records", totals?.unknown_records],
-    ].forEach(([label, value]) => {
-      const card = el("article", "panel efficiency-metric");
-      card.append(el("p", "eyebrow", label), el("strong", "efficiency-value", number(value)));
-      metrics.append(card);
-    });
-    const input = hasUsage ? known.input_tokens : null;
-    const output = hasUsage ? known.output_tokens : null;
-    const mix = $("efficiency-mix");
-    mix.replaceChildren();
-    if (Number.isFinite(input) && Number.isFinite(output) && input + output > 0) {
-      const inBar = el("span", "efficiency-input");
-      const outBar = el("span", "efficiency-output");
-      inBar.style.width = `${100 * input / (input + output)}%`;
-      outBar.style.width = `${100 * output / (input + output)}%`;
-      mix.append(inBar, outBar);
-    }
-    const label = `${number(input)} input · ${number(output)} output`;
-    mix.setAttribute("aria-label", label);
-    $("efficiency-mix-label").textContent = label;
-    const body = $("efficiency-roles");
-    body.replaceChildren();
-    (report?.by_role_model || []).forEach((group) => {
-      const row = el("tr");
-      row.append(el("td", "", `${readable(group.role)} / ${group.model || "Unknown model"}`),
-        el("td", "", `${number(group.actual_usage_records)} of ${number(group.records)}`),
-        el("td", "", group.actual_usage_records > 0 ? number(group.total_tokens) : "Unavailable"));
-      body.append(row);
-    });
-    if (!body.children.length) {
-      const cell = el("td", "efficiency-note", "No measured role usage available.");
-      cell.colSpan = 3;
-      const row = el("tr"); row.append(cell); body.append(row);
-    }
-  }
 
-  function render(snapshot) {
-    const project = snapshot.project?.name || "This project";
-    const runtime = snapshot.runtime || {};
-    $("page-title").textContent = project;
-    const totalGoals = snapshot.summary?.goals ?? snapshot.goals.length;
-    const totalJobs = snapshot.summary?.jobs ?? snapshot.jobs.length;
-    const totalAgents = snapshot.summary?.agents ?? snapshot.agents.length;
-    $("project-summary").textContent =
-      `${number(totalGoals)} recorded goal${totalGoals === 1 ? "" : "s"} · ${number(totalJobs)} recorded job${totalJobs === 1 ? "" : "s"}.`;
-    $("last-updated").textContent = snapshot.generated_at
-      ? `Last updated ${localTime(snapshot.generated_at)}`
-      : "No snapshot timestamp available";
-    $("mode-label").textContent = state.demo
-      ? "Representative demo · client only"
-      : "Live workspace";
-    $("footer-state").textContent = state.demo
-      ? "Demo data remains in this browser only"
-      : runtime.available
-        ? "Reading local project state"
-        : "Runtime state unavailable";
-    $("goal-tab-count").textContent = number(totalGoals);
-    $("job-tab-count").textContent = number(totalJobs);
-    $("agent-tab-count").textContent = number(totalAgents);
-    const selectedGoal = snapshot.goals.find(
-      (goal) => goal.id === state.selectedGoalId,
-    );
-    $("scope-bar").hidden = !selectedGoal;
-    $("scope-goal-title").textContent = selectedGoal
-      ? selectedGoal.title || selectedGoal.id
-      : "";
-    renderMetrics(snapshot);
-    renderOverviewGoals(snapshot);
-    renderOverviewAgents(snapshot);
-    renderActivity(snapshot);
-    renderGoals(snapshot);
-    updateJobFilterOptions(snapshot);
-    renderJobs(snapshot);
-    renderAgents(snapshot);
-    renderEfficiency(snapshot);
-    refreshDetail(snapshot);
-    const empty = hasNoTrackedWork(snapshot) && !state.demo;
-    $("empty-state").hidden = !empty;
-    document.querySelectorAll(".metrics,.view-tabs").forEach((node) => {
-      node.hidden = empty;
-    });
-    document.querySelector(".dashboard-grid").hidden =
-      empty || state.activeView !== "overview";
-    ["overview", "goals", "jobs", "agents", "efficiency"].forEach((name) => {
-      $(`view-${name}`).hidden = empty || name !== state.activeView;
-    });
-    const notices = [...snapshot.warnings.map((warning) => String(warning))];
-    if (!state.demo && runtime.emergency_stopped)
-      notices.unshift(
-        runtime.message ||
-          "Tasktra execution is emergency-stopped. Recorded state remains available.",
-      );
-    else if (!state.demo && runtime.available === false)
-      notices.unshift(
-        runtime.message ||
-          "The Tasktra runtime is unavailable. The portal will retry.",
-      );
-    else if (state.demo)
-      notices.unshift(
-        "Representative sample data is visible only in this browser. Exit demo to return to your local project.",
-      );
-    if (!state.live)
-      notices.unshift(
-        "Live updates are paused. Use Refresh to request the newest local snapshot.",
-      );
-    if (!state.lastError)
-      setNotice(notices.join(" · "), notices.length ? "warning" : "");
-  }
   function switchView(view) {
     state.activeView = view;
     ["overview", "goals", "jobs", "agents", "efficiency"].forEach((name) => {
@@ -939,73 +558,6 @@
     setConnection("good", state.demo ? "Demo mode" : "Connected");
     render(normalized);
   }
-  function normalizeSnapshot(value) {
-    const input = value && typeof value === "object" ? value : {};
-    return {
-      schema_version: input.schema_version || 1,
-      generated_at: input.generated_at || null,
-      project:
-        input.project && typeof input.project === "object"
-          ? input.project
-          : { name: "This project" },
-      runtime:
-        input.runtime && typeof input.runtime === "object"
-          ? input.runtime
-          : {
-              available: false,
-              emergency_stopped: false,
-              message: "Runtime response was incomplete.",
-            },
-      summary:
-        input.summary && typeof input.summary === "object" ? input.summary : {},
-      efficiency: input.efficiency && typeof input.efficiency === "object" ? input.efficiency : null,
-      goals: Array.isArray(input.goals) ? input.goals : [],
-      jobs: Array.isArray(input.jobs) ? input.jobs : [],
-      agents: Array.isArray(input.agents) ? input.agents : [],
-      events: Array.isArray(input.events) ? input.events : [],
-      warnings: Array.isArray(input.warnings) ? input.warnings : [],
-    };
-  }
-  async function fetchSnapshot(options = {}) {
-    const force = Boolean(options.force);
-    if ((!state.live && !force) || state.demo || state.requestInFlight) return;
-    state.requestInFlight = true;
-    state.controller = new AbortController();
-    const requestGeneration = state.modeGeneration;
-    const timeout = window.setTimeout(() => state.controller.abort(), 8000);
-    try {
-      const response = await fetch("/api/snapshot", {
-        headers: { Accept: "application/json" },
-        signal: state.controller.signal,
-        cache: "no-store",
-      });
-      if (!response.ok)
-        throw new Error(`Snapshot request returned ${response.status}`);
-      const snapshot = await response.json();
-      if (requestGeneration !== state.modeGeneration || state.demo) return;
-      applySnapshot(snapshot);
-    } catch (error) {
-      if (requestGeneration !== state.modeGeneration || state.demo) return;
-      state.lastError = error;
-      const retained = Boolean(state.snapshot);
-      setConnection("offline", retained ? "Stale data" : "Disconnected");
-      const retryHint = state.live
-        ? "Retrying shortly."
-        : "Use Refresh to retry.";
-      setNotice(
-        (retained
-          ? "Could not refresh the local snapshot. Showing the last successful data. "
-          : "Could not reach the local Tasktra runtime. ") + retryHint,
-        "warning",
-      );
-      state.retryMs = Math.min(Math.round(state.retryMs * 1.8), MAX_BACKOFF_MS);
-    } finally {
-      window.clearTimeout(timeout);
-      state.requestInFlight = false;
-      state.controller = null;
-      scheduleNext();
-    }
-  }
   function scheduleNext() {
     window.clearTimeout(state.timer);
     if (state.live && !state.demo)
@@ -1029,13 +581,6 @@
     if (state.demo) exitDemo();
     state.retryMs = POLL_MS;
     fetchSnapshot({ force: true });
-  }
-  function selectGoal(id) {
-    const goal = current().goals.find((item) => item.id === id);
-    if (!goal) return;
-    state.selectedGoalId = state.selectedGoalId === id ? null : id;
-    render(current());
-    showDetail("goal", goal);
   }
   function demoSnapshot() {
     const now = new Date();
@@ -1365,13 +910,9 @@
     $("clear-job-filters").addEventListener("click", () => {
       $("job-search").value = "";
       $("job-status-filter").value = "all";
-      state.selectedGoalId = null;
       render(current());
     });
-    $("clear-goal-scope").addEventListener("click", () => {
-      state.selectedGoalId = null;
-      render(current());
-    });
+    $("clear-goal-scope").addEventListener("click", () => changeGoalScope(""));
     $("close-detail").addEventListener("click", () => {
       $("detail-panel").hidden = true;
       state.selected = null;
@@ -1417,27 +958,355 @@
       }
     });
   }
-  function init() {
-    state.live = loadPreference("tasktra-live", true);
-    state.motion = loadPreference(
-      "tasktra-motion",
-      !window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+
+  function isTerminal(record) {
+    return ["complete", "completed", "succeeded", "failed", "cancelled", "canceled", "exhausted"].includes(String(record.state || record.status || record.outcome || "").toLowerCase());
+  }
+  function leaseHeartbeatLabel(record) {
+    if (isTerminal(record)) return "N/A — finished";
+    const beat = record.heartbeat || {};
+    if (beat.kind === "none") return "No linked lease";
+    const observed = beat.observed_at || record.heartbeat_at;
+    if (!observed) return "No lease heartbeat recorded";
+    return beat.stale || record.lease_stale ? `Lease stale · observed ${relativeTime(observed)}` : `Lease observed ${relativeTime(observed)}`;
+  }
+  function observedActivityLabel(record) {
+    const observed = record.last_observed_at || record.finished_at || record.started_at;
+    return observed ? `Observed ${relativeTime(observed)}` : "No observed activity timestamp";
+  }
+  function scopedTitle(snapshot) {
+    if (!state.selectedGoalId) return "All recorded goals";
+    const goal = [...(snapshot.goals || []), ...(snapshot.goal_options || [])].find((item) => item.id === state.selectedGoalId);
+    return goal ? goal.title || goal.id : `Goal ${state.selectedGoalId}`;
+  }
+  function setSelectOptions(id, items, label, preserve = true) {
+    const select = $(id);
+    if (!select || document.activeElement === select) return;
+    const prior = preserve ? select.value : "";
+    const first = select.options[0]?.cloneNode(true) || el("option", "", "All");
+    select.replaceChildren(first);
+    [...new Set(items.filter(Boolean))].sort((a, b) => String(a).localeCompare(String(b))).forEach((value) => {
+      const option = el("option", "", label ? label(value) : readable(value));
+      option.value = value;
+      select.append(option);
+    });
+    if (prior && ![...select.options].some((item) => item.value === prior)) {
+      const missing = el("option", "", `${label ? label(prior) : prior} (no matching records)`);
+      missing.value = prior;
+      select.append(missing);
+    }
+    select.value = prior;
+  }
+  function syncGoalScope(snapshot) {
+    const select = $("goal-scope-select");
+    if (document.activeElement !== select) {
+      const prior = state.selectedGoalId || "";
+      select.replaceChildren(el("option", "", "All recorded goals"));
+      select.options[0].value = "";
+      (snapshot.goal_options?.length ? snapshot.goal_options : snapshot.goals || []).forEach((goal) => {
+        const option = el("option", "", `${goal.title || goal.id} · ${titleCase(goal.status || "recorded")}`);
+        option.value = goal.id;
+        select.append(option);
+      });
+      if (prior && ![...select.options].some((option) => option.value === prior)) { const missing = el("option", "", `Goal ${prior}`); missing.value = prior; select.append(missing); }
+      select.value = prior;
+    }
+    $("scope-goal-title").textContent = state.selectedGoalId ? `Scoped to ${scopedTitle(snapshot)}` : "All recorded goals";
+    $("clear-goal-scope").hidden = !state.selectedGoalId;
+  }
+  function selectedAgents(snapshot) {
+    const f = state.agentFilters;
+    const query = f.query.trim().toLowerCase();
+    const agents = (snapshot.agents || []).filter((agent) => {
+      const text = `${agent.role || ""} ${agent.id || ""} ${agent.work_id || ""} ${agent.job_title || ""}`.toLowerCase();
+      const model = agent.observed_model || agent.model || "";
+      return (!query || text.includes(query)) && (!f.role || agent.role === f.role) && (!f.model || model === f.model) && (!f.state || agent.state === f.state);
+    });
+    return agents.sort((left, right) => f.sort === "tokens"
+      ? (Number(right.total_tokens) || -1) - (Number(left.total_tokens) || -1)
+      : String(right.last_observed_at || right.finished_at || right.started_at || "").localeCompare(String(left.last_observed_at || left.finished_at || left.started_at || "")));
+  }
+  function renderMetrics(snapshot) {
+    const summary = snapshot.summary || {};
+    const prefix = state.selectedGoalId ? "Scoped" : "Recorded";
+    $("metrics").replaceChildren(
+      metric(`${prefix} active goals`, number(summary.active_goals ?? 0), `${number(summary.goals ?? snapshot.goals.length)} in this view`, "accent"),
+      metric(`${prefix} jobs in motion`, number(summary.running_jobs ?? 0), `${number(summary.jobs ?? snapshot.jobs.length)} recorded`, ""),
+      metric(`${prefix} blocked attention`, number(summary.blocked_jobs ?? 0), "Jobs needing a decision", summary.blocked_jobs ? "alert" : ""),
+      metric(`${prefix} active agents`, number(summary.running_agents ?? 0), `${number(summary.agents ?? snapshot.agents.length)} recorded`, ""),
     );
-    document.body.classList.toggle("motion-off", !state.motion);
-    $("motion-toggle").setAttribute("aria-pressed", String(state.motion));
-    $("live-toggle").setAttribute("aria-pressed", String(state.live));
-    $("live-toggle").textContent = `Live: ${state.live ? "on" : "paused"}`;
-    bind();
-    render(emptySnapshot());
-    setConnection("", "Connecting");
-    if (state.live) fetchSnapshot();
-    else {
-      setConnection("offline", "Updates paused");
-      setNotice(
-        "Live updates are paused. Use Refresh to request the newest local snapshot.",
-        "warning",
+  }
+  function renderJobs(snapshot) {
+    const target = $("jobs-body");
+    if (isFocusedIn(target)) return;
+    const jobs = selectedJobs(snapshot);
+    if (!jobs.length) {
+      const cell = el("td", "record-subtitle", state.selectedGoalId ? "No jobs match this goal and the selected filters." : "No jobs match these filters.");
+      cell.colSpan = 6; const row = el("tr"); row.append(cell); target.replaceChildren(row); return;
+    }
+    target.replaceChildren(...jobs.map((job) => {
+      const row = el("tr"), name = el("td"), stateCell = el("td"), action = el("td");
+      name.append(textLine("div", "record-title", job.title || job.id), textLine("div", "record-subtitle", job.id));
+      stateCell.append(status(job.status));
+      const button = el("button", "text-button details-trigger", "Details"); button.type = "button"; button.dataset.action = "select-job"; button.dataset.jobId = job.id; action.append(button);
+      row.append(name, stateCell, el("td", "", job.owner_id || "Unassigned"), el("td", job.lease_stale ? "stale" : "", leaseHeartbeatLabel(job)), el("td", "", number(job.attempt_count ?? 0)), action);
+      return row;
+    }));
+  }
+  function renderAgents(snapshot) {
+    const agents = selectedAgents(snapshot), all = snapshot.agents || [];
+    setSelectOptions("agent-role-filter", all.map((agent) => agent.role), titleCase);
+    setSelectOptions("agent-model-filter", all.map((agent) => agent.observed_model || agent.model), (value) => value);
+    setSelectOptions("agent-state-filter", all.map((agent) => agent.state), titleCase);
+    $("agents-active-count").textContent = `${number(agents.length)} matching agent${agents.length === 1 ? "" : "s"} · ${number(agents.filter(agentIsActive).length)} currently recorded as active`;
+    const target = $("agents-grid"); if (isFocusedIn(target)) return;
+    if (!agents.length) { target.replaceChildren(textLine("p", "record-subtitle", state.selectedGoalId ? "No agents match this goal and the selected filters." : "No agents match these filters.")); return; }
+    target.replaceChildren(...agents.map((agent) => {
+      const card = el("article", `agent-card ${agentIsActive(agent) ? "agent-active" : ""}`), top = el("div", "agent-card-top"), detail = el("button", "record-button"), foot = el("div", "agent-foot");
+      top.append(agentAvatar(agent), status(agent.state)); detail.type = "button"; detail.dataset.action = "select-agent"; detail.dataset.agentWorkId = agentKey(agent);
+      detail.append(textLine("div", "agent-role", agent.role || agent.id), textLine("div", "agent-meta", [agent.observed_model || agent.model, agent.observed_effort || agent.effort].filter(Boolean).join(" · ") || "Model unavailable"));
+      foot.append(textLine("span", "agent-meta", observedActivityLabel(agent)), textLine("span", "agent-meta", Number.isFinite(agent.total_tokens) ? `${number(agent.total_tokens)} tokens` : "Usage unavailable")); card.append(top, detail, foot); return card;
+    }));
+  }
+  function usageReport(snapshot) {
+    if (snapshot.analytics) return snapshot.analytics;
+    if (!state.demo) return { summary: {}, by_model: [], time_series: [], coverage: { time_series_complete: false, reason: "Usage analytics unavailable; refresh to retry." } };
+    const records = snapshot.agents || [], measured = records.filter((agent) => Number.isFinite(agent.total_tokens));
+    const total = measured.reduce((sum, agent) => sum + agent.total_tokens, 0);
+    return { summary: { records: records.length, measured_records: measured.length, unknown_records: records.length - measured.length, total_tokens: total || null, average_measured_tokens: measured.length ? total / measured.length : null, median_measured_tokens: null }, by_model: [], time_series: [], coverage: { undated_records: 0, time_series_complete: false, reason: "Demonstration data has no hourly usage events." } };
+  }
+  function pct(value) { return Number.isFinite(value) ? `${Math.round(value)}%` : "—"; }
+  function renderTimeline(series, coverage) {
+    const target = $("usage-timeline"), values = $("usage-timeline-values");
+    target.replaceChildren();
+    values.replaceChildren();
+    const largest = Math.max(0, ...series.map((item) => item.total_tokens || 0));
+    if (!series.length) target.append(textLine("p", "efficiency-note", "No hourly measured token events for this scope."));
+    series.forEach((bucket) => {
+      const point = el("div", "timeline-point"), bar = el("span", "timeline-bar");
+      const label = el("span", "timeline-label", localTime(bucket.bucket_start));
+      const amount = el("span", "timeline-value", new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(bucket.total_tokens || 0));
+      bar.style.height = `${largest ? Math.max(1, Math.round(100 * (bucket.total_tokens || 0) / largest)) : 0}%`;
+      point.title = `${localTime(bucket.bucket_start)}: ${number(bucket.total_tokens)} tokens`;
+      point.append(amount, bar, label);
+      target.append(point);
+      const row = el("tr");
+      row.append(el("td", "", localTime(bucket.bucket_start)), ...["total_tokens", "input_tokens", "cached_input_tokens", "output_tokens"].map((key) => el("td", "", number(bucket[key]))));
+      values.append(row);
+    });
+    $("usage-timeline-note").textContent = coverage?.time_series_complete
+      ? "Hourly buckets reflect measured token events in the selected range. Times are local."
+      : `Historical timing is incomplete${coverage?.undated_records ? `: ${number(coverage.undated_records)} record(s) have missing timing` : ""}${coverage?.reason ? `. ${coverage.reason}` : "."}`;
+  }
+  function renderEfficiency(snapshot) {
+    const report = usageReport(snapshot), totals = report.summary || {}, coverage = report.coverage || {}, measured = totals.measured_records || 0;
+    $("efficiency-scope-description").textContent = `${state.selectedGoalId ? scopedTitle(snapshot) : "All recorded executions across this project"}${state.analytics.since ? " � Only measured token events within the selected time range" : ""}.`;
+    setSelectOptions("usage-model-filter", report.options?.models || (report.by_model || []).map((item) => item.model), (value) => value);
+    setSelectOptions("usage-role-filter", report.options?.roles || (snapshot.agents || []).map((agent) => agent.role), titleCase);
+    $("usage-model-filter").value = state.analytics.model;
+    $("usage-role-filter").value = state.analytics.role;
+    $("usage-since-filter").value = state.analytics.since;
+    $("efficiency-coverage").textContent = measured ? `${number(measured)} measured run${measured === 1 ? "" : "s"} of ${number(totals.records ?? measured)} recorded · ${number(totals.unknown_records || 0)} usage record(s) unknown.` : state.selectedGoalId ? "No recorded usage for this goal. Counts are scoped; no global usage is shown." : "No measured usage yet. Planned work does not count as a completed execution.";
+    const metrics = $("efficiency-metrics"); metrics.replaceChildren();
+    [["Recorded tokens", totals.total_tokens], ["Average measured run", Number.isFinite(totals.average_measured_tokens) ? Math.round(totals.average_measured_tokens) : null], ["Median measured run", totals.median_measured_tokens], ["Cache utilization", Number.isFinite(totals.cache_utilization_percent) ? pct(totals.cache_utilization_percent) : null], ["Uncached input", totals.uncached_input_tokens], ["Success rate", Number.isFinite(totals.success_rate_percent) ? pct(totals.success_rate_percent) : null]].forEach(([label, value]) => { const card = el("article", "panel efficiency-metric"); card.append(el("p", "eyebrow", label), el("strong", "efficiency-value", typeof value === "string" ? value : number(value))); metrics.append(card); });
+    const input = totals.input_tokens, output = totals.output_tokens, mix = $("efficiency-mix"); mix.replaceChildren(); if (Number.isFinite(input) && Number.isFinite(output) && input + output) { const a = el("span", "efficiency-input"), b = el("span", "efficiency-output"); a.style.width = `${100 * input / (input + output)}%`; b.style.width = `${100 * output / (input + output)}%`; mix.append(a, b); }
+    const label = `${number(input)} input · ${number(output)} output · ${number(totals.cached_input_tokens)} cached input`; mix.setAttribute("aria-label", label); $("efficiency-mix-label").textContent = label;
+    const body = $("efficiency-roles"); body.replaceChildren(); (report.by_model || []).forEach((group) => { const row = el("tr"), share = Number.isFinite(group.total_tokens) && Number.isFinite(totals.total_tokens) && totals.total_tokens ? pct(100 * group.total_tokens / totals.total_tokens) : "—"; row.append(el("td", "", group.model || "Unknown model"), el("td", "", `${number(group.measured_records)} / ${number(group.records)}`), el("td", "", `${number(group.total_tokens)} / ${share}`), el("td", "", `${number(group.average_measured_tokens)} / ${number(group.median_measured_tokens)}`), el("td", "", pct(group.cache_utilization_percent)), el("td", "", number(group.uncached_input_tokens)), el("td", "", `${number(group.successful_records)} / ${number(group.failed_records)} / ${number(group.cancelled_records)} of ${number((group.successful_records || 0) + (group.failed_records || 0) + (group.cancelled_records || 0))} finished`)); body.append(row); });
+    if (!body.children.length) { const cell = el("td", "efficiency-note", "No measured model comparison available for this scope."); cell.colSpan = 7; const row = el("tr"); row.append(cell); body.append(row); }
+    renderTimeline(report.time_series || [], coverage);
+  }
+  function showDetail(type, record, shouldFocus = true) {
+    state.selected = { type, id: type === "agent" ? agentKey(record) : record.id };
+    const title = type === "goal" ? record.title || record.id : type === "job" ? record.title || record.id : record.role || record.id;
+    $("detail-kind").textContent = `${titleCase(type)} record`; $("detail-title").textContent = title;
+    const grid = el("div", "detail-grid");
+    if (type === "agent") {
+      const total = record.total_tokens, input = record.input_tokens, cached = record.cached_input_tokens, output = record.output_tokens;
+      grid.append(detailItem("State / outcome", [titleCase(record.state), record.outcome ? titleCase(record.outcome) : null].filter(Boolean).join(" · ")), detailItem("Job", record.job_title || "No linked job recorded"), detailItem("Goal lineage", record.goal_title || [...(current().goal_options || []), ...current().goals].find((goal) => goal.id === record.goal_id)?.title || record.goal_id || "Unassigned"), detailItem("Observed model / effort", [record.observed_model || record.model || "Unavailable", record.observed_effort || record.effort || "Unavailable"].join(" · ")), detailItem("Configured model / effort", [record.configured_model || "Unavailable", record.configured_effort || "Unavailable"].join(" · ")), detailItem("Token total", number(total)), detailItem("Input / uncached input", `${number(input)} / ${number(record.uncached_input_tokens)}`), detailItem("Cached input / utilization", `${number(cached)} / ${Number.isFinite(cached) && Number.isFinite(input) && input ? pct(100 * cached / input) : "—"}`), detailItem("Output", number(output)), detailItem("First usage observed", localTime(record.started_at)), detailItem("Last observed", localTime(record.last_observed_at)), detailItem("Lease heartbeat", leaseHeartbeatLabel(record)), detailItem("Usage evidence", record.unknown_reason === "rollout-image-line-over-limit" ? "Unavailable: an image entry exceeded the safe import limit" : record.unknown_reason || (Number.isFinite(total) ? "Measured usage available" : "No measured usage recorded")));
+      const technical = el("details", "technical-details"), summary = el("summary", "", "Technical identifiers and provenance"), data = el("div", "detail-grid"); data.append(detailItem("Agent ID", record.id || "Unavailable"), detailItem("Work ID", record.work_id || "Unavailable"), detailItem("Thread ID", record.thread_id || "Unavailable"), detailItem("Turn ID", record.turn_id || "Unavailable"), detailItem("Parent work ID", record.parent_work_id || "Unavailable"), detailItem("Provenance", record.provenance || "Unavailable")); technical.append(summary, data); $("detail-content").replaceChildren(grid, el("p", "detail-note", "Observed activity comes from execution records. A lease heartbeat records Tasktra coordination; it does not establish whether a host process is still running."), technical);
+    } else {
+    if (type === "goal") {
+      const budget = record.budget || {};
+      const checkpoints = record.checkpoints?.length
+        ? record.checkpoints
+            .map(
+              (checkpoint) =>
+                `${checkpoint.id || "Checkpoint"}: ${titleCase(checkpoint.status)}`,
+            )
+            .join(" · ")
+        : "None recorded";
+      grid.append(
+        detailItem("State", titleCase(record.status)),
+        detailItem(
+          "Progress",
+          Number.isFinite(record.progress_percent)
+            ? `${Math.round(record.progress_percent)}%`
+            : "Unavailable",
+        ),
+        detailItem(
+          "Acceptance",
+          `${record.acceptance_recorded || 0}/${record.acceptance_total || 0} recorded`,
+        ),
+        detailItem("Checkpoints", checkpoints),
+        detailItem(
+          "Budget consumed",
+          budget.consumed_tokens === undefined
+            ? "Unavailable"
+            : number(budget.consumed_tokens),
+        ),
+        detailItem(
+          "Budget total",
+          budget.total_tokens === null || budget.total_tokens === undefined
+            ? "Unavailable"
+            : number(budget.total_tokens),
+        ),
+        detailItem(
+          "Reserved",
+          budget.reserved_tokens === undefined
+            ? "Unavailable"
+            : number(budget.reserved_tokens),
+        ),
+        detailItem("Updated", localTime(record.updated_at)),
+        detailItem("Created", localTime(record.created_at)),
+      );
+    } else if (type === "job") {
+      grid.append(
+        detailItem("State", titleCase(record.status)),
+        detailItem("Owner", record.owner_id || "Unassigned"),
+        detailItem("Attempts", number(record.attempt_count ?? 0)),
+        detailItem("Lease heartbeat", leaseHeartbeatLabel(record)),
+        detailItem(
+          "Lease",
+          record.lease_stale
+            ? "Stale"
+            : record.lease_expires_at
+              ? `Expires ${localTime(record.lease_expires_at)}`
+              : "Unavailable",
+        ),
+        detailItem(
+          "Last outcome",
+          record.last_outcome_class
+            ? titleCase(record.last_outcome_class)
+            : "Unavailable",
+        ),
+        detailItem("Updated", localTime(record.updated_at)),
+        detailItem("Goal", record.goal_id || "Unlinked"),
       );
     }
+      $("detail-content").replaceChildren(grid);
+    }
+    $("detail-panel").hidden = false; if (shouldFocus) $("detail-title").focus({ preventScroll: true });
   }
+
+  function resetLocalFilters() {
+    state.agentFilters = { query: "", role: "", model: "", state: "", sort: "recent" };
+    state.analytics = { model: "", role: "", since: "" };
+    ["agent-search", "agent-role-filter", "agent-model-filter", "agent-state-filter", "usage-model-filter", "usage-role-filter", "usage-since-filter", "job-search"].forEach((id) => { $(id).value = ""; });
+    $("agent-sort").value = "recent";
+    $("job-status-filter").value = "all";
+  }
+  function renderDemoScope() {
+    const snapshot = demoSnapshot();
+    snapshot.goal_options = snapshot.goals.map(({ id, title, status }) => ({ id, title, status }));
+    if (state.selectedGoalId) {
+      ["goals", "jobs", "agents", "events"].forEach((key) => {
+        snapshot[key] = snapshot[key].filter((item) => (key === "goals" ? item.id : item.goal_id) === state.selectedGoalId);
+      });
+      snapshot.summary = {
+        goals: snapshot.goals.length, active_goals: snapshot.goals.filter((goal) => goal.status === "active").length,
+        jobs: snapshot.jobs.length, running_jobs: snapshot.jobs.filter((job) => job.status === "leased").length,
+        blocked_jobs: snapshot.jobs.filter((job) => job.status === "blocked").length,
+        agents: snapshot.agents.length, running_agents: snapshot.agents.filter(agentIsActive).length,
+      };
+    }
+    state.snapshot = snapshot;
+    render(snapshot);
+  }
+  function changeGoalScope(id) {
+    state.selectedGoalId = id || null;
+    savePreference("tasktra-goal-scope", state.selectedGoalId);
+    state.selected = null;
+    $("detail-panel").hidden = true;
+    resetLocalFilters();
+    if (state.demo) { renderDemoScope(); return; }
+    fetchSnapshot({ force: true, replace: true });
+  }
+  function selectGoal(id) {
+    const goal = current().goals.find((item) => item.id === id);
+    changeGoalScope(state.selectedGoalId === id ? "" : id);
+    if (goal) showDetail("goal", goal);
+  }
+  function fetchQuery() {
+    const params = new URLSearchParams();
+    if (state.selectedGoalId) params.set("goal_id", state.selectedGoalId);
+    if (state.analytics.model) params.set("model", state.analytics.model);
+    if (state.analytics.role) params.set("role", state.analytics.role);
+    const periods = { P1D: 1, P7D: 7, P30D: 30 };
+    if (state.analytics.since && periods[state.analytics.since]) {
+      params.set("since", new Date(Date.now() - periods[state.analytics.since] * 86400000).toISOString());
+    }
+    return params.toString();
+  }
+  async function fetchSnapshot(options = {}) {
+    const force = Boolean(options.force);
+    if ((!state.live && !force) || state.demo) return;
+    window.clearTimeout(state.timer);
+    if (state.controller) state.controller.abort();
+    const controller = new AbortController();
+    const sequence = ++state.requestSequence;
+    const mode = state.modeGeneration;
+    state.controller = controller;
+    state.requestInFlight = true;
+    let timedOut = false;
+    const timeout = window.setTimeout(() => { timedOut = true; controller.abort(); }, 8000);
+    try {
+      const query = fetchQuery();
+      const response = await fetch(`/api/snapshot${query ? `?${query}` : ""}`, {
+        headers: { Accept: "application/json" }, signal: controller.signal, cache: "no-store",
+      });
+      if (!response.ok) throw new Error(`Snapshot request returned ${response.status}`);
+      const snapshot = await response.json();
+      if (sequence !== state.requestSequence || mode !== state.modeGeneration || state.demo) return;
+      applySnapshot(snapshot);
+    } catch (error) {
+      if (sequence !== state.requestSequence || mode !== state.modeGeneration || state.demo) return;
+      if (error.name === "AbortError" && !timedOut) return;
+      state.lastError = error;
+      setConnection("offline", state.snapshot ? "Stale data" : "Disconnected");
+      setNotice("Could not refresh this scope. " + (state.live ? "Retrying shortly." : "Use Refresh to retry."), "warning");
+      state.retryMs = Math.min(Math.round(state.retryMs * 1.8), MAX_BACKOFF_MS);
+    } finally {
+      window.clearTimeout(timeout);
+      if (sequence === state.requestSequence) {
+        if (state.controller === controller) state.controller = null;
+        state.requestInFlight = false;
+        scheduleNext();
+      }
+    }
+  }
+  function normalizeSnapshot(value) {
+    const input = value && typeof value === "object" ? value : {}; const normalized = {
+      schema_version: input.schema_version || 1, generated_at: input.generated_at || null, project: input.project && typeof input.project === "object" ? input.project : { name: "This project" }, runtime: input.runtime && typeof input.runtime === "object" ? input.runtime : { available: false, emergency_stopped: false, message: "Runtime response was incomplete." }, summary: input.summary && typeof input.summary === "object" ? input.summary : {}, global_summary: input.global_summary && typeof input.global_summary === "object" ? input.global_summary : {}, goal_options: Array.isArray(input.goal_options) ? input.goal_options : [], analytics: input.analytics && typeof input.analytics === "object" ? input.analytics : null, efficiency: input.efficiency && typeof input.efficiency === "object" ? input.efficiency : null, goals: Array.isArray(input.goals) ? input.goals : [], jobs: Array.isArray(input.jobs) ? input.jobs : [], agents: Array.isArray(input.agents) ? input.agents : [], events: Array.isArray(input.events) ? input.events : [], warnings: Array.isArray(input.warnings) ? input.warnings : [] };
+    return normalized;
+  }
+  function render(snapshot) {
+    const project = snapshot.project?.name || "This project", runtime = snapshot.runtime || {}, summary = snapshot.summary || {};
+    $("page-title").textContent = project; $("project-summary").textContent = `${number(summary.goals ?? snapshot.goals.length)} recorded goal${(summary.goals ?? snapshot.goals.length) === 1 ? "" : "s"} · ${number(summary.jobs ?? snapshot.jobs.length)} recorded job${(summary.jobs ?? snapshot.jobs.length) === 1 ? "" : "s"}.`;
+    $("last-updated").textContent = snapshot.generated_at ? `Last updated ${localTime(snapshot.generated_at)}` : "No snapshot timestamp available"; $("mode-label").textContent = state.demo ? "Representative demo · client only" : state.selectedGoalId ? `Goal scope · ${scopedTitle(snapshot)}` : "Live workspace"; $("footer-state").textContent = state.demo ? "Demo data remains in this browser only" : runtime.available ? "Reading local project state" : "Runtime state unavailable";
+    $("goal-tab-count").textContent = number(summary.goals ?? snapshot.goals.length); $("job-tab-count").textContent = number(summary.jobs ?? snapshot.jobs.length); $("agent-tab-count").textContent = number(summary.agents ?? snapshot.agents.length); syncGoalScope(snapshot); renderMetrics(snapshot); renderOverviewGoals(snapshot); renderOverviewAgents(snapshot); renderActivity(snapshot); renderGoals(snapshot); updateJobFilterOptions(snapshot); renderJobs(snapshot); renderAgents(snapshot); renderEfficiency(snapshot); refreshDetail(snapshot);
+    const empty = hasNoTrackedWork(snapshot) && !state.demo && !state.selectedGoalId; $("empty-state").hidden = !empty; document.querySelectorAll(".metrics,.view-tabs").forEach((node) => { node.hidden = empty; }); document.querySelector(".dashboard-grid").hidden = empty || state.activeView !== "overview"; ["overview", "goals", "jobs", "agents", "efficiency"].forEach((name) => { $(`view-${name}`).hidden = empty || name !== state.activeView; });
+    const notices = [...snapshot.warnings.map(String)]; if (!state.demo && runtime.emergency_stopped) notices.unshift(runtime.message || "Tasktra execution is emergency-stopped. Recorded state remains available."); else if (!state.demo && runtime.available === false) notices.unshift(runtime.message || "The Tasktra runtime is unavailable. The portal will retry."); else if (state.demo) notices.unshift("Representative sample data is visible only in this browser. Exit demo to return to your local project."); if (!state.live) notices.unshift("Live updates are paused. Use Refresh to request the newest local snapshot."); if (!state.lastError) setNotice(notices.join(" · "), notices.length ? "warning" : "");
+  }
+  function bindInsights() {
+    $("goal-scope-select").addEventListener("change", (event) => changeGoalScope(event.target.value));
+    [["agent-search", "query", "input"], ["agent-role-filter", "role", "change"], ["agent-model-filter", "model", "change"], ["agent-state-filter", "state", "change"], ["agent-sort", "sort", "change"]].forEach(([id, key, event]) => $(id).addEventListener(event, (e) => { state.agentFilters[key] = e.target.value; renderAgents(current()); }));
+    $("clear-agent-filters").addEventListener("click", () => { state.agentFilters = { query: "", role: "", model: "", state: "", sort: "recent" }; $("agent-search").value = ""; $("agent-role-filter").value = ""; $("agent-model-filter").value = ""; $("agent-state-filter").value = ""; $("agent-sort").value = "recent"; renderAgents(current()); });
+    [["usage-model-filter", "model"], ["usage-role-filter", "role"], ["usage-since-filter", "since"]].forEach(([id, key]) => $(id).addEventListener("change", (event) => { state.analytics[key] = event.target.value; state.selected = null; $("detail-panel").hidden = true; if (state.demo) render(current()); else fetchSnapshot({ force: true, replace: true }); }));
+    $("clear-usage-filters").addEventListener("click", () => { state.analytics = { model: "", role: "", since: "" }; $("usage-model-filter").value = ""; $("usage-role-filter").value = ""; $("usage-since-filter").value = ""; if (state.demo) render(current()); else fetchSnapshot({ force: true, replace: true }); });
+  }
+  function init() {
+    state.live = loadPreference("tasktra-live", true); state.motion = loadPreference("tasktra-motion", !window.matchMedia("(prefers-reduced-motion: reduce)").matches); state.selectedGoalId = loadPreference("tasktra-goal-scope", null); document.body.classList.toggle("motion-off", !state.motion); $("motion-toggle").setAttribute("aria-pressed", String(state.motion)); $("live-toggle").setAttribute("aria-pressed", String(state.live)); $("live-toggle").textContent = `Live: ${state.live ? "on" : "paused"}`; bind(); bindInsights(); render(emptySnapshot()); setConnection("", "Connecting"); if (state.live) fetchSnapshot(); else { setConnection("offline", "Updates paused"); setNotice("Live updates are paused. Use Refresh to request the newest local snapshot.", "warning"); }
+  }
+
   init();
 })();

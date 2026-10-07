@@ -207,9 +207,14 @@
             Token usage
           </button>
         </nav>
-        <div class="scope-bar" id="scope-bar" hidden aria-live="polite">
-          <span>Showing goal: <strong id="scope-goal-title"></strong></span
-          ><button class="text-button" id="clear-goal-scope" type="button">
+        <div class="scope-bar" id="scope-bar" aria-live="polite">
+          <label class="select-label" for="goal-scope-select">Goal scope
+            <select id="goal-scope-select" aria-describedby="scope-goal-title">
+              <option value="">All recorded goals</option>
+            </select>
+          </label>
+          <span id="scope-goal-title">All recorded goals</span>
+          <button class="text-button" id="clear-goal-scope" type="button">
             Clear goal filter
           </button>
         </div>
@@ -339,13 +344,28 @@
             </div>
             <p>Recorded agents and their last known state.</p>
           </div>
+          <div class="toolbar" aria-label="Filter agents">
+            <label class="search"><span class="sr-only">Search agents by role, name, or task</span><input id="agent-search" type="search" placeholder="Search role, name, or task" /></label>
+            <label class="select-label">Role <select id="agent-role-filter"><option value="">All roles</option></select></label>
+            <label class="select-label">Model <select id="agent-model-filter"><option value="">All models</option></select></label>
+            <label class="select-label">State <select id="agent-state-filter"><option value="">All states</option></select></label>
+            <label class="select-label">Sort <select id="agent-sort"><option value="recent">Most recently observed</option><option value="tokens">Most tokens</option></select></label>
+            <button class="text-button" id="clear-agent-filters" type="button">Clear filters</button>
+          </div>
+          <p id="agents-active-count" class="efficiency-note"></p>
           <div class="agent-grid" id="agents-grid"></div>
         </section>
 
         <section class="view-section" id="view-efficiency" role="tabpanel" aria-labelledby="tab-efficiency" hidden>
           <div class="section-heading">
             <div><p class="eyebrow">Efficiency</p><h2>Where the tokens go</h2></div>
-            <p>All recorded executions across this project.</p>
+            <p id="efficiency-scope-description">All recorded executions across this project.</p>
+          </div>
+          <div class="toolbar" aria-label="Filter token usage">
+            <label class="select-label">Model <select id="usage-model-filter"><option value="">All models</option></select></label>
+            <label class="select-label">Role <select id="usage-role-filter"><option value="">All roles</option></select></label>
+            <label class="select-label">Time <select id="usage-since-filter"><option value="">All recorded time</option><option value="P1D">Last 24 hours</option><option value="P7D">Last 7 days</option><option value="P30D">Last 30 days</option></select></label>
+            <button class="text-button" id="clear-usage-filters" type="button">Clear filters</button>
           </div>
           <p id="efficiency-coverage" class="efficiency-note"></p>
           <div id="efficiency-metrics" class="efficiency-metrics"></div>
@@ -356,9 +376,18 @@
             <p class="efficiency-note">Cached input is part of input. It is never counted twice or subtracted from total tokens.</p>
           </div>
           <div class="panel efficiency-panel">
-            <h3>Usage by role and model</h3>
-            <div class="table-wrap"><table><thead><tr><th scope="col">Role / model</th><th scope="col">Measured records</th><th scope="col">Total tokens</th></tr></thead><tbody id="efficiency-roles"></tbody></table></div>
-            <p class="efficiency-note">Savings need a paired comparison with the same task and acceptance checks. This dashboard shows recorded usage; it does not estimate a baseline.</p>
+            <h3>Model comparison</h3>
+            <div class="table-wrap"><table id="usage-model-table"><thead><tr><th scope="col">Model</th><th scope="col">Measured runs</th><th scope="col">Total / share</th><th scope="col">Avg / median</th><th scope="col">Cache utilization</th><th scope="col">Uncached input</th><th scope="col">Succeeded / failed / cancelled</th></tr></thead><tbody id="efficiency-roles"></tbody></table></div>
+            <p class="efficiency-note">Tasks differ. Lower token use does not prove better quality; compare runs with the same task and acceptance evidence.</p>
+          </div>
+          <div class="panel efficiency-panel">
+            <h3>Hourly token events</h3>
+            <div id="usage-timeline" class="usage-timeline" aria-label="Hourly measured token events"></div>
+            <p id="usage-timeline-note" class="efficiency-note"></p>
+            <details class="technical-details">
+              <summary>View hourly values</summary>
+              <div class="table-wrap"><table><thead><tr><th>Hour (local time)</th><th>Total tokens</th><th>Input</th><th>Cached input</th><th>Output</th></tr></thead><tbody id="usage-timeline-values"></tbody></table></div>
+            </details>
           </div>
         </section>
 

@@ -190,13 +190,16 @@ class ExecutionStore:
                     source_path_sha256 TEXT, source_sha256 TEXT, source_bytes INTEGER,
                     rollout_agent_id TEXT, rollout_model TEXT, rollout_effort TEXT,
                     usage_json TEXT, rollout_schema TEXT, response_count INTEGER,
-                    response_fingerprints_json TEXT
+                    response_fingerprints_json TEXT,
+                    goal_id TEXT, goal_attribution_reason TEXT,
+                    usage_events_json TEXT, observed_started_at TEXT, last_observed_at TEXT
                 )
             """)
             columns = {item[1] for item in connection.execute("PRAGMA table_info(execution)")}
             additions = {"start_provenance": "TEXT", "finish_provenance": "TEXT", "usage_provenance": "TEXT",
                          "response_fingerprints_json": "TEXT", "source_bytes": "INTEGER", "host_result_json": "TEXT",
-                         "host_result_sha256": "TEXT"}
+                         "host_result_sha256": "TEXT", "goal_id": "TEXT", "goal_attribution_reason": "TEXT",
+                         "usage_events_json": "TEXT", "observed_started_at": "TEXT", "last_observed_at": "TEXT"}
             for name, field_type in additions.items():
                 if name not in columns:
                     connection.execute(f"ALTER TABLE execution ADD COLUMN {name} {field_type}")
@@ -214,10 +217,12 @@ class ExecutionStore:
         value = dict(row)
         usage_json = value.pop("usage_json", None)
         fingerprints_json = value.pop("response_fingerprints_json", None)
+        usage_events_json = value.pop("usage_events_json", None)
         host_result_json = value.pop("host_result_json", None)
         value["host_result"] = json.loads(host_result_json) if host_result_json is not None else None
         value["usage"] = json.loads(usage_json) if usage_json is not None else None
         value["response_fingerprints"] = json.loads(fingerprints_json) if fingerprints_json is not None else []
+        value["usage_events"] = json.loads(usage_events_json) if usage_events_json is not None else []
         host_model, host_effort = value["observed_model"], value["observed_effort"]
         host_agent = value["agent_id"]
         # The parser is the most specific observation for an imported scope.
@@ -290,8 +295,15 @@ class ExecutionStore:
         fields = tuple(values)
         self._initialize()
         with self._connection() as connection:
-            if parent_work_id is not None and connection.execute("SELECT 1 FROM execution WHERE work_id = ?", (parent_work_id,)).fetchone() is None:
-                raise ExecutionError("parent_work_id is not planned")
+            inherited_goal_id = inherited_goal_reason = None
+            if parent_work_id is not None:
+                parent = connection.execute("SELECT * FROM execution WHERE work_id = ?", (parent_work_id,)).fetchone()
+                if parent is None:
+                    raise ExecutionError("parent_work_id is not planned")
+                # Explicit goal attribution is durable lineage metadata.  New
+                # descendants inherit it; filesystem names never participate.
+                inherited_goal_id = parent["goal_id"]
+                inherited_goal_reason = parent["goal_attribution_reason"]
             old = connection.execute("SELECT * FROM execution WHERE work_id = ?", (work_id,)).fetchone()
             if old is not None:
                 if self._same(old, values, fields):
@@ -299,9 +311,9 @@ class ExecutionStore:
                 raise ExecutionError("work_id is immutable once planned")
             connection.execute("""INSERT INTO execution
                 (work_id, role, configured_model, configured_effort, requested_model,
-                 requested_effort, override_reason, parent_work_id, attribution_reason, state)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned')""",
-                tuple(values[name] for name in fields))
+                 requested_effort, override_reason, parent_work_id, attribution_reason, goal_id, goal_attribution_reason, state)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned')""",
+                (*tuple(values[name] for name in fields), inherited_goal_id, inherited_goal_reason))
             return self._public(self._row(connection, work_id))
 
     @staticmethod
@@ -431,10 +443,11 @@ class ExecutionStore:
         stored_agent = rollout_agent if rollout_agent is not None else row["rollout_agent_id"]
         connection.execute("""UPDATE execution SET source_path_sha256=?, source_sha256=?, source_bytes=?, rollout_agent_id=?,
             rollout_model=?, rollout_effort=?, usage_json=?, usage_provenance=?, rollout_schema=?,
-            response_count=?, response_fingerprints_json=? WHERE work_id=?""",
+            response_count=?, response_fingerprints_json=?, usage_events_json=?, observed_started_at=?, last_observed_at=? WHERE work_id=?""",
             (source_path_sha256, source_sha256, observation.source_bytes, stored_agent, rollout_model, rollout_effort,
              _json(usage) if usage is not None else None, "rollout-verified" if usage is not None else None,
-             schema, observation.response_count, _json(list(fingerprints)), work_id))
+             schema, observation.response_count, _json(list(fingerprints)), _json(list(observation.usage_events)),
+             observation.observed_started_at, observation.last_observed_at, work_id))
         if fallback_reason is not None and row["fallback_reason"] is None:
             connection.execute("UPDATE execution SET fallback_reason=? WHERE work_id=?", (fallback_reason, work_id))
         if unknown_reason != row["unknown_reason"]:
@@ -445,6 +458,9 @@ class ExecutionStore:
                              fallback_reason: str | None = None) -> dict[str, Any]:
         """Import one append-only rollout refresh."""
         work_id = _identifier(work_id, "work_id")
+        # A caller explicitly imports evidence, so this is the permitted point
+        # to add optional ledger columns to an older local receipt database.
+        self._initialize()
         self._require_database()
         with self._connection() as connection:
             return self._import_in_connection(connection, work_id, path, fallback_reason)
@@ -457,6 +473,7 @@ class ExecutionStore:
         default host directory or turns an unplanned record into telemetry.
         """
         work_id = _identifier(work_id, "work_id")
+        self._initialize()
         self._require_database()
         with self._connection() as connection:
             row = self._row(connection, work_id)
@@ -579,23 +596,79 @@ class ExecutionStore:
                                (outcome, outcome, unknown_reason, provenance, work_id))
             return self._public(self._row(connection, work_id))
 
+    def attribute_goal(self, work_id: str, goal_id: str, reason: str) -> list[dict[str, Any]]:
+        """Persist one explicit goal assertion for an anchor and planned descendants.
+
+        This deliberately never consults filesystem names or runtime records: callers
+        attest the association, and a conflicting later assertion is rejected.
+        """
+        work_id = _identifier(work_id, "work_id")
+        goal_id = _identifier(goal_id, "goal_id")
+        reason = _reason(reason, "goal attribution reason", required=True)
+        # Attribution is an explicit local mutation; initialize only here, not
+        # on portal/report reads, so the portal remains strictly read-only.
+        self._initialize()
+        self._require_database()
+        with self._connection() as connection:
+            self._row(connection, work_id)
+            descendants = [work_id]
+            index = 0
+            while index < len(descendants):
+                parent = descendants[index]
+                children = connection.execute("SELECT work_id FROM execution WHERE parent_work_id=? ORDER BY work_id", (parent,)).fetchall()
+                for child in children:
+                    value = str(child["work_id"])
+                    if value in descendants:
+                        raise ExecutionError("execution parent chain contains a cycle")
+                    if len(descendants) >= 5000:
+                        raise ExecutionError("goal attribution exceeds the descendant limit")
+                    descendants.append(value)
+                index += 1
+            rows = []
+            for item in descendants:
+                row = self._row(connection, item)
+                if row["goal_id"] is not None and (row["goal_id"] != goal_id or row["goal_attribution_reason"] != reason):
+                    raise ExecutionError("goal attribution is immutable once recorded")
+                if row["goal_id"] is None:
+                    connection.execute("UPDATE execution SET goal_id=?,goal_attribution_reason=? WHERE work_id=?", (goal_id, reason, item))
+                rows.append(self._public(self._row(connection, item)))
+            return rows
+
     def get(self, work_id: str) -> dict[str, Any]:
         work_id = _identifier(work_id, "work_id")
         self._require_database()
         with self._connection() as connection:
             return self._public(self._row(connection, work_id))
 
-    def iter_records(self) -> Iterator[dict[str, Any]]:
-        """Stream a consistent, read-only full-ledger snapshot for aggregation."""
+    def iter_records(self, *, goal_id: str | None = None, linked_work_ids: tuple[str, ...] = ()) -> Iterator[dict[str, Any]]:
+        """Stream a consistent receipt snapshot, filtering before callers apply row limits."""
         if not self.path.exists():
             return
+        goal_id = _identifier(goal_id, "goal_id", optional=True)
+        linked_work_ids = tuple(_identifier(value, "linked_work_id") for value in linked_work_ids)
+        if len(linked_work_ids) > 900:
+            raise ExecutionError("linked work scope exceeds the query bound")
         self._require_database()
         connection = sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True)
         connection.row_factory = sqlite3.Row
         try:
             connection.execute("PRAGMA query_only = ON")
             connection.execute("BEGIN")
-            for row in connection.execute("SELECT * FROM execution ORDER BY work_id"):
+            columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(execution)")}
+            if goal_id is not None and "goal_id" not in columns:
+                # Legacy ledgers have no explicit attribution; runtime links are
+                # still usable without mutating the ledger.
+                if not linked_work_ids: return
+                marks = ",".join("?" for _ in linked_work_ids)
+                query, params = (f"SELECT * FROM execution WHERE work_id IN ({marks}) OR parent_work_id IN ({marks}) ORDER BY work_id", (*linked_work_ids, *linked_work_ids))
+            elif goal_id is None:
+                query, params = ("SELECT * FROM execution ORDER BY work_id", ())
+            elif linked_work_ids:
+                marks = ",".join("?" for _ in linked_work_ids)
+                query, params = (f"SELECT * FROM execution WHERE goal_id=? OR work_id IN ({marks}) OR parent_work_id IN ({marks}) ORDER BY work_id", (goal_id, *linked_work_ids, *linked_work_ids))
+            else:
+                query, params = ("SELECT * FROM execution WHERE goal_id=? ORDER BY work_id", (goal_id,))
+            for row in connection.execute(query, params):
                 yield self._public(row)
         finally:
             connection.close()

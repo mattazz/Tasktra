@@ -9,7 +9,7 @@ from threading import Thread
 import unittest
 
 from tasktra.execution import ExecutionStore
-from tasktra.portal import make_portal_server, portal_snapshot
+from tasktra.portal import _analytics, make_portal_server, portal_snapshot
 from tasktra.state import SCHEMA_VERSION, StateStore
 
 
@@ -293,6 +293,111 @@ class PortalSnapshotTests(unittest.TestCase):
         agent = portal_snapshot(self.root)["agents"][0]
         self.assertEqual((agent["id"], agent["model"], agent["effort"], agent["provenance"]),
                          ("work-one", None, None, "rollout-verified"))
+
+
+    def test_goal_scope_filters_jobs_agents_and_usage_without_global_fallback(self) -> None:
+        self.store.create_goal(goal_id="goal-one", title="One", description="One")
+        self.store.create_goal(goal_id="goal-two", title="Two", description="Two")
+        self.store.create_work_unit(goal_id="goal-one", work_unit_id="work-one", title="One work")
+        self.store.create_work_unit(goal_id="goal-two", work_unit_id="work-two", title="Two work")
+        ledger = ExecutionStore(self.root)
+        usage = {"input_tokens": 8, "cached_input_tokens": 3, "cache_write_input_tokens": 0, "output_tokens": 2, "reasoning_output_tokens": 0, "total_tokens": 10}
+        for work_id, goal_id in (("work-one", "goal-one"), ("work-two", "goal-two")):
+            ledger.plan(work_id, "worker", None, None)
+            ledger.start(work_id, "codex", "local", f"thread-{work_id}", provenance="host-callback")
+            ledger.record_host_usage(work_id, thread_id=f"thread-{work_id}", usage=usage)
+            ledger.finish(work_id, "succeeded")
+            ledger.attribute_goal(work_id, goal_id, "runtime-work-evidence")
+        scoped = portal_snapshot(self.root, goal_id="goal-one")
+        self.assertEqual(([job["id"] for job in scoped["jobs"]], [agent["work_id"] for agent in scoped["agents"]]), (["work-one"], ["work-one"]))
+        self.assertEqual(scoped["analytics"]["summary"]["total_tokens"], 10)
+        self.assertEqual(scoped["efficiency"]["totals"]["known"]["total_tokens"], 10)
+        missing = portal_snapshot(self.root, goal_id="missing-goal")
+        self.assertEqual((missing["summary"]["jobs"], missing["summary"]["agents"], missing["analytics"]["summary"]["records"]), (0, 0, 0))
+
+
+    def test_analytics_period_totals_use_timestamped_deltas_and_exclude_plans(self) -> None:
+        self.store.create_goal(goal_id="goal-one", title="One", description="One")
+        self.store.create_work_unit(goal_id="goal-one", work_unit_id="work-one", title="Work")
+        ledger = ExecutionStore(self.root)
+        ledger.plan("planned", "worker", None, None)
+        ledger.plan("work-one", "worker", None, None)
+        ledger.start("work-one", "codex", "local", "thread-one")
+        first = {"input_tokens": 8, "cached_input_tokens": 0, "cache_write_input_tokens": 0, "output_tokens": 2, "reasoning_output_tokens": 0, "total_tokens": 10}
+        second = {"input_tokens": 16, "cached_input_tokens": 0, "cache_write_input_tokens": 0, "output_tokens": 4, "reasoning_output_tokens": 0, "total_tokens": 20}
+        rollout = self.root / "timed.jsonl"
+        rollout.write_text("\n".join(json.dumps(event) for event in (
+            {"type": "session_meta", "payload": {"id": "thread-one"}},
+            {"timestamp": "2026-01-01T00:15:00Z", "type": "token_usage_record", "payload": {"thread_id": "thread-one", "turn_id": None, "response_id": "one", "usage": first}},
+            {"timestamp": "2026-02-01T00:15:00Z", "type": "token_usage_record", "payload": {"thread_id": "thread-one", "turn_id": None, "response_id": "two", "usage": second}},
+        )) + "\n", encoding="utf-8")
+        ledger.import_codex_rollout("work-one", rollout)
+        ledger.finish("work-one", "succeeded")
+        ledger.attribute_goal("work-one", "goal-one", "runtime-work-evidence")
+        scoped = portal_snapshot(self.root, goal_id="goal-one", since="2026-02-01T00:00:00Z")
+        self.assertEqual((scoped["analytics"]["summary"]["records"], scoped["analytics"]["summary"]["total_tokens"]), (1, 20))
+        self.assertEqual(sum(item["total_tokens"] for item in scoped["analytics"]["time_series"]), 20)
+        unscoped = portal_snapshot(self.root)
+        self.assertEqual((unscoped["analytics"]["summary"]["records"], unscoped["analytics"]["summary"]["unknown_records"]), (1, 0))
+
+
+    def test_analytics_requires_observed_usage_provenance(self) -> None:
+        usage = {"input_tokens": 8, "cached_input_tokens": 3, "cache_write_input_tokens": 0, "output_tokens": 2, "reasoning_output_tokens": 0, "total_tokens": 10}
+        manual = {"work_id": "manual", "role": "worker", "state": "succeeded", "usage": usage, "usage_provenance": None, "observed_model": "untrusted", "usage_events": []}
+        observed = {"work_id": "observed", "role": "worker", "state": "succeeded", "usage": usage, "usage_provenance": "host-callback", "observed_model": "trusted", "usage_events": []}
+        result = _analytics([manual, observed], goal_id=None, work_ids=set(), model=None, role=None, since=None, truncated=False)
+        self.assertEqual((result["summary"]["records"], result["summary"]["measured_records"], result["summary"]["total_tokens"]), (2, 1, 10))
+        self.assertEqual(result["options"]["models"], ["trusted"])
+
+
+    def test_goal_scope_excludes_other_goals_active_jobs_and_receipts(self) -> None:
+        for goal_id in ("goal-one", "goal-two"):
+            self.store.create_goal(goal_id=goal_id, title=goal_id, description=goal_id)
+            self.store.create_work_unit(goal_id=goal_id, work_unit_id=f"work-{goal_id}", title="Work")
+        future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        with closing(sqlite3.connect(self.path)) as connection:
+            connection.execute("UPDATE work_units SET status='leased',lease_holder='worker',lease_expires_at=? WHERE goal_id='goal-two'", (future,))
+            connection.commit()
+        ledger = ExecutionStore(self.root)
+        ledger.plan("unlinked-started", "worker", None, None)
+        ledger.start("unlinked-started", "codex", "local", "thread-two")
+        ledger.attribute_goal("unlinked-started", "goal-two", "verified-lineage")
+        scoped = portal_snapshot(self.root, goal_id="goal-one")
+        self.assertEqual((scoped["summary"]["running_jobs"], scoped["summary"]["running_agents"], scoped["agents"]), (0, 0, []))
+        other = portal_snapshot(self.root, goal_id="goal-two")
+        self.assertEqual((other["summary"]["running_jobs"], other["summary"]["running_agents"]), (1, 2))
+
+    def test_timeline_rejects_untrusted_and_invalid_counter_events(self) -> None:
+        valid = {"input_tokens": 8, "cached_input_tokens": 3, "cache_write_input_tokens": 0, "output_tokens": 2, "reasoning_output_tokens": 0, "total_tokens": 10}
+        for provenance in (None, "manual-assertion", "host-callback"):
+            with self.subTest(provenance=provenance):
+                receipt = valid if provenance != "host-callback" else {**valid, "total_tokens": 999}
+                record = {"work_id": "work-one", "role": "worker", "state": "succeeded", "usage": receipt, "usage_provenance": provenance, "usage_events": [{"at": "2026-02-01T00:15:00Z", "usage": valid}]}
+                result = _analytics([record], goal_id=None, work_ids=set(), model=None, role=None, since=None, truncated=False)
+                self.assertEqual((result["summary"]["measured_records"], result["summary"]["unknown_records"], result["time_series"]), (0, 1, []))
+
+    def test_partial_or_malformed_event_timing_preserves_totals_and_discloses_gap(self) -> None:
+        first = {"input_tokens": 8, "cached_input_tokens": 3, "cache_write_input_tokens": 0, "output_tokens": 2, "reasoning_output_tokens": 0, "total_tokens": 10}
+        aggregate = {key: value * 2 for key, value in first.items()}
+        record = {"work_id": "work-one", "role": "worker", "state": "succeeded", "usage": aggregate, "usage_provenance": "rollout-verified", "usage_events": [{"at": "2026-02-01T00:15:00Z", "usage": first}, {"at": "bad-timestamp", "usage": first}]}
+        result = _analytics([record], goal_id=None, work_ids=set(), model=None, role=None, since=None, truncated=False)
+        self.assertEqual((result["summary"]["total_tokens"], sum(row["total_tokens"] for row in result["time_series"])), (20, 10))
+        self.assertEqual(result["coverage"]["undated_records"], 1)
+        self.assertFalse(result["coverage"]["time_series_complete"])
+
+    def test_agent_components_do_not_expose_untrusted_or_invalid_usage(self) -> None:
+        self.store.create_goal(goal_id="goal-one", title="One", description="One")
+        ledger = ExecutionStore(self.root)
+        ledger.plan("agent-one", "worker", None, None)
+        ledger.start("agent-one", "codex", "local", "thread-one")
+        valid = {"input_tokens": 8, "cached_input_tokens": 3, "cache_write_input_tokens": 0, "output_tokens": 2, "reasoning_output_tokens": 0, "total_tokens": 10}
+        for provenance, usage in ((None, valid), ("manual-assertion", valid), ("host-callback", {**valid, "cached_input_tokens": 99})):
+            with self.subTest(provenance=provenance, usage=usage):
+                with closing(sqlite3.connect(ledger.path)) as connection:
+                    connection.execute("UPDATE execution SET usage_json=?,usage_provenance=? WHERE work_id='agent-one'", (json.dumps(usage), provenance))
+                    connection.commit()
+                agent = portal_snapshot(self.root)["agents"][0]
+                self.assertTrue(all(agent[key] is None for key in ("total_tokens", "input_tokens", "cached_input_tokens", "uncached_input_tokens", "output_tokens")))
 
 
 class PortalHttpTests(unittest.TestCase):
