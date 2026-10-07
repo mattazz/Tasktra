@@ -24,6 +24,7 @@ from .codex_usage import USAGE_FIELDS
 from .state import SCHEMA_VERSION
 from .portal_activity import agent_activity
 from .portal_insights import build_insights, project_key
+from .portal_timeline import MAX_TIMELINE_ROWS, build_timeline
 
 
 _MAX_GOALS = 200
@@ -37,6 +38,7 @@ _STATIC_ROUTES = {
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "application/javascript; charset=utf-8"),
     "/portal-insights.js": ("portal-insights.js", "application/javascript; charset=utf-8"),
+    "/portal-timeline.js": ("portal-timeline.js", "application/javascript; charset=utf-8"),
     "/relationship-map.js": ("relationship-map.js", "application/javascript; charset=utf-8"),
     "/vendor-cytoscape-3.34.3.min.js": ("vendor-cytoscape-3.34.3.min.js", "application/javascript; charset=utf-8"),
     "/vendor-layout-base-2.0.1.js": ("vendor-layout-base-2.0.1.js", "application/javascript; charset=utf-8"),
@@ -70,7 +72,8 @@ def _empty_snapshot(name: str, message: str | None = None) -> dict[str, Any]:
 
 
 def _with_insights(snapshot: dict[str, Any], root: Path, *, goal_id: str | None,
-                   runtime_schema_version: int | None = None) -> dict[str, Any]:
+                   runtime_schema_version: int | None = None, attempts: tuple[dict[str, Any], ...] = (),
+                   attempt_total: int | None = None) -> dict[str, Any]:
     """Attach Phase 1 safe projections on every snapshot return path."""
     project = snapshot.get("project")
     if isinstance(project, dict):
@@ -79,6 +82,7 @@ def _with_insights(snapshot: dict[str, Any], root: Path, *, goal_id: str | None,
         snapshot, root, goal_id=goal_id, runtime_schema_version=runtime_schema_version,
         expected_schema_version=SCHEMA_VERSION,
     )
+    snapshot["insights"]["timeline"] = build_timeline(snapshot, attempts, attempt_total=attempt_total)
     return snapshot
 
 
@@ -561,6 +565,8 @@ def portal_snapshot(root: Path, *, goal_id: str | None = None, model: str | None
 
     snapshot = _empty_snapshot(config.name, "Runtime database is unavailable.")
     runtime_schema_version: int | None = None
+    timeline_attempts: tuple[dict[str, Any], ...] = ()
+    timeline_attempt_total: int | None = None
     snapshot["filters"] = {"goal_id": goal_id, "model": model, "role": role, "since": since}
     snapshot["goal_options"] = []
     snapshot["global_summary"] = dict(snapshot["summary"])
@@ -692,6 +698,19 @@ def portal_snapshot(root: Path, *, goal_id: str | None = None, model: str | None
                 "updated_at": str(row["updated_at"]), "last_outcome_class": row["last_outcome_class"],
             })
 
+        timeline_attempt_total = int(connection.execute(
+            "SELECT count(*) FROM work_attempts a JOIN work_units w ON w.id=a.work_unit_id WHERE (? IS NULL OR w.goal_id=?)",
+            (goal_id, goal_id),
+        ).fetchone()[0])
+        attempt_rows = connection.execute(
+            """SELECT a.id,a.work_unit_id,a.acquired_at,a.ended_at,a.status,a.outcome_class,a.elapsed_ms,
+                      w.goal_id,w.title AS job_title
+                 FROM work_attempts a JOIN work_units w ON w.id=a.work_unit_id
+                 WHERE (? IS NULL OR w.goal_id=?) ORDER BY julianday(a.acquired_at) IS NULL,julianday(a.acquired_at),a.id LIMIT ?""",
+            (goal_id, goal_id, MAX_TIMELINE_ROWS + 1),
+        ).fetchall()
+        timeline_attempts = tuple(dict(row) for row in attempt_rows)
+
         scoped_work_ids = tuple(str(row["id"]) for row in connection.execute("SELECT id FROM work_units WHERE goal_id=? ORDER BY id LIMIT 900", (goal_id,))) if goal_id is not None else ()
         if goal_id is not None:
             scoped_work_count = int(connection.execute("SELECT count(*) FROM work_units WHERE goal_id=?", (goal_id,)).fetchone()[0])
@@ -781,10 +800,10 @@ def portal_snapshot(root: Path, *, goal_id: str | None = None, model: str | None
         except (ExecutionError, OSError, sqlite3.Error, ValueError):
             snapshot["analytics"] = None
         _apply_goal_scope(snapshot, goal_id)
-        return _with_insights(snapshot, project_root, goal_id=goal_id, runtime_schema_version=version)
+        return _with_insights(snapshot, project_root, goal_id=goal_id, runtime_schema_version=version, attempts=timeline_attempts, attempt_total=timeline_attempt_total)
     except (sqlite3.Error, ValueError, TypeError, KeyError):
         warnings.append("Runtime database could not be read safely.")
-        return _with_insights(snapshot, project_root, goal_id=goal_id, runtime_schema_version=runtime_schema_version)
+        return _with_insights(snapshot, project_root, goal_id=goal_id, runtime_schema_version=runtime_schema_version, attempts=timeline_attempts, attempt_total=timeline_attempt_total)
     finally:
         connection.close()
 

@@ -1,6 +1,6 @@
 "use strict";
 const assert = require("node:assert/strict");
-const { buildGraph, filterGraph, projectGraph, projectOverview, projectGroupPage } = require("../src/tasktra/portal_static/relationship-map.js");
+const { buildGraph, filterGraph, projectGraph, projectOverview, projectGroupPage, presetGraph, runLabel, layoutKey, validPositions } = require("../src/tasktra/portal_static/relationship-map.js");
 let checks = 0;
 function check(name, run) { run(); checks++; console.log("PASS " + name); }
 const fixture = {
@@ -286,5 +286,23 @@ check("exact canonical self-parent links survive focus and paging without aggreg
   assert.equal(overview.edges.some(e=>e.source===e.target),false);
   assert.ok(linked(projectGroupPage(g,group,{includeLineage:true}),"agent:self","agent:self","parent-lineage"));
   assert.equal(projectGraph(g,{focusId:"agent:self"}).edges.some(e=>e.source===e.target),false);
+});
+
+check("presets retain only matching runs and their exact recorded goal or job context",()=>{
+  const g=buildGraph({goals:[{id:"g"}],jobs:[{id:"j",goal_id:"g"}],agents:[{work_id:"active",job_id:"j",goal_id:"g",state:"working"},{work_id:"failed",job_id:"j",goal_id:"g",state:"failed"},{work_id:"sibling",job_id:"j",goal_id:"g",state:"succeeded"}]});
+  const active=presetGraph(g,"active"), failed=presetGraph(g,"failed");
+  assert.deepEqual(new Set(active.nodes.map(n=>n.id)),new Set(["goal:g","job:j","agent:active"]));
+  assert.deepEqual(new Set(failed.nodes.map(n=>n.id)),new Set(["goal:g","job:j","agent:failed"]));
+  assert.equal(active.edges.some(e=>e.source==="job:j"&&e.target==="agent:sibling"),false);
+});
+check("run labels are distinguishable and never infer a job title",()=>{
+  assert.equal(runLabel({work_id:"long-run-123",role:"tester"},new Map()),"tester \u00b7 -run-123");
+  assert.equal(runLabel({work_id:"work",job_id:"j"},new Map([["j",{title:"Exact job"}]])),"Exact job \u00b7 work");
+});
+check("stored layouts are scoped and accept only finite loaded coordinates",()=>{
+  assert.notEqual(layoutKey("p","g","all",false),layoutKey("p","g","failed",false));
+  const points=validPositions({version:1,positions:[["agent:a",12,3],["agent:gone",1,1],["agent:a",Infinity,0]]},new Set(["agent:a"]));
+  assert.deepEqual(points.get("agent:a"),{x:12,y:3}); assert.equal(points.size,1);
+  assert.equal(validPositions({version:2,positions:[["agent:a",1,1]]},new Set(["agent:a"])).size,0);
 });
 console.log(checks + " relationship map checks passed");

@@ -26,6 +26,7 @@
     relationshipMapScopeKey: null,
     relationshipMapMode: null,
     portalInsights: null,
+    portalTimeline: null,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -535,7 +536,7 @@
   function baseSwitchView(view) {
     state.activeView = view;
     syncInsightsVisibility();
-    ["overview", "goals", "jobs", "agents", "map", "efficiency"].forEach((name) => {
+    ["overview", "goals", "jobs", "agents", "map", "timeline", "efficiency"].forEach((name) => {
       const tab = $(`tab-${name}`);
       const panel = $(`view-${name}`);
       tab.setAttribute("aria-selected", String(name === view));
@@ -561,7 +562,7 @@
       state.demo = false;
       state.liveSnapshot = normalized;
     }
-    setConnection("good", state.demo ? "Demo mode" : "Connected");
+    setConnection("good", state.demo ? "Demo mode" : state.live ? "Connected" : "Updates paused");
     render(normalized);
   }
   function scheduleNext() {
@@ -1137,9 +1138,23 @@
     }
     const scopeKey = state.selectedGoalId || "all";
     const reset = state.relationshipMapScopeKey !== scopeKey || state.relationshipMapMode !== state.demo;
-    state.relationshipMap.update(snapshot, { scopeKey, active: state.activeView === "map", reset });
+    state.relationshipMap.update(snapshot, { scopeKey, projectKey: snapshot.project?.key || "", demo: state.demo, active: state.activeView === "map", reset });
     state.relationshipMapScopeKey = scopeKey;
     state.relationshipMapMode = state.demo;
+  }
+  function timelineScope(snapshot) { return state.demo ? "representative browser-only sample" : state.selectedGoalId ? `goal scope: ${scopedTitle(snapshot)}` : "recorded project scope"; }
+  function renderPortalTimeline(snapshot) { if (state.portalTimeline) state.portalTimeline.update(snapshot, { demo: state.demo, scope: timelineScope(snapshot) }); }
+  function handleTimelineTarget(target) {
+    const snapshot = current();
+    if (target.type === "job") { const record = snapshot.jobs.find((item) => item.id === target.id); if (record) { switchView("jobs"); showDetail("job", record); return; } }
+    if (target.type === "agent") { const record = snapshot.agents.find((item) => agentKey(item) === target.id); if (record) { openAgentActivity(record); return; } }
+    setNotice("That exact timeline record is not loaded in the current scope.", "warning");
+  }
+  function initPortalTimeline() {
+    const api = window.TasktraPortalTimeline;
+    if (!api || typeof api.create !== "function") return;
+    state.portalTimeline = api.create(document, { onTarget: handleTimelineTarget, getSnapshot: current, getContext: () => ({ demo: state.demo, scope: timelineScope(current()) }) });
+    state.portalTimeline.bind(); renderPortalTimeline(current());
   }
   function showDetail(type, record, shouldFocus = true) {
     state.selected = { type, id: type === "agent" ? agentKey(record) : record.id };
@@ -1320,8 +1335,8 @@
     const project = snapshot.project?.name || "This project", runtime = snapshot.runtime || {}, summary = snapshot.summary || {};
     $("page-title").textContent = project; $("project-summary").textContent = `${number(summary.goals ?? snapshot.goals.length)} recorded goal${(summary.goals ?? snapshot.goals.length) === 1 ? "" : "s"} \u00b7 ${number(summary.jobs ?? snapshot.jobs.length)} recorded job${(summary.jobs ?? snapshot.jobs.length) === 1 ? "" : "s"}.`;
     $("last-updated").textContent = snapshot.generated_at ? `Last updated ${localTime(snapshot.generated_at)}` : "No snapshot timestamp available"; $("mode-label").textContent = state.demo ? "Representative demo \u00b7 client only" : state.selectedGoalId ? `Goal scope \u00b7 ${scopedTitle(snapshot)}` : "Live workspace"; $("footer-state").textContent = state.demo ? "Demo data remains in this browser only" : runtime.available ? "Reading local project state" : "Runtime state unavailable";
-    $("goal-tab-count").textContent = number(summary.goals ?? snapshot.goals.length); $("job-tab-count").textContent = number(summary.jobs ?? snapshot.jobs.length); $("agent-tab-count").textContent = number(summary.agents ?? snapshot.agents.length); syncGoalScope(snapshot); renderMetrics(snapshot); renderPortalInsights(snapshot); renderOverviewGoals(snapshot); renderOverviewAgents(snapshot); renderActivity(snapshot); renderGoals(snapshot); updateJobFilterOptions(snapshot); renderJobs(snapshot); renderAgents(snapshot); syncActivityAgent(snapshot); renderEfficiency(snapshot); renderRelationshipMap(snapshot); refreshDetail(snapshot);
-    const empty = hasNoTrackedWork(snapshot) && !state.demo && !state.selectedGoalId; $("empty-state").hidden = !empty; document.querySelectorAll(".metrics,.view-tabs").forEach((node) => { node.hidden = empty; }); document.querySelector(".dashboard-grid").hidden = empty || state.activeView !== "overview"; ["overview", "goals", "jobs", "agents", "map", "efficiency"].forEach((name) => { $(`view-${name}`).hidden = empty || name !== state.activeView; });
+    $("goal-tab-count").textContent = number(summary.goals ?? snapshot.goals.length); $("job-tab-count").textContent = number(summary.jobs ?? snapshot.jobs.length); $("agent-tab-count").textContent = number(summary.agents ?? snapshot.agents.length); syncGoalScope(snapshot); renderMetrics(snapshot); renderPortalInsights(snapshot); renderOverviewGoals(snapshot); renderOverviewAgents(snapshot); renderActivity(snapshot); renderGoals(snapshot); updateJobFilterOptions(snapshot); renderJobs(snapshot); renderAgents(snapshot); syncActivityAgent(snapshot); renderEfficiency(snapshot); renderRelationshipMap(snapshot); renderPortalTimeline(snapshot); refreshDetail(snapshot);
+    const empty = hasNoTrackedWork(snapshot) && !state.demo && !state.selectedGoalId; $("empty-state").hidden = !empty; document.querySelectorAll(".metrics,.view-tabs").forEach((node) => { node.hidden = empty; }); document.querySelector(".dashboard-grid").hidden = empty || state.activeView !== "overview"; ["overview", "goals", "jobs", "agents", "map", "timeline", "efficiency"].forEach((name) => { $(`view-${name}`).hidden = empty || name !== state.activeView; });
     const notices = [...snapshot.warnings.map(String)]; if (!state.demo && runtime.emergency_stopped) notices.unshift(runtime.message || "Tasktra execution is emergency-stopped. Recorded state remains available."); else if (!state.demo && runtime.available === false) notices.unshift(runtime.message || "The Tasktra runtime is unavailable. The portal will retry."); else if (state.demo) notices.unshift("Representative sample data is visible only in this browser. Exit demo to return to your local project."); if (!state.live) notices.unshift("Live updates are paused. Use Refresh to request the newest local snapshot."); if (!state.lastError) setNotice(notices.join(" \u00b7 "), notices.length ? "warning" : "");
   }
   function bindInsights() {
@@ -1332,7 +1347,7 @@
     $("clear-usage-filters").addEventListener("click", () => { state.analytics = { model: "", role: "", since: "" }; $("usage-model-filter").value = ""; $("usage-role-filter").value = ""; $("usage-since-filter").value = ""; if (state.demo) render(current()); else fetchSnapshot({ force: true, replace: true }); });
   }
   function baseInit() {
-    state.live = loadPreference("tasktra-live", true); state.motion = loadPreference("tasktra-motion", !window.matchMedia("(prefers-reduced-motion: reduce)").matches); state.selectedGoalId = loadPreference("tasktra-goal-scope", null); document.body.classList.toggle("motion-off", !state.motion); $("motion-toggle").setAttribute("aria-pressed", String(state.motion)); $("live-toggle").setAttribute("aria-pressed", String(state.live)); $("live-toggle").textContent = `Live: ${state.live ? "on" : "paused"}`; bind(); bindInsights(); render(emptySnapshot()); setConnection("", "Connecting"); if (state.live) fetchSnapshot(); else { setConnection("offline", "Updates paused"); setNotice("Live updates are paused. Use Refresh to request the newest local snapshot.", "warning"); }
+    state.live = loadPreference("tasktra-live", true); state.motion = loadPreference("tasktra-motion", !window.matchMedia("(prefers-reduced-motion: reduce)").matches); state.selectedGoalId = loadPreference("tasktra-goal-scope", null); document.body.classList.toggle("motion-off", !state.motion); $("motion-toggle").setAttribute("aria-pressed", String(state.motion)); $("live-toggle").setAttribute("aria-pressed", String(state.live)); $("live-toggle").textContent = `Live: ${state.live ? "on" : "paused"}`; bind(); bindInsights(); render(emptySnapshot()); setConnection("", state.live ? "Connecting" : "Updates paused"); if (state.live) fetchSnapshot(); else { setNotice("Live updates are paused. The current local snapshot was loaded once; use Refresh for a newer one.", "warning"); fetchSnapshot({ force: true }); }
   }
 
 
@@ -1392,6 +1407,18 @@
     }));
     feed.scrollTop = state.activity.follow ? feed.scrollHeight : filterChanged ? 0 : priorTop;
   }
+  function renderToolSpans(data) {
+    const spans = Array.isArray(data?.tool_spans) ? data.tool_spans : [], list = $("agent-tool-spans-list"), note = $("agent-tool-spans-note");
+    const signature = JSON.stringify([spans, Boolean(data?.tool_spans_partial)]);
+    if (signature === state.activity.toolSpanSignature) return;
+    state.activity.toolSpanSignature = signature;
+    note.textContent = !spans.length ? (data?.tool_spans_partial ? "No complete verified tool spans were recorded; available coverage is partial." : "No verified tool durations were recorded.") : `${spans.length} verified tool span${spans.length === 1 ? "" : "s"} recorded.${data?.tool_spans_partial ? " Coverage is partial." : ""}`;
+    list.replaceChildren(...spans.map((span) => {
+      const item = el("li", "agent-tool-span"), hasTimes = span?.started_at && span?.ended_at && Number.isFinite(span?.duration_ms);
+      item.append(el("strong", "", span?.tool_name || "Recorded tool"), el("span", "", hasTimes ? `${Math.round(span.duration_ms / 1000)} seconds · ${localTime(span.started_at)} to ${localTime(span.ended_at)}` : "Timing incomplete; duration not recorded"), el("span", "", span?.state ? `State: ${titleCase(span.state)}` : "State not recorded"));
+      return item;
+    }));
+  }
   function renderAgentActivity(focus = false) {
     const panel = $("agent-activity-panel"), agent = state.activity.agent;
     if (!agent) { panel.hidden = true; return; }
@@ -1411,7 +1438,7 @@
     const goal = $("agent-activity-goal"), jobButton = $("agent-activity-job"); goal.hidden = !agent.goal_id; jobButton.hidden = !agent.job_id;
     $("agent-activity-follow").setAttribute("aria-pressed", String(state.activity.follow)); $("agent-activity-follow").textContent = `Follow output: ${state.activity.follow ? "on" : "off"}`;
     $("agent-activity-status").textContent = state.demo ? "Representative sample activity shown in this browser only." : !state.live ? "Live updates paused." : state.activity.error ? `${state.activity.error} Showing the last reported activity.` : !data ? "Loading reported progress..." : !data.available || data.source === "none" ? data.coverage?.reason ? `Reported activity unavailable: ${data.coverage.reason}.` : "Reported activity unavailable." : data.coverage?.partial ? `Reported progress may be partial${data.coverage.reason ? `: ${data.coverage.reason}` : "."}` : "Last checked activity is from the verified rollout.";
-    renderAgentActivityFeed(data?.events || []);
+    renderToolSpans(data); renderAgentActivityFeed(data?.events || []);
     if (focus) { panel.scrollIntoView({ behavior: "smooth", block: "start" }); $("agent-activity-title").focus({ preventScroll: true }); }
   }
   function scheduleAgentActivity() { clearAgentActivityTimer(); if (state.activity.workId && state.live && !state.demo) state.activity.timer = window.setTimeout(fetchAgentActivity, POLL_MS); }
@@ -1479,7 +1506,7 @@
     state.portalInsights.bind();
     renderPortalInsights(current());
   }
-  function init() { baseInit(); bindAgentActivity(); initPortalInsights(); }
+  function init() { baseInit(); bindAgentActivity(); initPortalInsights(); initPortalTimeline(); }
 
   init();
 })();

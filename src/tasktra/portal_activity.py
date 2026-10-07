@@ -22,6 +22,8 @@ _MAX_BYTES_PER_READ = 512 * 1024
 _MAX_INITIAL_BYTES = 8 * 1024 * 1024
 _MAX_LINE_BYTES = 256 * 1024
 _MAX_EVENTS = 100
+_MAX_TOOL_SPANS = 100
+_MAX_TOOL_PROOF_BYTES = 2 * 1024 * 1024
 _MAX_TEXT = 2_000
 _MAX_USAGE_BYTES = 2 * 1024 * 1024
 _TERMINAL = frozenset({"succeeded", "failed", "cancelled"})
@@ -40,7 +42,7 @@ def _now() -> str:
 def _empty(work_id: str, state: str = "unknown", reason: str | None = "unavailable") -> dict[str, Any]:
     return {"schema_version": 1, "work_id": work_id, "generated_at": _now(), "available": False,
             "source": "none", "state": state, "phase": "finished" if state in _TERMINAL else "unknown",
-            "last_activity_at": None, "events": [], "usage": None,
+            "last_activity_at": None, "events": [], "tool_spans": [], "tool_spans_partial": reason is not None, "usage": None,
             "coverage": {"partial": reason is not None, "reason": reason}}
 
 
@@ -53,7 +55,10 @@ def _safe_time(value: Any) -> str | None:
         return None
     if item.tzinfo is None:
         return None
-    return item.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    try:
+        return item.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    except (ValueError, OverflowError, OSError):
+        return None
 
 
 def _safe_text(value: Any) -> str | None:
@@ -251,6 +256,73 @@ def _allowed_event(event: dict[str, Any], sequence: int) -> dict[str, Any] | Non
     return None
 
 
+def _tool_proof_status(source: Path, observations: list[dict[str, Any]]) -> str:
+    """Revalidate contributing source lines without retaining arguments or output."""
+    proofs: dict[tuple[int, int], str] = {}
+    for observation in observations:
+        if not observation.get("proofs"):
+            return "unverified"
+        for proof in observation["proofs"]:
+            key = (proof["offset"], proof["length"])
+            if key in proofs and proofs[key] != proof["sha256"]:
+                return "changed"
+            proofs[key] = proof["sha256"]
+    if sum(length for _, length in proofs) > _MAX_TOOL_PROOF_BYTES:
+        return "unverified"
+    try:
+        with source.open("rb") as handle:
+            for (offset, length), digest in proofs.items():
+                handle.seek(offset)
+                if sha256(handle.read(length)).hexdigest() != digest:
+                    return "changed"
+    except OSError:
+        return "unverified"
+    return "valid"
+
+
+def _tool_spans(observations: list[dict[str, Any]], *, partial: bool) -> tuple[list[dict[str, Any]], bool]:
+    """Pair only one exact in-turn start and one exact terminal signal."""
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for item in observations:
+        call_id = item.get("call_id")
+        if isinstance(call_id, str):
+            grouped.setdefault(call_id, []).append(item)
+    spans: list[dict[str, Any]] = []
+    ambiguous = partial
+    for call_id, signals in grouped.items():
+        starts = [item for item in signals if item.get("state") == "in_progress"]
+        ends = [item for item in signals if item.get("state") in {"completed", "failed"}]
+        names = {item["name"] for item in signals if isinstance(item.get("name"), str)}
+        if len(starts) > 1 or len(ends) > 1 or len(names) != 1:
+            ambiguous = True
+            continue
+        start, end = (starts[0] if starts else None), (ends[0] if ends else None)
+        if start is not None and end is not None and int(start["sequence"]) >= int(end["sequence"]):
+            ambiguous = True
+            continue
+        name = next(iter(names))
+        started_at = start.get("timestamp") if start else None
+        ended_at = end.get("timestamp") if end else None
+        duration_ms = None
+        if start is not None and end is not None and started_at is not None and ended_at is not None:
+            try:
+                delta = (datetime.fromisoformat(ended_at.replace("Z", "+00:00")) - datetime.fromisoformat(started_at.replace("Z", "+00:00"))).total_seconds() * 1000
+                if delta >= 0:
+                    duration_ms = int(delta)
+                else:
+                    ambiguous = True
+            except ValueError:
+                ambiguous = True
+        spans.append({"id": "tool:" + sha256(call_id.encode("utf-8")).hexdigest()[:20], "tool_name": name,
+                      "started_at": started_at, "ended_at": ended_at, "duration_ms": duration_ms,
+                      "state": end.get("state") if end else "in_progress"})
+    spans.sort(key=lambda item: (item["started_at"] is None, item["started_at"] or "", item["id"]))
+    if len(spans) > _MAX_TOOL_SPANS:
+        ambiguous = True
+        spans = spans[:_MAX_TOOL_SPANS]
+    return spans, ambiguous
+
+
 def agent_activity(root: Path | str, work_id: str, *, sessions_root: Path | str | None = None) -> dict[str, Any]:
     """Return bounded public activity for exactly one registered receipt.
 
@@ -277,7 +349,7 @@ def agent_activity(root: Path | str, work_id: str, *, sessions_root: Path | str 
             cached = None
         if cached is not None:
             _CACHE.move_to_end(key)
-            cached = {**cached, "events": list(cached.get("events", [])), "tool_calls": set(cached.get("tool_calls", set()))}
+            cached = {**cached, "events": list(cached.get("events", [])), "tool_calls": set(cached.get("tool_calls", set())), "tool_observations": list(cached.get("tool_observations", []))}
     source = Path(cached["source"]) if cached and Path(cached["source"]).exists() else _find_source(project, str(receipt["source_path_sha256"]), source_root)
     if source is None or _is_link(source):
         return _empty(work_id, state, "unverified-rollout")
@@ -295,7 +367,8 @@ def agent_activity(root: Path | str, work_id: str, *, sessions_root: Path | str 
     prior = cached.get("identity") if cached else None
     stable_file_id = prior is not None and prior[:2] == identity[:2] and prior[:2] != (0, 0)
     same_file = (prior == identity and (cached is None or cached.get("metadata") == metadata)) or (stable_file_id and prior[2] < identity[2] and cached.get("header") == header and cached.get("metadata") == metadata)
-    cache = cached if cached and cached.get("source") == str(source) and same_file else {"source": str(source), "receipt_key": receipt_key, "identity": identity, "header": header, "metadata": metadata, "offset": 0, "events": [], "verified": False, "sequence": 0, "active_turn": None, "skip_line": False, "partial": False, "reason": None, "dropped": False, "tool_calls": set(), "invalid_session": False}
+    cache = cached if cached and cached.get("source") == str(source) and same_file else {"source": str(source), "receipt_key": receipt_key, "identity": identity, "header": header, "metadata": metadata, "offset": 0, "events": [], "verified": False, "sequence": 0, "active_turn": None, "active_turn_proof": None, "skip_line": False, "partial": False, "reason": None, "dropped": False, "tool_calls": set(), "tool_observations": [], "tool_spans_dropped": False, "invalid_session": False}
+    cache.setdefault("tool_observations", []); cache.setdefault("tool_spans_dropped", False)
     partial = bool(cache.get("partial")); reason: str | None = cache.get("reason"); read = 0
     read_limit = _MAX_INITIAL_BYTES if int(cache["offset"]) == 0 else _MAX_BYTES_PER_READ
     at_eof = False
@@ -303,6 +376,7 @@ def agent_activity(root: Path | str, work_id: str, *, sessions_root: Path | str 
         with source.open("rb") as handle:
             handle.seek(int(cache["offset"]))
             while read < read_limit:
+                line_offset = handle.tell()
                 raw = handle.readline(_MAX_LINE_BYTES + 1)
                 if not raw:
                     at_eof = True
@@ -321,6 +395,7 @@ def agent_activity(root: Path | str, work_id: str, *, sessions_root: Path | str 
                 if not raw.endswith(b"\n"):
                     partial = True; reason = "growing-rollout"; break
                 cache["offset"] = handle.tell(); cache["sequence"] += 1
+                proof = {"offset": line_offset, "length": len(raw), "sha256": sha256(raw).hexdigest()}
                 try:
                     event = json.loads(raw.decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
@@ -340,23 +415,37 @@ def agent_activity(root: Path | str, work_id: str, *, sessions_root: Path | str 
                     cache["active_turn"] = None
                 if event.get("type") == "turn_context" and isinstance(payload, dict) and isinstance(payload.get("turn_id"), str):
                     cache["active_turn"] = payload["turn_id"]
+                    cache["active_turn_proof"] = proof
                     if payload["turn_id"] == receipt.get("turn_id") and "cwd" in payload:
                         try: turn_cwd_matches = Path(str(payload["cwd"])).resolve(strict=True) == project
                         except OSError: turn_cwd_matches = False
                         if not turn_cwd_matches: cache["invalid_session"] = True; cache["verified"] = False
                 if event.get("type") == "event_msg" and isinstance(payload, dict) and _one_of(payload.get("type"), ("task_started", "task_complete", "task_failed")):
                     cache["active_turn"] = payload.get("turn_id") if isinstance(payload.get("turn_id"), str) else None
+                    cache["active_turn_proof"] = proof if cache["active_turn"] else None
                 explicit_turn = payload.get("turn_id") if isinstance(payload, dict) else None
                 turn_matches = receipt.get("turn_id") is not None and (explicit_turn == receipt.get("turn_id") or (explicit_turn is None and cache.get("active_turn") == receipt.get("turn_id")))
                 if cache["verified"] and event.get("type") != "session_meta" and turn_matches:
+                    proofs = [proof]
+                    if explicit_turn is None and cache.get("active_turn_proof"):
+                        proofs.append(cache["active_turn_proof"])
                     item = _allowed_event(event, int(cache["sequence"]))
                     direct_item = payload.get("item", payload) if isinstance(payload, dict) else None
                     if item is None and isinstance(direct_item, dict) and _one_of(direct_item.get("type"), ("function_call_output", "custom_tool_call_output")):
                         call_id = _safe_name(direct_item.get("call_id"))
-                        if call_id is not None: cache["tool_calls"].discard(call_id)
+                        if call_id is not None:
+                            cache["tool_calls"].discard(call_id)
+                            if len(cache["tool_observations"]) < _MAX_EVENTS * 2:
+                                cache["tool_observations"].append({"call_id": call_id, "name": None, "state": "completed", "timestamp": _safe_time(event.get("timestamp")), "sequence": int(cache["sequence"]), "proofs": proofs})
+                            else:
+                                cache["tool_spans_dropped"] = True; partial = True; reason = reason or "limit-reached"
                     if item is not None:
                         call_id = item.pop("_call_id", None)
                         if item["kind"] == "tool" and call_id is not None:
+                            if len(cache["tool_observations"]) < _MAX_EVENTS * 2:
+                                cache["tool_observations"].append({"call_id": call_id, "name": item.get("tool_name"), "state": item.get("state"), "timestamp": item.get("timestamp"), "sequence": int(cache["sequence"]), "proofs": proofs})
+                            else:
+                                cache["tool_spans_dropped"] = True; partial = True; reason = reason or "limit-reached"
                             if item.get("state") == "in_progress":
                                 if len(cache["tool_calls"]) < _MAX_EVENTS: cache["tool_calls"].add(call_id)
                                 else: partial = True; reason = reason or "limit-reached"
@@ -366,13 +455,22 @@ def agent_activity(root: Path | str, work_id: str, *, sessions_root: Path | str 
                         cache["events"] = (cache["events"] + [item])[-_MAX_EVENTS:]
     except OSError:
         return _empty(work_id, state, "unavailable")
+    tool_proof_status = _tool_proof_status(source, cache["tool_observations"])
+    if tool_proof_status != "valid":
+        cache["tool_observations"] = []; cache["tool_calls"] = set()
+        cache["tool_spans_dropped"] = True; cache["active_turn"] = None; cache["active_turn_proof"] = None
+        partial = True; reason = "source-changed" if tool_proof_status == "changed" else "tool-proof-limit"
     cache["identity"] = identity; cache["header"] = header; cache["metadata"] = metadata; cache["at_eof"] = at_eof; cache["partial"] = partial; cache["reason"] = reason
     with _CACHE_LOCK:
-        _CACHE[key] = cache; _CACHE.move_to_end(key)
+        if tool_proof_status == "changed":
+            _CACHE.pop(key, None)
+        else:
+            _CACHE[key] = cache; _CACHE.move_to_end(key)
         while len(_CACHE) > _MAX_CACHE: _CACHE.popitem(last=False)
     if not cache["verified"]:
         return _empty(work_id, state, "unverified-rollout")
     events = list(cache["events"])
+    tool_spans, tool_spans_partial = _tool_spans(list(cache["tool_observations"]), partial=partial or bool(cache.get("tool_spans_dropped")) or bool(cache.get("dropped")))
     latest = next((item["timestamp"] for item in reversed(events) if item["timestamp"] is not None), None)
     phase = "finished" if state in _TERMINAL else "unknown"
     if phase != "finished" and not cache.get("at_eof", False):
@@ -393,4 +491,4 @@ def agent_activity(root: Path | str, work_id: str, *, sessions_root: Path | str 
             partial = True; reason = reason or "unavailable"
     elif reason is None:
         partial = True; reason = "limit-reached"
-    return {"schema_version": 1, "work_id": work_id, "generated_at": _now(), "available": True, "source": "verified-rollout", "state": state, "phase": phase, "last_activity_at": latest, "events": events, "usage": usage, "coverage": {"partial": partial or bool(cache.get("dropped")), "reason": reason or ("limit-reached" if cache.get("dropped") else None)}}
+    return {"schema_version": 1, "work_id": work_id, "generated_at": _now(), "available": True, "source": "verified-rollout", "state": state, "phase": phase, "last_activity_at": latest, "events": events, "tool_spans": tool_spans, "tool_spans_partial": tool_spans_partial, "usage": usage, "coverage": {"partial": partial or bool(cache.get("dropped")), "reason": reason or ("limit-reached" if cache.get("dropped") else None)}}

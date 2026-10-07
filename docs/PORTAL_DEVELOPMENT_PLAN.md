@@ -56,8 +56,8 @@ Failed validation stops the checkpoint. A rolled-back installation retains its o
 
 | Phase | Status | Reviewed commit / CI | Live validation |
 | --- | --- | --- | --- |
-| 1 | Locally validated; publication checkpoint in progress | 639 tests, 18 platform skips; generated files clean; 9 UI contracts | 13 fixture browser scenarios and 7 actual-project preview checks passed |
-| 2 | Planned | Pending | Pending |
+| 1 | Published and installed | `c6b7153e5d423bab5b5f3053d60b40fbc1feeb41`; [CI 37694046057](https://github.com/mattazz/Tasktra/actions/runs/37694046057), all 9 jobs passed | Friendsmas configured checks and all 7 live browser checks passed; schema and 54 managed files unchanged |
+| 2 | In progress | Pending | Pending |
 | 3 | Planned | Pending | Pending |
 | 4 | Planned | Pending | Pending |
 
@@ -68,3 +68,9 @@ Phase source commits carry their completed local validation notes. Publication a
 Implemented the bounded attention queue, exact-record navigation, scoped diagnostics, packaged build identity, and retained per-run validation reports. Independent review drove regression fixes for malformed report data, bounded reads, canonical run identity, polling focus, and refreshed record labels. Reports keep failure evidence and distinguish partial output; portal responses expose only safe metadata. The full configured checks passed, followed by focused UI and browser checks on the final interface changes.
 
 The first Phase 1 CI attempt exposed a macOS project-root alias (`/var` versus `/private/var`) in retained report paths. The correction accepts the exact caller-supplied root alias while continuing to reject linked children and outside-root destinations. A real Windows junction probe and a cross-platform symlink regression cover that boundary. The failed attempt remains in history; the publication gate requires a fresh, successful nine-job run on the repair commit.
+
+### Phase 2 local checkpoint
+
+Implemented the bounded execution timeline, exact recorded tool spans, map activity presets, clearer run identities, and isolated saved manual map positions. Observation windows remain distinct from durations; missing or malformed timestamps remain unknown. Review added exact counts beyond retained history, conservative tool-source checks after in-place changes, strict browser payload parsing, and bounded scroll regions with aligned timeline labels.
+
+Final local validation passed 648 tests (18 platform/optional skips) and the configured compile check, plus 42 focused Python checks, 8 timeline contracts, 37 map contracts, 19 fixture browser scenarios, and 8 checks against actual Friendsmas data. Final consolidated validation supersedes the earlier worker handoff counts. Publication requires independent final-source review, all nine exact-commit CI jobs, guarded installation, and live acceptance.

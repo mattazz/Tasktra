@@ -206,6 +206,9 @@
           <button role="tab" id="tab-map" aria-selected="false" aria-controls="view-map" data-view="map">
             Map
           </button>
+          <button role="tab" id="tab-timeline" aria-selected="false" aria-controls="view-timeline" data-view="timeline">
+            Execution timeline
+          </button>
           <button role="tab" id="tab-efficiency" aria-selected="false" aria-controls="view-efficiency" data-view="efficiency">
             Token usage
           </button>
@@ -381,6 +384,11 @@
               <summary>Recorded agent details</summary>
               <div class="detail-grid" id="agent-activity-details-content"></div>
             </details>
+            <details class="technical-details" id="agent-tool-spans">
+              <summary>Recorded tool durations</summary>
+              <p id="agent-tool-spans-note" class="efficiency-note"></p>
+              <ol id="agent-tool-spans-list" class="agent-tool-spans" aria-label="Recorded tool durations"></ol>
+            </details>
             <div class="agent-activity-controls">
               <button class="text-button" id="agent-activity-follow" type="button" aria-pressed="true">Follow output: on</button>
               <button class="text-button" id="agent-activity-goal" type="button" hidden>View goal</button>
@@ -418,6 +426,30 @@
             <p>Only explicit recorded relationships are drawn. Search includes nodes outside the displayed map limit.</p>
           </div>
           <div id="relationship-map-host"></div>
+        </section>
+
+        <section class="view-section" id="view-timeline" role="tabpanel" aria-labelledby="tab-timeline" hidden>
+          <div class="section-heading">
+            <div><p class="eyebrow">Recorded execution</p><h2>Execution timeline</h2></div>
+            <p>Completed job attempts use recorded durations. Agent marks show observation windows, not inferred runtime.</p>
+          </div>
+          <section class="panel timeline-panel" id="timeline-panel" aria-labelledby="timeline-heading">
+            <div class="panel-heading"><div><h3 id="timeline-heading">Recorded intervals</h3><p id="timeline-coverage" class="efficiency-note" role="status" aria-live="polite"></p></div></div>
+            <div class="toolbar" aria-label="Filter execution timeline">
+              <label class="select-label">Type <select id="timeline-kind-filter"><option value="">All recorded types</option><option value="job_attempt">Job attempts</option><option value="agent">Agent observations</option></select></label>
+              <label class="select-label">State <select id="timeline-state-filter"><option value="">All states</option></select></label>
+              <label class="select-label">Model <select id="timeline-model-filter"><option value="">All models</option></select></label>
+              <button class="text-button" id="timeline-clear-filters" type="button">Clear filters</button>
+            </div>
+            <div id="timeline-axis" class="timeline-axis" aria-hidden="true"></div>
+            <ol id="timeline-rows" class="timeline-rows" aria-label="Timeline records"></ol>
+            <p id="timeline-empty" class="attention-empty" hidden>No recorded intervals match these filters.</p>
+            <section class="timeline-unknown" aria-labelledby="timeline-unknown-heading">
+              <h3 id="timeline-unknown-heading">Timestamps not recorded</h3>
+              <p class="efficiency-note">These records remain available without a position on the shared time axis.</p>
+              <ol id="timeline-unknown-list" class="timeline-unknown-list" aria-label="Timeline records with unknown timestamps"></ol>
+            </section>
+          </section>
         </section>
 
         <section class="view-section" id="view-efficiency" role="tabpanel" aria-labelledby="tab-efficiency" hidden>
@@ -504,6 +536,7 @@
     <script src="/vendor-cytoscape-fcose-2.2.0.js" defer></script>
     <script src="/relationship-map.js" defer></script>
     <script src="/portal-insights.js" defer></script>
+    <script src="/portal-timeline.js" defer></script>
     <script src="/app.js" defer></script>
   </body>
 </html>

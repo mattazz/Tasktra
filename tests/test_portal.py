@@ -33,6 +33,34 @@ class PortalSnapshotTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
+    def test_timeline_reports_exact_totals_beyond_row_cap_and_goal_scope(self) -> None:
+        for goal_id, job_id in (("goal-one", "job-one"), ("goal-two", "job-two")):
+            self.store.create_goal(goal_id=goal_id, title=goal_id, description="Timeline counts")
+            self.store.create_work_unit(goal_id=goal_id, work_unit_id=job_id, title=job_id)
+        with closing(sqlite3.connect(self.path)) as connection:
+            connection.executemany(
+                """INSERT INTO work_attempts(id,work_unit_id,attempt_no,owner_id,lease_generation,lease_token_hash,
+                   acquired_at,heartbeat_at,expires_at,ended_at,status,outcome_class,elapsed_ms)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                [(f"attempt-{index:04}", "job-one" if index < 600 else "job-two", index + 1,
+                  "worker", index + 1, "not-a-secret", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z",
+                  "2026-01-01T00:01:00Z", "2026-01-01T00:00:01Z", "finished", "success", 1000)
+                 for index in range(620)],
+            )
+            connection.commit()
+        ExecutionStore(self.root).plan("job-one", "worker", None, None)
+        for goal_id, expected_attempts in ((None, 620), ("goal-one", 600), ("goal-two", 20)):
+            snapshot = portal_snapshot(self.root, goal_id=goal_id)
+            timeline = snapshot["insights"]["timeline"]
+            if goal_id != "goal-two":
+                self.assertGreater(snapshot["summary"]["agents"], 0)
+            self.assertEqual(timeline["total"], expected_attempts + snapshot["summary"]["agents"])
+            self.assertEqual(timeline["shown"], min(500, timeline["total"]))
+            self.assertEqual(timeline["partial"], timeline["total"] > 500)
+            self.assertTrue(all(goal_id is None or row["goal_id"] == goal_id for row in timeline["rows"]))
+            attempts = [row["id"] for row in timeline["rows"] if row["kind"] == "job_attempt"]
+            self.assertEqual(attempts, sorted(attempts))
+
     def test_missing_runtime_never_creates_a_database(self) -> None:
         snapshot = portal_snapshot(self.root)
         self.assertFalse(snapshot["runtime"]["available"])
@@ -437,7 +465,7 @@ class PortalHttpTests(unittest.TestCase):
         self.assertEqual(self.request("GET", "/api/snapshot", Origin="http://evil.example")[0], 403)
 
     def test_only_fixed_paths_and_read_methods_are_available(self) -> None:
-        for path in ("/", "/index.html", "/app.js", "/relationship-map.js", "/styles.css",
+        for path in ("/", "/index.html", "/app.js", "/portal-timeline.js", "/relationship-map.js", "/styles.css",
                      "/vendor-cytoscape-3.34.3.min.js", "/vendor-layout-base-2.0.1.js", "/vendor-cose-base-2.2.0.js", "/vendor-cytoscape-fcose-2.2.0.js", "/vendor-graph-licenses.js"):
             with self.subTest(path=path):
                 self.assertEqual(self.request("GET", path)[0], 200)

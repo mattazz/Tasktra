@@ -4,6 +4,7 @@ import sqlite3
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from tasktra.execution import ExecutionStore
 from tasktra.portal_activity import _CACHE, agent_activity
@@ -94,6 +95,68 @@ class PortalActivityTests(unittest.TestCase):
         self.assertTrue(value["available"])
         self.assertEqual(value["coverage"]["reason"], "oversized-rollout-event")
 
+    def test_growing_body_rewrite_cannot_pair_a_stale_cached_tool_start(self) -> None:
+        padding = {"type": "ignored", "payload": "x" * 70000}
+        start = {"timestamp": "2026-01-01T00:00:00Z", "type": "response_item", "payload": {
+            "turn_id": "turn-one", "item": {"type": "function_call", "name": "rg", "call_id": "call-one", "status": "in_progress"}}}
+        self._write([self._meta(), padding, start, padding])
+        before = agent_activity(self.root, "work-one", sessions_root=self.sessions)
+        self.assertEqual(before["tool_spans"][0]["state"], "in_progress")
+        old = self.rollout.read_bytes()
+        end = {"timestamp": "2026-01-01T00:00:02Z", "type": "response_item", "payload": {
+            "turn_id": "turn-one", "item": {"type": "function_call_output", "call_id": "call-one", "output": "private-output"}}}
+        replaced = old.replace(b'"function_call"', b'"ignored_value"')
+        self.assertEqual(len(old), len(replaced))
+        self.rollout.write_bytes(replaced + (json.dumps(end) + "\n").encode())
+        self.assertEqual(old[:65536], self.rollout.read_bytes()[:65536])
+        value = agent_activity(self.root, "work-one", sessions_root=self.sessions)
+        self.assertEqual(value["tool_spans"], [])
+        self.assertTrue(value["tool_spans_partial"])
+        self.assertEqual(value["coverage"]["reason"], "source-changed")
+        self.assertNotIn("private-output", json.dumps(value))
+        self.assertEqual(agent_activity(self.root, "work-one", sessions_root=self.sessions)["tool_spans"], [])
+
+    def test_tool_proof_budget_fails_closed_without_disabling_public_activity(self) -> None:
+        self._write([self._meta(), {"timestamp": "2026-01-01T00:00:00Z", "type": "response_item", "payload": {
+            "turn_id": "turn-one", "item": {"type": "function_call", "name": "rg", "call_id": "call-one", "status": "in_progress"}}}])
+        with patch("tasktra.portal_activity._MAX_TOOL_PROOF_BYTES", 1):
+            value = agent_activity(self.root, "work-one", sessions_root=self.sessions)
+        self.assertTrue(value["available"])
+        self.assertEqual(len(value["events"]), 1)
+        self.assertEqual(value["tool_spans"], [])
+        self.assertTrue(value["tool_spans_partial"])
+
+    def test_tool_span_pairs_exact_start_with_output_only_completion_without_body(self) -> None:
+        self._write([self._meta(),
+            {"timestamp": "2026-01-01T00:00:00Z", "type": "response_item", "payload": {"turn_id": "turn-one", "item": {"type": "function_call", "name": "rg", "call_id": "call-one", "status": "in_progress", "arguments": "secret-args"}}},
+            {"timestamp": "2026-01-01T00:00:02Z", "type": "response_item", "payload": {"turn_id": "turn-one", "item": {"type": "function_call_output", "call_id": "call-one", "output": "secret-output"}}},
+        ])
+        value = agent_activity(self.root, "work-one", sessions_root=self.sessions)
+        self.assertEqual(value["tool_spans"], [{"id": value["tool_spans"][0]["id"], "tool_name": "rg", "started_at": "2026-01-01T00:00:00Z", "ended_at": "2026-01-01T00:00:02Z", "duration_ms": 2000, "state": "completed"}])
+        self.assertNotIn("secret-", json.dumps(value))
+
+    def test_tool_span_rejects_duplicate_out_of_order_and_cross_turn_signals(self) -> None:
+        self._write([self._meta(),
+            {"timestamp": "2026-01-01T00:00:02Z", "type": "response_item", "payload": {"turn_id": "turn-one", "item": {"type": "function_call", "name": "rg", "call_id": "call-one", "status": "completed"}}},
+            {"timestamp": "2026-01-01T00:00:03Z", "type": "response_item", "payload": {"turn_id": "turn-one", "item": {"type": "function_call", "name": "rg", "call_id": "call-one", "status": "in_progress"}}},
+            {"timestamp": "2026-01-01T00:00:04Z", "type": "response_item", "payload": {"turn_id": "other", "item": {"type": "function_call", "name": "other", "call_id": "call-two", "status": "in_progress"}}},
+        ])
+        value = agent_activity(self.root, "work-one", sessions_root=self.sessions)
+        self.assertEqual(value["tool_spans"], [])
+        self.assertTrue(value["tool_spans_partial"])
+
+    def test_tool_span_cache_continuation_and_truncation_are_partial(self) -> None:
+        start = {"timestamp": "2026-01-01T00:00:00Z", "type": "response_item", "payload": {"turn_id": "turn-one", "item": {"type": "function_call", "name": "rg", "call_id": "call-one", "status": "in_progress"}}}
+        self._write([self._meta(), start])
+        self.assertEqual(agent_activity(self.root, "work-one", sessions_root=self.sessions)["tool_spans"][0]["state"], "in_progress")
+        with self.rollout.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"timestamp": "2026-01-01T00:00:01Z", "type": "response_item", "payload": {"turn_id": "turn-one", "item": {"type": "function_call_output", "call_id": "call-one", "output": "hidden"}}}) + "\n")
+        self.assertEqual(agent_activity(self.root, "work-one", sessions_root=self.sessions)["tool_spans"][0]["duration_ms"], 1000)
+        _CACHE.clear()
+        self.rollout.write_bytes((json.dumps(self._meta()) + "\n" + json.dumps(start) + "\n").encode() + b"x" * (256 * 1024 + 5) + b"\n")
+        value = agent_activity(self.root, "work-one", sessions_root=self.sessions)
+        self.assertTrue(value["tool_spans_partial"])
+
 
     def test_native_direct_payload_uses_turn_context_and_turn_cwd(self) -> None:
         self._write([
@@ -142,6 +205,7 @@ class PortalActivityTests(unittest.TestCase):
         self.assertEqual(self.rollout.stat().st_size, original_size)
         result = agent_activity(self.root, "work-one", sessions_root=self.sessions)
         self.assertFalse(result["available"])
+        self.assertEqual(result["tool_spans"], [])
         self.assertNotIn("other", json.dumps(result))
 
     def test_growing_rewrite_invalidates_cached_binding(self) -> None:
@@ -151,6 +215,7 @@ class PortalActivityTests(unittest.TestCase):
         self._write([rewritten, {"type": "turn_context", "payload": {"turn_id": "turn-one", "cwd": str(self.root)}}, {"type": "response_item", "payload": {"type": "message", "role": "assistant", "phase": "commentary", "content": "replacement"}}, {"type": "response_item", "payload": {"type": "message", "role": "assistant", "phase": "commentary", "content": "appended"}}])
         result = agent_activity(self.root, "work-one", sessions_root=self.sessions)
         self.assertFalse(result["available"])
+        self.assertEqual(result["tool_spans"], [])
         self.assertNotIn("replacement", json.dumps(result))
         self.assertNotIn("appended", json.dumps(result))
 
