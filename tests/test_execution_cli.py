@@ -121,6 +121,39 @@ class ExecutionCliTests(unittest.TestCase):
             self.assertEqual(finished["record"]["agent_id"], "/root/scout")
             self.assertEqual(finished["record"]["usage_provenance"], "rollout-verified")
 
+    def test_import_discovers_explicit_native_rollout_root(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            initialize_project(root, name="Execution fixture")
+            prefix = ("execution", "--root", str(root))
+            self.assertEqual(invoke(*prefix, "plan", "work-native", "--role", "scout")[0], 0)
+            self.assertEqual(invoke(
+                *prefix, "start", "work-native", "--host", "local", "--thread-id", "child-thread",
+                "--turn-id", "turn-a", "--agent-id", "/root/scout",
+            )[0], 0)
+            native = root / "native"
+            native.mkdir()
+            (native / "rollout-child.jsonl").write_text("".join(json.dumps(event) + "\n" for event in [
+                {"type": "session_meta", "payload": {"id": "child-thread", "source": {"subagent": {"thread_spawn": {"agent_path": "/root/scout"}}}}},
+                {"type": "turn_context", "payload": {"turn_id": "turn-a", "model": "gpt-6-astra", "effort": "xhigh"}},
+                {"type": "token_usage_record", "payload": {"thread_id": "child-thread", "turn_id": "turn-a", "response_id": "response-a", "usage": {
+                    "input_tokens": 12, "cached_input_tokens": 3, "cache_write_input_tokens": 0,
+                    "output_tokens": 4, "reasoning_output_tokens": 2, "total_tokens": 16,
+                }}},
+            ]), encoding="utf-8")
+            code, imported = invoke(
+                *prefix, "import", "work-native", "--native-rollout-root", str(native),
+                "--fallback-reason", "provider-fallback",
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(
+                (imported["record"]["observed_model"], imported["record"]["observed_effort"], imported["record"]["usage"]["total_tokens"]),
+                ("gpt-6-astra", "xhigh", 16),
+            )
+            code, error = invoke(*prefix, "import", "work-native")
+            self.assertEqual(code, 2)
+            self.assertIn("exactly one rollout", error["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

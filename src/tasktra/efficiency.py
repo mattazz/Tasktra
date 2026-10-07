@@ -14,6 +14,7 @@ _COUNTERS = ("input_tokens", "cached_input_tokens", "cache_write_input_tokens", 
 _OPTIONAL = frozenset({"cached_input_tokens", "cache_write_input_tokens", "reasoning_output_tokens"})
 _MEASURED = frozenset({"host-callback", "rollout-verified"})
 _TERMINAL = frozenset({"succeeded", "failed", "cancelled"})
+_ATTRIBUTION_REASONS = frozenset({"run-supervisor", "parent-attribution"})
 _GROUP_LIMIT = 128
 
 
@@ -98,7 +99,7 @@ def _receipt_identity(record: Mapping[str, Any], usage: Mapping[str, int | None]
 
 def _attribution_anchor(record: Mapping[str, Any]) -> bool:
     return (record.get("role") == "coordinator" and record.get("state") == "planned"
-            and record.get("attribution_reason") == "run-supervisor"
+            and record.get("attribution_reason") in _ATTRIBUTION_REASONS
             and all(record.get(field) is None for field in
                     ("provider", "thread_id", "start_provenance", "finish_provenance", "usage", "usage_provenance")))
 
@@ -142,13 +143,16 @@ def summarize_executions(records: Mapping[str, Any] | Iterable[Mapping[str, Any]
 
     for record in _iter_records(records):
         sequence += 1; coverage["records"] += 1; state = record.get("state")
-        execution_count += int(not _attribution_anchor(record))
+        attribution_anchor = _attribution_anchor(record)
+        execution_count += int(not attribution_anchor)
         if state == "planned": coverage["planned"] += 1
         elif state == "started": coverage["started"] += 1
         elif state in _TERMINAL: coverage["terminal"] += 1
         if isinstance(record.get("work_id"), str) and record["work_id"]: all_work_ids.add(record["work_id"])
         if isinstance(record.get("parent_work_id"), str) and record["parent_work_id"]: parent_links.append(record["parent_work_id"])
-        group_key = (_identity(record, "role"), _identity(record, "observed_model")); group_for(group_key)["records"] += 1
+        group_key = (_identity(record, "role"), _identity(record, "observed_model"))
+        if not attribution_anchor:
+            group_for(group_key)["records"] += 1
         usage, provenance = _record_usage(record), _provenance(record)
         if usage is None:
             if record.get("usage") is not None: coverage["invalid_usage"] += 1

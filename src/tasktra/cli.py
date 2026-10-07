@@ -363,9 +363,10 @@ def build_parser() -> argparse.ArgumentParser:
     execution_start.add_argument("--observed-model")
     execution_start.add_argument("--observed-effort")
     execution_start.add_argument("--fallback-reason")
-    execution_import = execution_commands.add_parser("import", help="Refresh usage from a named local Codex rollout")
+    execution_import = execution_commands.add_parser("import", help="Refresh usage from a named or explicitly scoped native Codex rollout")
     execution_import.add_argument("work_id")
-    execution_import.add_argument("rollout")
+    execution_import.add_argument("rollout", nargs="?")
+    execution_import.add_argument("--native-rollout-root", help="bounded local directory containing the started native thread's rollout")
     execution_import.add_argument("--fallback-reason")
     execution_finish = execution_commands.add_parser("finish", help="Record a manual terminal assertion")
     execution_finish.add_argument("work_id")
@@ -1479,7 +1480,13 @@ def _execution(args: argparse.Namespace) -> dict[str, Any]:
             fallback_reason=args.fallback_reason,
         )
     elif action == "import":
-        record = store.import_codex_rollout(args.work_id, Path(args.rollout), fallback_reason=args.fallback_reason)
+        if (args.rollout is None) == (args.native_rollout_root is None):
+            raise ExecutionError("execution import requires exactly one rollout path or --native-rollout-root")
+        record = (
+            store.import_codex_rollout(args.work_id, Path(args.rollout), fallback_reason=args.fallback_reason)
+            if args.rollout is not None else
+            store.import_native_codex_rollout(args.work_id, Path(args.native_rollout_root), fallback_reason=args.fallback_reason)
+        )
     elif action == "finish":
         record = store.finish(
             args.work_id, args.outcome, unknown_reason=args.unknown_reason,

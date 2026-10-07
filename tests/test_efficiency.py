@@ -129,6 +129,12 @@ class EfficiencyTests(unittest.TestCase):
         result = compare_verified_trials(trials, receipt_resolver=receipts.__getitem__, execution_records=records)
         self.assertFalse(result["pairs"][0]["eligible"])
 
+    def test_native_parent_attribution_is_not_an_unknown_or_unknown_model_group(self):
+        anchor = {"work_id": "unit", "role": "coordinator", "state": "planned", "attribution_reason": "parent-attribution"}
+        result = summarize_executions([anchor, record("child", parent_work_id="unit")])
+        self.assertEqual((result["totals"]["known"]["total_tokens"], result["totals"]["unknown_records"]), (15, 0))
+        self.assertEqual([(item["role"], item["model"]) for item in result["by_role_model"]], [("implementer", "gpt-test")])
+
     def test_failed_zero_dispatch_pair_is_visible_and_not_an_overall_savings_claim(self):
         receipts = {"d1": record("d1"), "o1": record("o1"), "d2": record("d2")}
         trials = [trial("direct", receipt_ids=["d1"]), trial("optimized", receipt_ids=["o1"]),

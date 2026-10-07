@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from tasktra.codex_usage import RolloutUsageError, scan_rollout
+from tasktra.codex_usage import RolloutUsageError, discover_native_rollout, scan_rollout
 
 
 def usage(input_tokens: int, output_tokens: int, *, cached: int = 0, cache_write: int = 0,
@@ -145,6 +145,17 @@ class ScanRolloutTests(unittest.TestCase):
     def test_no_supported_usage_is_an_unknown_observation(self) -> None:
         observation = scan_rollout(self.write_rollout([self.meta()]), "child")
         self.assertEqual((observation.schema, observation.usage, observation.response_count), ("none", None, 0))
+
+    def test_discovers_one_explicit_native_rollout_and_rejects_ambiguity(self) -> None:
+        root = Path(self.temporary.name) / "native"
+        root.mkdir()
+        first = root / "rollout-one.jsonl"
+        first.write_text(json.dumps(self.meta()) + "\n", encoding="utf-8")
+        self.assertEqual(discover_native_rollout(root, "child"), first)
+        second = root / "rollout-two.jsonl"
+        second.write_text(json.dumps(self.meta()) + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(RolloutUsageError, "multiple native rollouts"):
+            discover_native_rollout(root, "child")
 
 
 if __name__ == "__main__":

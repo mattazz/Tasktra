@@ -165,6 +165,14 @@ def _execution_parent(row: sqlite3.Row) -> str:
     return str(parent) if isinstance(parent, str) and parent else str(row["work_id"])
 
 
+def _attribution_only_receipt(row: sqlite3.Row) -> bool:
+    return (row["role"] == "coordinator" and row["state"] == "planned"
+            and row["attribution_reason"] in {"run-supervisor", "parent-attribution"}
+            and all(row[field] is None for field in (
+                "provider", "thread_id", "start_provenance", "finish_provenance", "usage_json", "usage_provenance"
+            )))
+
+
 def _fresh_running_execution_count(project_root: Path, runtime: sqlite3.Connection,
                                    now: datetime, warnings: list[str]) -> int | None:
     """Count started receipts that still correspond to fresh linked leases.
@@ -207,11 +215,12 @@ def _fresh_running_execution_count(project_root: Path, runtime: sqlite3.Connecti
 
 
 def _lease_agents(project_root: Path, runtime: sqlite3.Connection, now: datetime,
-                  limit: int, warnings: list[str]) -> tuple[list[dict[str, Any]], int, int, int]:
+                  limit: int, warnings: list[str]) -> tuple[list[dict[str, Any]], int, int, int, int]:
     """Project current leases over absent, planned, or terminal receipts."""
     ledger: sqlite3.Connection | None = None
     try:
         ledger = _execution_ledger(project_root, warnings)
+        receipt_ledger_known = ledger is not None or not ExecutionStore(project_root).path.exists()
         cursor = runtime.execute(
             """SELECT w.id,w.goal_id,w.lease_holder,w.lease_expires_at,a.owner_id,a.heartbeat_at,a.expires_at AS attempt_expires_at
                FROM work_units w LEFT JOIN work_attempts a ON a.id=w.current_attempt_id
@@ -219,24 +228,29 @@ def _lease_agents(project_root: Path, runtime: sqlite3.Connection, now: datetime
                ORDER BY w.updated_at DESC,w.id"""
         )
         items: list[dict[str, Any]] = []
-        new_total = running = projected_total = 0
+        new_total = running = projected_total = missing_receipts = 0
         while batch := cursor.fetchmany(200):
-            linked_states: dict[str, list[str]] = {}
+            linked_receipts: dict[str, list[sqlite3.Row]] = {}
             if ledger is not None:
                 ids = [str(row["id"]) for row in batch]
                 marks = ",".join("?" for _ in ids)
                 columns = _columns(ledger, "execution")
-                parent = "parent_work_id" if "parent_work_id" in columns else "NULL AS parent_work_id"
+                names = ("work_id", "state", "parent_work_id", "role", "attribution_reason", "provider", "thread_id",
+                         "start_provenance", "finish_provenance", "usage_json", "usage_provenance")
+                selected = ", ".join(name if name in columns else f"NULL AS {name}" for name in names)
                 for receipt in ledger.execute(
-                    f"SELECT work_id,state,{parent} FROM execution WHERE work_id IN ({marks}) OR parent_work_id IN ({marks})"
-                    if "parent_work_id" in columns else f"SELECT work_id,state,{parent} FROM execution WHERE work_id IN ({marks})",
+                    f"SELECT {selected} FROM execution WHERE work_id IN ({marks}) OR parent_work_id IN ({marks})"
+                    if "parent_work_id" in columns else f"SELECT {selected} FROM execution WHERE work_id IN ({marks})",
                     (*ids, *ids) if "parent_work_id" in columns else ids,
                 ):
-                    linked_states.setdefault(_execution_parent(receipt), []).append(str(receipt["state"]))
+                    linked_receipts.setdefault(_execution_parent(receipt), []).append(receipt)
             for row in batch:
                 work_id = str(row["id"])
-                if "started" in linked_states.get(work_id, []):
+                receipts = linked_receipts.get(work_id, [])
+                if any(receipt["state"] == "started" for receipt in receipts):
                     continue
+                if receipt_ledger_known and not any(not _attribution_only_receipt(receipt) for receipt in receipts):
+                    missing_receipts += 1
                 expiry = row["attempt_expires_at"] or row["lease_expires_at"]
                 stale = _lease_stale(expiry, now)
                 projected_total += 1
@@ -251,10 +265,10 @@ def _lease_agents(project_root: Path, runtime: sqlite3.Connection, now: datetime
                         "model": None, "effort": None, "provenance": "work-lease", "total_tokens": None,
                         "heartbeat_at": row["heartbeat_at"], "lease_expires_at": expiry, "lease_stale": stale,
                     })
-        return items, new_total, running, projected_total
+        return items, new_total, running, projected_total, missing_receipts
     except (ExecutionError, OSError, sqlite3.Error):
         warnings.append("Lease-derived agents could not be read.")
-        return [], 0, 0, 0
+        return [], 0, 0, 0, 0
     finally:
         if ledger is not None:
             ledger.close()
@@ -507,7 +521,7 @@ def portal_snapshot(root: Path) -> dict[str, Any]:
         snapshot["summary"]["agents"] = execution_total
         fresh_running = _fresh_running_execution_count(project_root, connection, now, warnings)
         snapshot["summary"]["running_agents"] = execution_running if fresh_running is None else fresh_running
-        lease_items, new_lease_agents, lease_running, projected_leases = _lease_agents(
+        lease_items, new_lease_agents, lease_running, projected_leases, missing_execution_receipts = _lease_agents(
             project_root, connection, now, _MAX_AGENTS, warnings,
         )
         existing = {agent["work_id"]: index for index, agent in enumerate(snapshot["agents"])}
@@ -522,6 +536,11 @@ def portal_snapshot(root: Path) -> dict[str, Any]:
                 visible_leases += 1
         if projected_leases > visible_leases:
             warnings.append(f"Showing {visible_leases} of {projected_leases} lease-projected agents.")
+        if missing_execution_receipts:
+            warnings.append(
+                f"{missing_execution_receipts} leased work unit(s) have no linked execution receipt; "
+                "record a native Codex plan and start before importing telemetry."
+            )
         snapshot["summary"]["agents"] += new_lease_agents
         snapshot["summary"]["running_agents"] += lease_running
 

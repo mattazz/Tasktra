@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -29,10 +30,104 @@ MAX_ROLLOUT_BYTES = 64 * 1024 * 1024
 MAX_JSONL_LINE_BYTES = 1024 * 1024
 MAX_JSONL_EVENTS = 100_000
 MAX_SAFE_AGENT_PATH_CHARS = 512
+MAX_NATIVE_DISCOVERY_FILES = 512
+MAX_NATIVE_DISCOVERY_DIRECTORIES = 1_024
+MAX_NATIVE_DISCOVERY_ENTRIES = 4_096
+MAX_NATIVE_METADATA_EVENTS = 64
+MAX_NATIVE_METADATA_BYTES = 256 * 1024
 
 
 class RolloutUsageError(ValueError):
     """A rollout cannot produce a trustworthy usage observation."""
+
+
+def _native_session_id(source: Path) -> str | None:
+    """Read the early native-session marker without retaining rollout content.
+
+    Discovery is intentionally only a convenience for an already identified
+    thread.  The full parser still validates the selected file before any
+    ledger update.
+    """
+    bytes_read = 0
+    try:
+        with source.open("rb") as handle:
+            for line_number in range(1, MAX_NATIVE_METADATA_EVENTS + 1):
+                raw_line = handle.readline(MAX_JSONL_LINE_BYTES + 1)
+                if not raw_line:
+                    return None
+                bytes_read += len(raw_line)
+                if len(raw_line) > MAX_JSONL_LINE_BYTES or bytes_read > MAX_NATIVE_METADATA_BYTES:
+                    return None
+                try:
+                    event = json.loads(raw_line.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    return None
+                if not isinstance(event, dict) or event.get("type") != "session_meta":
+                    continue
+                payload = event.get("payload")
+                identifier = payload.get("id") if isinstance(payload, dict) else None
+                return identifier if isinstance(identifier, str) and identifier.strip() else None
+    except OSError as exc:
+        raise RolloutUsageError("cannot read native rollout source") from exc
+    return None
+
+
+def discover_native_rollout(root: Path | str, thread_id: str) -> Path:
+    """Find one native Codex rollout for an explicit thread under one root.
+
+    The caller chooses a narrow local directory.  This routine never searches
+    a home directory by default, follows links, or chooses between matching
+    rollouts.  An exact rollout path remains available when metadata is not
+    among the early native session records.
+    """
+    thread_id = _required_identifier(thread_id, "thread_id")
+    source_root = Path(root)
+    try:
+        if source_root.is_symlink() or not source_root.is_dir():
+            raise RolloutUsageError("native rollout root must be a real directory")
+    except OSError as exc:
+        raise RolloutUsageError("native rollout root cannot be read") from exc
+
+    directories = [source_root]
+    candidates: list[Path] = []
+    files_seen = 0
+    directories_seen = 0
+    entries_seen = 0
+    while directories:
+        directory = directories.pop()
+        directories_seen += 1
+        if directories_seen > MAX_NATIVE_DISCOVERY_DIRECTORIES:
+            raise RolloutUsageError("native rollout discovery exceeds the directory limit; choose a narrower root")
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    entries_seen += 1
+                    if entries_seen > MAX_NATIVE_DISCOVERY_ENTRIES:
+                        raise RolloutUsageError("native rollout discovery exceeds the entry limit; choose a narrower root")
+                    if entry.is_symlink():
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        directories.append(Path(entry.path))
+                        if len(directories) > MAX_NATIVE_DISCOVERY_DIRECTORIES:
+                            raise RolloutUsageError("native rollout discovery exceeds the directory limit; choose a narrower root")
+                        continue
+                    if not (entry.is_file(follow_symlinks=False)
+                            and entry.name.startswith("rollout-") and entry.name.endswith(".jsonl")):
+                        continue
+                    files_seen += 1
+                    if files_seen > MAX_NATIVE_DISCOVERY_FILES:
+                        raise RolloutUsageError("native rollout discovery exceeds the file limit; choose a narrower root")
+                    candidate = Path(entry.path)
+                    if _native_session_id(candidate) == thread_id:
+                        candidates.append(candidate)
+        except OSError as exc:
+            raise RolloutUsageError("native rollout root cannot be read") from exc
+
+    if not candidates:
+        raise RolloutUsageError("no native rollout matches the started thread; pass an exact rollout path")
+    if len(candidates) != 1:
+        raise RolloutUsageError("multiple native rollouts match the started thread; pass an exact rollout path")
+    return candidates[0]
 
 
 @dataclass(frozen=True)

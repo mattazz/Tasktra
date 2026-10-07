@@ -449,6 +449,32 @@ class ExecutionStore:
         with self._connection() as connection:
             return self._import_in_connection(connection, work_id, path, fallback_reason)
 
+    def import_native_codex_rollout(self, work_id: str, rollout_root: Path | str,
+                                    fallback_reason: str | None = None) -> dict[str, Any]:
+        """Discover one explicitly scoped native rollout, then import it.
+
+        Discovery uses the existing started thread identity.  It never scans a
+        default host directory or turns an unplanned record into telemetry.
+        """
+        work_id = _identifier(work_id, "work_id")
+        self._require_database()
+        with self._connection() as connection:
+            row = self._row(connection, work_id)
+            if row["state"] == "planned":
+                raise ExecutionError("planned work cannot discover rollout usage")
+            if row["provider"] != "codex":
+                raise ExecutionError("native rollout discovery requires a Codex provider receipt")
+            thread_id = row["thread_id"]
+        try:
+            from .codex_usage import RolloutUsageError, discover_native_rollout
+            source = discover_native_rollout(rollout_root, thread_id)
+        except ImportError as error:
+            raise ExecutionError("Codex rollout parser is unavailable") from error
+        except RolloutUsageError as error:
+            raise ExecutionError("native rollout could not be discovered") from error
+        with self._connection() as connection:
+            return self._import_in_connection(connection, work_id, source, fallback_reason)
+
     def usage_attestation(self, work_ids: list[str], *, parent_work_id: str) -> dict[str, Any]:
         """Check exact host receipts before attesting observed spend to the core ledger."""
         parent_work_id = _identifier(parent_work_id, "parent_work_id")

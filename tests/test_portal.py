@@ -186,6 +186,7 @@ class PortalSnapshotTests(unittest.TestCase):
         snapshot = portal_snapshot(self.root)
         self.assertEqual((snapshot["summary"]["agents"], snapshot["summary"]["running_agents"]), (1, 1))
         self.assertEqual((snapshot["agents"][0]["id"], snapshot["agents"][0]["provenance"]), ("worker-one", "work-lease"))
+        self.assertTrue(any("no linked execution receipt" in warning for warning in snapshot["warnings"]))
 
     def test_current_lease_replaces_planned_or_terminal_execution_receipt(self) -> None:
         self.store.create_goal(goal_id="goal-one", title="One", description="One")
