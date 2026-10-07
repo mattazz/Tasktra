@@ -17,6 +17,25 @@ def python_argv(source: str) -> list[str]:
 
 
 class ValidationTests(unittest.TestCase):
+    def test_report_accepts_the_callers_root_alias_but_rejects_child_links(self):
+        with TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            real = base / "actual-project"
+            real.mkdir()
+            alias = base / "project-alias"
+            try:
+                alias.symlink_to(real, target_is_directory=True)
+            except OSError:
+                self.skipTest("symbolic links are unavailable on this host")
+            report = alias / "validation/latest.json"
+            run_validations(alias, [python_argv("print('alias root')")], report_path=report)
+            self.assertEqual(json.loads((real / "validation/latest.json").read_text(encoding="utf-8"))["status"], "passed")
+            (real / "linked-child").symlink_to(real / "validation", target_is_directory=True)
+            with self.assertRaisesRegex(ValidationError, "symbolic link|reparse"):
+                run_validations(alias, [python_argv("print('must not run')")], report_path=alias / "linked-child/latest.json")
+            with self.assertRaisesRegex(ValidationError, "within the project"):
+                run_validations(alias, [], report_path=base / "outside.json")
+
     def test_retained_failure_stops_work_and_survives_a_later_success(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

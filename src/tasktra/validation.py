@@ -90,7 +90,7 @@ def _is_linklike(path: Path) -> bool:
     return path.is_symlink() or bool(getattr(info, "st_file_attributes", 0) & reparse)
 
 
-def _safe_report_path(project: Path, report_path: Path | str) -> Path:
+def _safe_report_path(project: Path, report_path: Path | str, *, root_alias: Path | None = None) -> Path:
     candidate = Path(report_path)
     if not candidate.is_absolute():
         candidate = project / candidate
@@ -98,7 +98,15 @@ def _safe_report_path(project: Path, report_path: Path | str) -> Path:
     try:
         relative = candidate.relative_to(project)
     except ValueError as error:
-        raise ValidationError("validation report path must stay within the project root") from error
+        # A caller may use a root alias such as macOS /var -> /private/var.
+        # Translate only that root prefix, then inspect every child lexically.
+        try:
+            if root_alias is None:
+                raise ValueError("no supplied root alias")
+            relative = candidate.relative_to(root_alias)
+        except ValueError:
+            raise ValidationError("validation report path must stay within the project root") from error
+        candidate = project / relative
     current = project
     for part in relative.parts:
         current = current / part
@@ -176,11 +184,12 @@ def run_validations(
     """
     if timeout_seconds < 1:
         raise ValidationError("validation timeout must be positive")
-    project = Path(root).resolve()
+    root_alias = Path(os.path.abspath(root))
+    project = root_alias.resolve()
     if not project.is_dir():
         raise ValidationError(f"validation root is not a directory: {project}")
     planned = validation_plan(commands)
-    destination = _safe_report_path(project, report_path) if report_path is not None else None
+    destination = _safe_report_path(project, report_path, root_alias=root_alias) if report_path is not None else None
     report_id = uuid4().hex
     started_at = _utc_timestamp()
     results: list[ValidationResult] = []

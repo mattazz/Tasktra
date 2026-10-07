@@ -15,7 +15,7 @@ Make the portal answer what needs attention, where execution time goes, and what
 | 3. Results and efficiency | Job evidence summaries and safe deliverable references; recorded attempts, durations, and usage per verified completed job. | Evidence is attributable to exact jobs and acceptance records; missing links/timing remain unknown; metrics reconcile to recorded usage, exclude unmatched work from denominators, and disclose coverage and sample sizes. |
 | 4. Saved workspaces | Named saved views, validated restorable links, and side-by-side agent comparison. | Restoring a view preserves its intended scope and filters, malformed or stale links have clear fallbacks, projects and demo data remain isolated, and two exact runs can be compared without mixing identities or totals. |
 
-Each phase includes its documentation, focused regression coverage, and applicable browser checks. Each phase is a separate reviewed commit pushed to `main`; later phases build on the previous published checkpoint.
+Each phase includes its documentation, focused regression coverage, and applicable browser checks. Each phase is a separate reviewed checkpoint pushed to `main`; failed CI attempts receive ordinary follow-up repair commits before publication, and later phases build on the previous published checkpoint.
 
 ## Shared constraints
 
@@ -56,7 +56,7 @@ Failed validation stops the checkpoint. A rolled-back installation retains its o
 
 | Phase | Status | Reviewed commit / CI | Live validation |
 | --- | --- | --- | --- |
-| 1 | Locally validated; publication checkpoint in progress | 638 tests, 17 platform skips; generated files clean; 9 UI contracts | 13 fixture browser scenarios and 7 actual-project preview checks passed |
+| 1 | Locally validated; publication checkpoint in progress | 639 tests, 18 platform skips; generated files clean; 9 UI contracts | 13 fixture browser scenarios and 7 actual-project preview checks passed |
 | 2 | Planned | Pending | Pending |
 | 3 | Planned | Pending | Pending |
 | 4 | Planned | Pending | Pending |
@@ -66,3 +66,5 @@ Phase source commits carry their completed local validation notes. Publication a
 ### Phase 1 local checkpoint
 
 Implemented the bounded attention queue, exact-record navigation, scoped diagnostics, packaged build identity, and retained per-run validation reports. Independent review drove regression fixes for malformed report data, bounded reads, canonical run identity, polling focus, and refreshed record labels. Reports keep failure evidence and distinguish partial output; portal responses expose only safe metadata. The full configured checks passed, followed by focused UI and browser checks on the final interface changes.
+
+The first Phase 1 CI attempt exposed a macOS project-root alias (`/var` versus `/private/var`) in retained report paths. The correction accepts the exact caller-supplied root alias while continuing to reject linked children and outside-root destinations. A real Windows junction probe and a cross-platform symlink regression cover that boundary. The failed attempt remains in history; the publication gate requires a fresh, successful nine-job run on the repair commit.
