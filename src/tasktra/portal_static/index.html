@@ -203,6 +203,9 @@
           >
             Agents <span id="agent-tab-count">0</span>
           </button>
+          <button role="tab" id="tab-map" aria-selected="false" aria-controls="view-map" data-view="map">
+            Map
+          </button>
           <button role="tab" id="tab-efficiency" aria-selected="false" aria-controls="view-efficiency" data-view="efficiency">
             Token usage
           </button>
@@ -389,6 +392,14 @@
           <div class="agent-grid" id="agents-grid"></div>
         </section>
 
+        <section class="view-section" id="view-map" role="tabpanel" aria-labelledby="tab-map" hidden>
+          <div class="section-heading">
+            <div><p class="eyebrow">Recorded topology</p><h2>Relationship map</h2></div>
+            <p>Only explicit recorded relationships are drawn. Search includes nodes outside the displayed map limit.</p>
+          </div>
+          <div id="relationship-map-host"></div>
+        </section>
+
         <section class="view-section" id="view-efficiency" role="tabpanel" aria-labelledby="tab-efficiency" hidden>
           <div class="section-heading">
             <div><p class="eyebrow">Efficiency</p><h2>Where the tokens go</h2></div>
@@ -467,6 +478,7 @@
         <span id="footer-state">Awaiting workspace state</span>
       </footer>
     </div>
+    <script src="/relationship-map.js" defer></script>
     <script src="/app.js" defer></script>
   </body>
 </html>

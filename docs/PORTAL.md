@@ -28,11 +28,14 @@ loopback and is intended for use on your own computer.
   observation or tokens. Select an agent for routing, goal, timing, token
   breakdown, and provenance details. The selected-agent panel also follows
   reported progress and tool activity from an exactly linked local Codex rollout.
+- **Map** links recorded goals, jobs, agents, and parent work in an interactive
+  node diagram. Search, zoom, and select a node to trace its connections and open
+  the related record.
 - **Token usage** compares measured totals, averages, medians, cache utilization,
   uncached input, and recorded outcomes by model. Model, role, and time filters
   narrow the comparison. The hourly chart includes an expandable values table.
 
-Select a goal card or use **Goal scope** to narrow jobs, agents, usage, activity,
+Select a goal card or use **Goal scope** to narrow jobs, agents, the map, usage, activity,
 and summary counts to that goal. Empty goals remain empty. Changing goals resets
 local filters; clearing an agent, job, or usage filter keeps the goal selected.
 Filters survive refreshes and tab changes. The live view refreshes every
@@ -82,6 +85,34 @@ Attribution also applies to existing descendants, is immutable, and rejects a
 conflicting attribution. This command writes the optional execution ledger; viewing
 the portal never performs the repair automatically. Future descendants can resolve
 the relationship through their recorded parent.
+
+## Relationship map
+
+Open **Map** to trace recorded goal membership, job assignments, and parent work.
+Node colors and labels distinguish goals, jobs, and agents; the legend explains
+relationship lines. Select a node to highlight its immediate connections and view
+its recorded state, context, and metrics. Open an agent's record to reach its live
+activity panel. Selecting a node does not change the global goal scope.
+
+Search matches records and explicit references in the map and includes their
+immediate relationship context. Focus on a selected node's connections to reduce
+a crowded map. Pan or
+use the zoom and fit controls to explore; keyboard users can select records with
+the adjacent node picker, which jumps to a node and its connections. Live
+refreshes preserve the view and selection, while
+changing goal scope or switching demo mode resets the map context.
+
+Only recorded IDs create edges. When a loaded job already links an agent to
+the same goal, the map shows the goal → job → agent path. Otherwise, the agent
+keeps its recorded goal link; shared roles, names, and similar identifiers do
+not imply a job assignment. Missing referenced records are marked as not loaded.
+An unresolved parent work ID is not assumed to be an agent or a job.
+
+The map covers the loaded snapshot, which can be partial. Counts distinguish
+loaded records from references whose records are not loaded. Its display limit
+and hidden-node count are shown separately from the full graph; search can
+find records beyond that display limit. Viewing and navigating the map never
+changes goals, job assignments, execution records, or runtime state.
 
 ## Selected-agent activity
 

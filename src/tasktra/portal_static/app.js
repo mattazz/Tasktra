@@ -22,6 +22,9 @@
     lastError: null,
     modeGeneration: 0,
     liveSnapshot: null,
+    relationshipMap: null,
+    relationshipMapScopeKey: null,
+    relationshipMapMode: null,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -530,7 +533,7 @@
 
   function baseSwitchView(view) {
     state.activeView = view;
-    ["overview", "goals", "jobs", "agents", "efficiency"].forEach((name) => {
+    ["overview", "goals", "jobs", "agents", "map", "efficiency"].forEach((name) => {
       const tab = $(`tab-${name}`);
       const panel = $(`view-${name}`);
       tab.setAttribute("aria-selected", String(name === view));
@@ -1118,6 +1121,24 @@
     if (!body.children.length) { const cell = el("td", "efficiency-note", "No measured model comparison available for this scope."); cell.colSpan = 7; const row = el("tr"); row.append(cell); body.append(row); }
     renderTimeline(report.time_series || [], coverage);
   }
+  function renderRelationshipMap(snapshot) {
+    const api = window.TasktraRelationshipMap;
+    if (!api) return;
+    if (!state.relationshipMap) {
+      state.relationshipMap = api.create($("relationship-map-host"), {
+        onOpen({ type, record }) {
+          if (type === "agent") { openAgentActivity(record); return; }
+          if (type === "goal") { switchView("goals"); showDetail("goal", record); return; }
+          if (type === "job") { switchView("jobs"); showDetail("job", record); }
+        },
+      });
+    }
+    const scopeKey = state.selectedGoalId || "all";
+    const reset = state.relationshipMapScopeKey !== scopeKey || state.relationshipMapMode !== state.demo;
+    state.relationshipMap.update(snapshot, { scopeKey, active: state.activeView === "map", reset });
+    state.relationshipMapScopeKey = scopeKey;
+    state.relationshipMapMode = state.demo;
+  }
   function showDetail(type, record, shouldFocus = true) {
     state.selected = { type, id: type === "agent" ? agentKey(record) : record.id };
     const title = type === "goal" ? record.title || record.id : type === "job" ? record.title || record.id : record.role || record.id;
@@ -1297,8 +1318,8 @@
     const project = snapshot.project?.name || "This project", runtime = snapshot.runtime || {}, summary = snapshot.summary || {};
     $("page-title").textContent = project; $("project-summary").textContent = `${number(summary.goals ?? snapshot.goals.length)} recorded goal${(summary.goals ?? snapshot.goals.length) === 1 ? "" : "s"} \u00b7 ${number(summary.jobs ?? snapshot.jobs.length)} recorded job${(summary.jobs ?? snapshot.jobs.length) === 1 ? "" : "s"}.`;
     $("last-updated").textContent = snapshot.generated_at ? `Last updated ${localTime(snapshot.generated_at)}` : "No snapshot timestamp available"; $("mode-label").textContent = state.demo ? "Representative demo \u00b7 client only" : state.selectedGoalId ? `Goal scope \u00b7 ${scopedTitle(snapshot)}` : "Live workspace"; $("footer-state").textContent = state.demo ? "Demo data remains in this browser only" : runtime.available ? "Reading local project state" : "Runtime state unavailable";
-    $("goal-tab-count").textContent = number(summary.goals ?? snapshot.goals.length); $("job-tab-count").textContent = number(summary.jobs ?? snapshot.jobs.length); $("agent-tab-count").textContent = number(summary.agents ?? snapshot.agents.length); syncGoalScope(snapshot); renderMetrics(snapshot); renderOverviewGoals(snapshot); renderOverviewAgents(snapshot); renderActivity(snapshot); renderGoals(snapshot); updateJobFilterOptions(snapshot); renderJobs(snapshot); renderAgents(snapshot); syncActivityAgent(snapshot); renderEfficiency(snapshot); refreshDetail(snapshot);
-    const empty = hasNoTrackedWork(snapshot) && !state.demo && !state.selectedGoalId; $("empty-state").hidden = !empty; document.querySelectorAll(".metrics,.view-tabs").forEach((node) => { node.hidden = empty; }); document.querySelector(".dashboard-grid").hidden = empty || state.activeView !== "overview"; ["overview", "goals", "jobs", "agents", "efficiency"].forEach((name) => { $(`view-${name}`).hidden = empty || name !== state.activeView; });
+    $("goal-tab-count").textContent = number(summary.goals ?? snapshot.goals.length); $("job-tab-count").textContent = number(summary.jobs ?? snapshot.jobs.length); $("agent-tab-count").textContent = number(summary.agents ?? snapshot.agents.length); syncGoalScope(snapshot); renderMetrics(snapshot); renderOverviewGoals(snapshot); renderOverviewAgents(snapshot); renderActivity(snapshot); renderGoals(snapshot); updateJobFilterOptions(snapshot); renderJobs(snapshot); renderAgents(snapshot); syncActivityAgent(snapshot); renderEfficiency(snapshot); renderRelationshipMap(snapshot); refreshDetail(snapshot);
+    const empty = hasNoTrackedWork(snapshot) && !state.demo && !state.selectedGoalId; $("empty-state").hidden = !empty; document.querySelectorAll(".metrics,.view-tabs").forEach((node) => { node.hidden = empty; }); document.querySelector(".dashboard-grid").hidden = empty || state.activeView !== "overview"; ["overview", "goals", "jobs", "agents", "map", "efficiency"].forEach((name) => { $(`view-${name}`).hidden = empty || name !== state.activeView; });
     const notices = [...snapshot.warnings.map(String)]; if (!state.demo && runtime.emergency_stopped) notices.unshift(runtime.message || "Tasktra execution is emergency-stopped. Recorded state remains available."); else if (!state.demo && runtime.available === false) notices.unshift(runtime.message || "The Tasktra runtime is unavailable. The portal will retry."); else if (state.demo) notices.unshift("Representative sample data is visible only in this browser. Exit demo to return to your local project."); if (!state.live) notices.unshift("Live updates are paused. Use Refresh to request the newest local snapshot."); if (!state.lastError) setNotice(notices.join(" \u00b7 "), notices.length ? "warning" : "");
   }
   function bindInsights() {
