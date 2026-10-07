@@ -61,6 +61,61 @@ class PortalSnapshotTests(unittest.TestCase):
             attempts = [row["id"] for row in timeline["rows"] if row["kind"] == "job_attempt"]
             self.assertEqual(attempts, sorted(attempts))
 
+    def _outcome_retry_fixture(self):
+        self.store.create_goal(goal_id="goal-one", title="Retry", description="Recorded history")
+        self.store.create_work_unit(goal_id="goal-one", work_unit_id="job-0000", title="Retry job")
+        fresh = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+        with closing(sqlite3.connect(self.path)) as db:
+            db.execute("UPDATE work_units SET status='leased',lease_holder='worker',lease_expires_at=? WHERE id='job-0000'", (fresh,))
+            db.commit()
+        ledger = ExecutionStore(self.root)
+        ledger.plan("job-0000", "coordinator", None, None, attribution_reason="parent-attribution")
+        ledger.plan("receipt-0000", "implementer", None, None, parent_work_id="job-0000")
+        ledger.start("receipt-0000", "codex", "local", "prior-thread", provenance="host-callback")
+        ledger.record_host_usage("receipt-0000", thread_id="prior-thread", usage={"input_tokens":8,"cached_input_tokens":3,"cache_write_input_tokens":0,"output_tokens":2,"reasoning_output_tokens":0,"total_tokens":10})
+        ledger.finish("receipt-0000", "succeeded")
+        return ledger
+
+    def test_outcomes_retain_measured_history_hidden_by_a_current_retry_lease(self):
+        self._outcome_retry_fixture()
+        snap = portal_snapshot(self.root, goal_id="goal-one")
+        self.assertTrue(all(a["provenance"] == "work-lease" for a in snap["agents"]))
+        usage = snap["insights"]["outcomes"]["jobs"][0]["usage"]
+        self.assertEqual((usage["measured_runs"], usage["attributed_runs"], usage["total_tokens"]), (1,1,10))
+        self.assertFalse(usage["partial"])
+
+    def test_outcomes_preserve_receipt_truncation_after_roster_filtering(self):
+        ledger = self._outcome_retry_fixture()
+        with closing(sqlite3.connect(ledger.path)) as db:
+            columns = [row[1] for row in db.execute("PRAGMA table_info(execution)")]
+            selected = ",".join("?" if c == "work_id" else c for c in columns)
+            db.executemany(f"INSERT INTO execution SELECT {selected} FROM execution WHERE work_id='receipt-0000'", [(f"receipt-{i:04}",) for i in range(1,501)])
+            db.commit()
+        snap = portal_snapshot(self.root, goal_id="goal-one")
+        self.assertLess(len(snap["agents"]), 500)
+        out = snap["insights"]["outcomes"]
+        self.assertTrue(out["partial"])
+        self.assertTrue(out["summary"]["partial"])
+        self.assertTrue(out["jobs"][0]["usage"]["partial"])
+        self.assertEqual(out["jobs"][0]["usage"]["measured_runs"], 499)
+        self.assertEqual(out["jobs"][0]["usage"]["total_tokens"], 4990)
+
+    def test_outcomes_disclose_legacy_goal_linkage_beyond_900_jobs(self):
+        ledger = self._outcome_retry_fixture()
+        with closing(sqlite3.connect(self.path)) as db:
+            columns = [row[1] for row in db.execute("PRAGMA table_info(work_units)")]
+            selected = ",".join("?" if c == "id" else c for c in columns)
+            db.executemany(f"INSERT INTO work_units SELECT {selected} FROM work_units WHERE id='job-0000'", [(f"job-{i:04}",) for i in range(1,901)])
+            db.commit()
+        with closing(sqlite3.connect(ledger.path)) as db:
+            db.execute("ALTER TABLE execution DROP COLUMN goal_id")
+            db.execute("ALTER TABLE execution DROP COLUMN goal_attribution_reason")
+            db.commit()
+        out = portal_snapshot(self.root, goal_id="goal-one")["insights"]["outcomes"]
+        self.assertTrue(out["partial"])
+        self.assertTrue(out["jobs"])
+        self.assertTrue(all(j["usage"]["partial"] for j in out["jobs"]))
+
     def test_missing_runtime_never_creates_a_database(self) -> None:
         snapshot = portal_snapshot(self.root)
         self.assertFalse(snapshot["runtime"]["available"])

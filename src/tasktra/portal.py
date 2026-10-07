@@ -24,6 +24,7 @@ from .codex_usage import USAGE_FIELDS
 from .state import SCHEMA_VERSION
 from .portal_activity import agent_activity
 from .portal_insights import build_insights, project_key
+from .portal_outcomes import build_outcomes, empty_outcomes
 from .portal_timeline import MAX_TIMELINE_ROWS, build_timeline
 
 
@@ -38,6 +39,7 @@ _STATIC_ROUTES = {
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "application/javascript; charset=utf-8"),
     "/portal-insights.js": ("portal-insights.js", "application/javascript; charset=utf-8"),
+    "/portal-outcomes.js": ("portal-outcomes.js", "application/javascript; charset=utf-8"),
     "/portal-timeline.js": ("portal-timeline.js", "application/javascript; charset=utf-8"),
     "/relationship-map.js": ("relationship-map.js", "application/javascript; charset=utf-8"),
     "/vendor-cytoscape-3.34.3.min.js": ("vendor-cytoscape-3.34.3.min.js", "application/javascript; charset=utf-8"),
@@ -73,7 +75,7 @@ def _empty_snapshot(name: str, message: str | None = None) -> dict[str, Any]:
 
 def _with_insights(snapshot: dict[str, Any], root: Path, *, goal_id: str | None,
                    runtime_schema_version: int | None = None, attempts: tuple[dict[str, Any], ...] = (),
-                   attempt_total: int | None = None) -> dict[str, Any]:
+                   attempt_total: int | None = None, outcomes: dict[str, Any] | None = None) -> dict[str, Any]:
     """Attach Phase 1 safe projections on every snapshot return path."""
     project = snapshot.get("project")
     if isinstance(project, dict):
@@ -83,6 +85,7 @@ def _with_insights(snapshot: dict[str, Any], root: Path, *, goal_id: str | None,
         expected_schema_version=SCHEMA_VERSION,
     )
     snapshot["insights"]["timeline"] = build_timeline(snapshot, attempts, attempt_total=attempt_total)
+    snapshot["insights"]["outcomes"] = outcomes if outcomes is not None else empty_outcomes(goal_id)
     return snapshot
 
 
@@ -711,12 +714,15 @@ def portal_snapshot(root: Path, *, goal_id: str | None = None, model: str | None
         ).fetchall()
         timeline_attempts = tuple(dict(row) for row in attempt_rows)
 
+        execution_scope_partial = False
         scoped_work_ids = tuple(str(row["id"]) for row in connection.execute("SELECT id FROM work_units WHERE goal_id=? ORDER BY id LIMIT 900", (goal_id,))) if goal_id is not None else ()
         if goal_id is not None:
             scoped_work_count = int(connection.execute("SELECT count(*) FROM work_units WHERE goal_id=?", (goal_id,)).fetchone()[0])
             if scoped_work_count > len(scoped_work_ids):
+                execution_scope_partial = True
                 warnings.append("Goal has more than 900 runtime work units; legacy receipt linkage beyond that bound is omitted unless explicitly attributed.")
         execution_rows, execution_total, execution_running = _execution_rows(project_root, warnings, goal_id=goal_id, linked_work_ids=scoped_work_ids)
+        execution_records_partial = execution_total > len(execution_rows)
         if execution_total > len(execution_rows):
             warnings.append(f"Showing {len(execution_rows)} of {execution_total} execution records; the agent count reflects this displayed subset plus current leases.")
         execution_ids = sorted({_execution_parent(row) for row in execution_rows})
@@ -737,6 +743,11 @@ def portal_snapshot(root: Path, *, goal_id: str | None = None, model: str | None
                     "lease_expires_at": expiry,
                     "lease_stale": status == "leased" and _lease_stale(expiry, now), "status": status,
                 }
+        # Outcomes retain every bounded, trusted receipt before the agent UI
+        # hides historical children behind a current lease.
+        outcome_projection: dict[str, Any] = {"agents": []}
+        _add_execution_agents(outcome_projection, execution_rows, len(execution_rows), 0, work_details, [])
+        outcome_agents = [item for item in outcome_projection["agents"] if goal_id is None or item.get("goal_id") == goal_id]
         execution_rows = _visible_execution_rows(execution_rows, work_details)
         execution_total = len(execution_rows)
         execution_running = sum(1 for row in execution_rows if row["state"] == "started")
@@ -800,7 +811,8 @@ def portal_snapshot(root: Path, *, goal_id: str | None = None, model: str | None
         except (ExecutionError, OSError, sqlite3.Error, ValueError):
             snapshot["analytics"] = None
         _apply_goal_scope(snapshot, goal_id)
-        return _with_insights(snapshot, project_root, goal_id=goal_id, runtime_schema_version=version, attempts=timeline_attempts, attempt_total=timeline_attempt_total)
+        outcomes = build_outcomes(connection, outcome_agents, goal_id=goal_id, records_partial=execution_records_partial or execution_scope_partial)
+        return _with_insights(snapshot, project_root, goal_id=goal_id, runtime_schema_version=version, attempts=timeline_attempts, attempt_total=timeline_attempt_total, outcomes=outcomes)
     except (sqlite3.Error, ValueError, TypeError, KeyError):
         warnings.append("Runtime database could not be read safely.")
         return _with_insights(snapshot, project_root, goal_id=goal_id, runtime_schema_version=runtime_schema_version, attempts=timeline_attempts, attempt_total=timeline_attempt_total)

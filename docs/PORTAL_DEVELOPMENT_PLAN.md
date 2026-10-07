@@ -57,8 +57,8 @@ Failed validation stops the checkpoint. A rolled-back installation retains its o
 | Phase | Status | Reviewed commit / CI | Live validation |
 | --- | --- | --- | --- |
 | 1 | Published and installed | `c6b7153e5d423bab5b5f3053d60b40fbc1feeb41`; [CI 37694046057](https://github.com/mattazz/Tasktra/actions/runs/37694046057), all 9 jobs passed | Friendsmas configured checks and all 7 live browser checks passed; schema and 54 managed files unchanged |
-| 2 | In progress | Pending | Pending |
-| 3 | Planned | Pending | Pending |
+| 2 | Published and installed | `85deacd8b640e6b77de7c133ad0302e90057ddca`; [CI 37698295535](https://github.com/mattazz/Tasktra/actions/runs/37698295535), all 9 jobs passed | Friendsmas configured checks and all 8 live browser checks passed; schema and 54 managed files unchanged |
+| 3 | In progress | Pending | Pending |
 | 4 | Planned | Pending | Pending |
 
 Phase source commits carry their completed local validation notes. Publication and live-install receipts remain in the project's ignored runtime evidence, and the next phase's plan update records the preceding release identifiers.
@@ -74,3 +74,9 @@ The first Phase 1 CI attempt exposed a macOS project-root alias (`/var` versus `
 Implemented the bounded execution timeline, exact recorded tool spans, map activity presets, clearer run identities, and isolated saved manual map positions. Observation windows remain distinct from durations; missing or malformed timestamps remain unknown. Review added exact counts beyond retained history, conservative tool-source checks after in-place changes, strict browser payload parsing, and bounded scroll regions with aligned timeline labels.
 
 Final local validation passed 648 tests (18 platform/optional skips) and the configured compile check, plus 42 focused Python checks, 8 timeline contracts, 37 map contracts, 19 fixture browser scenarios, and 8 checks against actual Friendsmas data. Final consolidated validation supersedes the earlier worker handoff counts. Publication requires independent final-source review, all nine exact-commit CI jobs, guarded installation, and live acceptance.
+
+### Phase 3 local checkpoint
+
+Implemented exact-job completion verification, bounded evidence summaries, recorded retry and attempt timing, and usage per measured verified job. The outcome panel states its goal scope, independent filter behavior, and overlapping model cohorts. Only safe GitHub references are clickable; project-relative paths remain text. Missing measurements remain null, and lease-only scheduling records do not count as agent executions.
+
+Independent review required conservative handling of capped or filtered histories, duplicate run identities, malformed evidence, timestamp ambiguity, empty measured cohorts, and inconsistent browser statistics. Final local validation passed 663 tests (18 platform/optional skips) and the configured compile check, plus 38 focused Python regressions, 11 browser data contracts, 12 fixture browser scenarios, and 8 checks against actual Friendsmas data. Review independently passed the focused checks including the UI wrapper. The final consolidated evidence supersedes earlier worker handoff counts. Publication requires all nine exact-commit CI jobs, guarded installation, and live acceptance before Phase 4.

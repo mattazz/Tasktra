@@ -476,6 +476,15 @@
             <div class="table-wrap"><table id="usage-model-table"><thead><tr><th scope="col">Model</th><th scope="col">Measured runs</th><th scope="col">Total / share</th><th scope="col">Avg / median</th><th scope="col">Cache utilization</th><th scope="col">Uncached input</th><th scope="col">Succeeded / failed / cancelled</th></tr></thead><tbody id="efficiency-roles"></tbody></table></div>
             <p class="efficiency-note">Tasks differ. Lower token use does not prove better quality; compare runs with the same task and acceptance evidence.</p>
           </div>
+          <section class="panel efficiency-panel outcomes-panel" id="outcomes-panel" aria-labelledby="outcomes-heading">
+            <div class="panel-heading"><div><p class="eyebrow">Recorded results</p><h3 id="outcomes-heading">Verified outcomes</h3></div></div>
+            <p id="outcomes-definition" class="efficiency-note">Verification is recorded completion evidence under the stated policy; it does not imply an independent review.</p>
+            <p class="efficiency-note">These statistics use the selected goal and all recorded time; the token filters above do not apply. A job may appear in several model rows. These comparisons describe recorded work and do not establish model quality or token savings.</p>
+            <p id="outcomes-summary" class="efficiency-note" role="status" aria-live="polite"></p>
+            <div id="outcomes-metrics" class="efficiency-metrics" aria-label="Verified outcome cohort metrics"></div>
+            <div class="table-wrap"><table><thead><tr><th scope="col">Model</th><th scope="col">Measured runs</th><th scope="col">Verified jobs</th><th scope="col">Total tokens</th><th scope="col">Tokens / measured run</th><th scope="col">Failed-run tokens</th><th scope="col">Cache fraction</th></tr></thead><tbody id="outcomes-model-body"></tbody></table></div>
+            <details class="technical-details" open><summary>Recorded jobs in this cohort</summary><ol id="outcomes-jobs" class="outcomes-jobs" aria-label="Recorded outcome jobs"></ol></details>
+          </section>
           <div class="panel efficiency-panel">
             <h3>Hourly token events</h3>
             <div id="usage-timeline" class="usage-timeline" aria-label="Hourly measured token events"></div>
@@ -537,6 +546,7 @@
     <script src="/relationship-map.js" defer></script>
     <script src="/portal-insights.js" defer></script>
     <script src="/portal-timeline.js" defer></script>
+    <script src="/portal-outcomes.js" defer></script>
     <script src="/app.js" defer></script>
   </body>
 </html>

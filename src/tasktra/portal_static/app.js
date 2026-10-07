@@ -27,6 +27,7 @@
     relationshipMapMode: null,
     portalInsights: null,
     portalTimeline: null,
+    portalOutcomes: null,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -1156,6 +1157,10 @@
     state.portalTimeline = api.create(document, { onTarget: handleTimelineTarget, getSnapshot: current, getContext: () => ({ demo: state.demo, scope: timelineScope(current()) }) });
     state.portalTimeline.bind(); renderPortalTimeline(current());
   }
+  function outcomesScope(snapshot) { return state.demo ? "representative browser-only sample" : state.selectedGoalId ? `goal scope: ${scopedTitle(snapshot)}` : "recorded project scope"; }
+  function renderPortalOutcomes(snapshot) { if (state.portalOutcomes) state.portalOutcomes.update(snapshot, { demo: state.demo, scope: outcomesScope(snapshot) }); }
+  function showOutcomeJob(jobId) { const record = current().jobs.find((job) => job.id === jobId); if (record) { switchView("jobs"); showDetail("job", record); } else setNotice("That recorded outcome job is not loaded in the current scope.", "warning"); }
+  function initPortalOutcomes() { const api = window.TasktraPortalOutcomes; if (!api || typeof api.create !== "function") return; state.portalOutcomes = api.create(document, { onJob: showOutcomeJob }); renderPortalOutcomes(current()); }
   function showDetail(type, record, shouldFocus = true) {
     state.selected = { type, id: type === "agent" ? agentKey(record) : record.id };
     const title = type === "goal" ? record.title || record.id : type === "job" ? record.title || record.id : record.role || record.id;
@@ -1234,7 +1239,13 @@
         detailItem("Goal", record.goal_id || "Unlinked"),
       );
     }
-      $("detail-content").replaceChildren(grid);
+      if (type === "job") {
+        const api = window.TasktraPortalOutcomes, report = api?.normalizeOutcomes?.(current().insights?.outcomes), outcome = report?.jobs?.find((job) => job.job_id === record.id);
+        const evidenceScroll = Object.fromEntries([...$("detail-content").querySelectorAll("[data-evidence-scroll]")].map((node) => [node.dataset.evidenceScroll, node.scrollTop]));
+        const evidence = api?.jobEvidence ? api.jobEvidence(document, outcome) : el("section", "panel job-evidence-panel", "Outcome evidence is unavailable."); evidence.id = "job-evidence-panel";
+        $("detail-content").replaceChildren(grid, evidence);
+        evidence.querySelectorAll("[data-evidence-scroll]").forEach((node) => { node.scrollTop = evidenceScroll[node.dataset.evidenceScroll] || 0; });
+      } else $("detail-content").replaceChildren(grid);
     }
     $("detail-panel").hidden = false; if (shouldFocus) $("detail-title").focus({ preventScroll: true });
   }
@@ -1335,7 +1346,7 @@
     const project = snapshot.project?.name || "This project", runtime = snapshot.runtime || {}, summary = snapshot.summary || {};
     $("page-title").textContent = project; $("project-summary").textContent = `${number(summary.goals ?? snapshot.goals.length)} recorded goal${(summary.goals ?? snapshot.goals.length) === 1 ? "" : "s"} \u00b7 ${number(summary.jobs ?? snapshot.jobs.length)} recorded job${(summary.jobs ?? snapshot.jobs.length) === 1 ? "" : "s"}.`;
     $("last-updated").textContent = snapshot.generated_at ? `Last updated ${localTime(snapshot.generated_at)}` : "No snapshot timestamp available"; $("mode-label").textContent = state.demo ? "Representative demo \u00b7 client only" : state.selectedGoalId ? `Goal scope \u00b7 ${scopedTitle(snapshot)}` : "Live workspace"; $("footer-state").textContent = state.demo ? "Demo data remains in this browser only" : runtime.available ? "Reading local project state" : "Runtime state unavailable";
-    $("goal-tab-count").textContent = number(summary.goals ?? snapshot.goals.length); $("job-tab-count").textContent = number(summary.jobs ?? snapshot.jobs.length); $("agent-tab-count").textContent = number(summary.agents ?? snapshot.agents.length); syncGoalScope(snapshot); renderMetrics(snapshot); renderPortalInsights(snapshot); renderOverviewGoals(snapshot); renderOverviewAgents(snapshot); renderActivity(snapshot); renderGoals(snapshot); updateJobFilterOptions(snapshot); renderJobs(snapshot); renderAgents(snapshot); syncActivityAgent(snapshot); renderEfficiency(snapshot); renderRelationshipMap(snapshot); renderPortalTimeline(snapshot); refreshDetail(snapshot);
+    $("goal-tab-count").textContent = number(summary.goals ?? snapshot.goals.length); $("job-tab-count").textContent = number(summary.jobs ?? snapshot.jobs.length); $("agent-tab-count").textContent = number(summary.agents ?? snapshot.agents.length); syncGoalScope(snapshot); renderMetrics(snapshot); renderPortalInsights(snapshot); renderOverviewGoals(snapshot); renderOverviewAgents(snapshot); renderActivity(snapshot); renderGoals(snapshot); updateJobFilterOptions(snapshot); renderJobs(snapshot); renderAgents(snapshot); syncActivityAgent(snapshot); renderEfficiency(snapshot); renderRelationshipMap(snapshot); renderPortalTimeline(snapshot); renderPortalOutcomes(snapshot); refreshDetail(snapshot);
     const empty = hasNoTrackedWork(snapshot) && !state.demo && !state.selectedGoalId; $("empty-state").hidden = !empty; document.querySelectorAll(".metrics,.view-tabs").forEach((node) => { node.hidden = empty; }); document.querySelector(".dashboard-grid").hidden = empty || state.activeView !== "overview"; ["overview", "goals", "jobs", "agents", "map", "timeline", "efficiency"].forEach((name) => { $(`view-${name}`).hidden = empty || name !== state.activeView; });
     const notices = [...snapshot.warnings.map(String)]; if (!state.demo && runtime.emergency_stopped) notices.unshift(runtime.message || "Tasktra execution is emergency-stopped. Recorded state remains available."); else if (!state.demo && runtime.available === false) notices.unshift(runtime.message || "The Tasktra runtime is unavailable. The portal will retry."); else if (state.demo) notices.unshift("Representative sample data is visible only in this browser. Exit demo to return to your local project."); if (!state.live) notices.unshift("Live updates are paused. Use Refresh to request the newest local snapshot."); if (!state.lastError) setNotice(notices.join(" \u00b7 "), notices.length ? "warning" : "");
   }
@@ -1506,7 +1517,7 @@
     state.portalInsights.bind();
     renderPortalInsights(current());
   }
-  function init() { baseInit(); bindAgentActivity(); initPortalInsights(); initPortalTimeline(); }
+  function init() { baseInit(); bindAgentActivity(); initPortalInsights(); initPortalTimeline(); initPortalOutcomes(); }
 
   init();
 })();
