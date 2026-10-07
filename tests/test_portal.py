@@ -437,7 +437,8 @@ class PortalHttpTests(unittest.TestCase):
         self.assertEqual(self.request("GET", "/api/snapshot", Origin="http://evil.example")[0], 403)
 
     def test_only_fixed_paths_and_read_methods_are_available(self) -> None:
-        for path in ("/", "/index.html", "/app.js", "/relationship-map.js", "/styles.css"):
+        for path in ("/", "/index.html", "/app.js", "/relationship-map.js", "/styles.css",
+                     "/vendor-cytoscape-3.34.3.min.js", "/vendor-layout-base-2.0.1.js", "/vendor-cose-base-2.2.0.js", "/vendor-cytoscape-fcose-2.2.0.js", "/vendor-graph-licenses.js"):
             with self.subTest(path=path):
                 self.assertEqual(self.request("GET", path)[0], 200)
         self.assertEqual(self.request("POST", "/api/snapshot")[0], 405)

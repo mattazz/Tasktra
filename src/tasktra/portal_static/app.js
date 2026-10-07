@@ -1344,6 +1344,7 @@
   function switchView(view) {
     if (view !== "agents" && state.activity.workId) closeAgentActivity({ clear: true });
     baseSwitchView(view);
+    if (state.relationshipMap && typeof state.relationshipMap.setActive === "function") state.relationshipMap.setActive(view === "map");
   }
   function activityGoal(agent) { return agent.goal_title || [...(current().goal_options || []), ...(current().goals || [])].find((goal) => goal.id === agent.goal_id)?.title || agent.goal_id || "Unassigned"; }
   function activityDemo(agent) {

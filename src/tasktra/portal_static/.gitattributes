@@ -1,0 +1,6 @@
+# Preserve the verified upstream bundle bytes, including mixed line endings.
+vendor-cytoscape-3.34.3.min.js -text
+vendor-layout-base-2.0.1.js -text
+vendor-cose-base-2.2.0.js -text
+vendor-cytoscape-fcose-2.2.0.js -text
+vendor-graph-licenses.js -text

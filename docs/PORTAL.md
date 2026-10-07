@@ -88,31 +88,45 @@ the relationship through their recorded parent.
 
 ## Relationship map
 
-Open **Map** to trace recorded goal membership, job assignments, and parent work.
-Node colors and labels distinguish goals, jobs, and agents; the legend explains
-relationship lines. Select a node to highlight its immediate connections and view
-its recorded state, context, and metrics. Open an agent's record to reach its live
-activity panel. Selecting a node does not change the global goal scope.
+Open **Map** to explore recorded goal membership, job assignments, and parent
+work in an interactive network. The portal bundles Cytoscape.js and its fCoSE
+layout locally; it works without a CDN. See [graph dependency provenance](PORTAL_GRAPH_DEPENDENCIES.md)
+for versions, licenses, and upgrade checks.
 
-Search matches records and explicit references in the map and includes their
-immediate relationship context. Focus on a selected node's connections to reduce
-a crowded map. Pan or
-use the zoom and fit controls to explore; keyboard users can select records with
-the adjacent node picker, which jumps to a node and its connections. Live
-refreshes preserve the view and selection, while
-changing goal scope or switching demo mode resets the map context.
+The overview keeps goals and active runs visible, with counted summaries for
+jobs and historical runs. Summary shapes and labels identify groups clearly.
+Every summary retains its exact member IDs and recorded connections. Job-owned
+runs stay connected through their job summary; grouping does not create new
+assignments. Parent lineage is optional to keep the overview readable.
+
+Open a summary to inspect a bounded page of its records. Paging through a large
+group keeps the network readable; return with **Overview**. Search and the
+adjacent record picker cover all loaded records, including members inside
+summaries. Choosing a record opens its immediate recorded neighborhood.
+
+Drag nodes to arrange them, drag the background to pan, and use zoom and fit
+controls to explore. Select a node to see its recorded state, context, metrics,
+and immediate connections in the detail panel below the map. Open an agent's
+record to reach its activity panel. Selection does not change global goal scope.
+
+Metrics-only live refreshes preserve manual positions, view, and selection
+without rerunning layout. When recorded connections or group membership change,
+the layout updates while keeping your pan and zoom. Changing goal scope or
+switching demo mode resets the map context. Layout changes have no animation,
+including when reduced motion is requested. Keyboard users can navigate the record picker, scope controls,
+and detail actions without pointing at canvas nodes.
 
 Only recorded IDs create edges. When a loaded job already links an agent to
-the same goal, the map shows the goal → job → agent path. Otherwise, the agent
+the same goal, the map shows the goal -> job -> agent path. Otherwise, the agent
 keeps its recorded goal link; shared roles, names, and similar identifiers do
 not imply a job assignment. Missing referenced records are marked as not loaded.
 An unresolved parent work ID is not assumed to be an agent or a job.
 
 The map covers the loaded snapshot, which can be partial. Counts distinguish
-loaded records from references whose records are not loaded. Its display limit
-and hidden-node count are shown separately from the full graph; search can
-find records beyond that display limit. Viewing and navigating the map never
-changes goals, job assignments, execution records, or runtime state.
+loaded records, collapsed members, and references whose records are not loaded.
+Display limits are separate from the full graph; search can find records beyond
+the display limit. Viewing and navigating the map never changes goals, job
+assignments, execution records, or runtime state.
 
 ## Selected-agent activity
 

@@ -36,6 +36,11 @@ _STATIC_ROUTES = {
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "application/javascript; charset=utf-8"),
     "/relationship-map.js": ("relationship-map.js", "application/javascript; charset=utf-8"),
+    "/vendor-cytoscape-3.34.3.min.js": ("vendor-cytoscape-3.34.3.min.js", "application/javascript; charset=utf-8"),
+    "/vendor-layout-base-2.0.1.js": ("vendor-layout-base-2.0.1.js", "application/javascript; charset=utf-8"),
+    "/vendor-cose-base-2.2.0.js": ("vendor-cose-base-2.2.0.js", "application/javascript; charset=utf-8"),
+    "/vendor-cytoscape-fcose-2.2.0.js": ("vendor-cytoscape-fcose-2.2.0.js", "application/javascript; charset=utf-8"),
+    "/vendor-graph-licenses.js": ("vendor-graph-licenses.js", "application/javascript; charset=utf-8"),
     "/styles.css": ("styles.css", "text/css; charset=utf-8"),
 }
 
