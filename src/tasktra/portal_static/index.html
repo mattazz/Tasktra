@@ -364,7 +364,18 @@
               <button class="text-button" id="agent-activity-job" type="button" hidden>View job</button>
             </div>
             <p id="agent-activity-status" class="efficiency-note" role="status" aria-live="polite"></p>
-            <ol class="agent-activity-feed" id="agent-activity-feed" aria-label="Reported progress and tool activity"></ol>
+            <fieldset class="agent-activity-filters" id="agent-activity-filters" aria-describedby="agent-activity-filter-summary">
+              <legend>Show activity</legend>
+              <div class="agent-activity-choices">
+                <label class="agent-activity-choice" title="All recorded public activity"><input type="radio" name="activity-kind" value="all" checked /><span>All activity <span class="activity-count" id="activity-count-all">0</span></span></label>
+                <label class="agent-activity-choice" title="Public progress updates"><input type="radio" name="activity-kind" value="progress" /><span>Progress <span class="activity-count" id="activity-count-progress">0</span></span></label>
+                <label class="agent-activity-choice" title="Tool starts, completions, and failures"><input type="radio" name="activity-kind" value="tool" /><span>Tools <span class="activity-count" id="activity-count-tool">0</span></span></label>
+                <label class="agent-activity-choice" title="Recorded execution phase changes"><input type="radio" name="activity-kind" value="status" /><span>Status <span class="activity-count" id="activity-count-status">0</span></span></label>
+                <label class="agent-activity-choice" title="Public final responses"><input type="radio" name="activity-kind" value="final" /><span>Final output <span class="activity-count" id="activity-count-final">0</span></span></label>
+              </div>
+            </fieldset>
+            <p id="agent-activity-filter-summary" class="efficiency-note" role="status" aria-live="polite"></p>
+            <ol class="agent-activity-feed" id="agent-activity-feed" aria-label="Recorded agent activity"></ol>
           </section>
           <div class="toolbar" aria-label="Filter agents">
             <label class="search"><span class="sr-only">Search agents by role, name, or task</span><input id="agent-search" type="search" placeholder="Search role, name, or task" /></label>

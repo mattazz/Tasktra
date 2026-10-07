@@ -10,7 +10,7 @@
     motion: true,
     selectedGoalId: null,
     selected: null,
-    activity: { workId: null, agent: null, data: null, controller: null, timer: null, sequence: 0, follow: true, feedSignature: null, error: "" },
+    activity: { workId: null, agent: null, data: null, controller: null, timer: null, sequence: 0, follow: true, kind: "all", renderedKind: null, feedSignature: null, error: "" },
     analytics: { model: "", role: "", since: "" },
     agentFilters: { query: "", role: "", model: "", state: "", sort: "recent" },
     requestSequence: 0,
@@ -1338,20 +1338,35 @@
   }
   function activityItem(label, value) { const item = el("div", "detail-item"); item.append(el("b", "", label), el("span", "", value)); return item; }
   function activityUsage(usage) { return usage && Number.isFinite(usage.total_tokens) ? `${number(usage.total_tokens)} total \u00b7 ${number(usage.input_tokens)} input \u00b7 ${number(usage.cached_input_tokens)} cached \u00b7 ${number(usage.output_tokens)} output` : "No reported usage"; }
+  const ACTIVITY_KINDS = { progress: "Progress", tool: "Tools", status: "Status", final: "Final output" };
   function renderAgentActivityFeed(events) {
-    const feed = $("agent-activity-feed"), signature = JSON.stringify((events || []).map((event) => [event.id, event.timestamp, event.kind, event.text, event.tool_name, event.state]));
+    const allEvents = events || [], kind = state.activity.kind;
+    const visible = kind === "all" ? allEvents : allEvents.filter((event) => event.kind === kind);
+    $("agent-activity-filters").querySelectorAll("input[name='activity-kind']").forEach((input) => {
+      input.checked = input.value === kind;
+      const count = input.value === "all" ? allEvents.length : allEvents.filter((event) => event.kind === input.value).length;
+      const badge = $(`activity-count-${input.value}`), countText = number(count);
+      if (badge.textContent !== countText) badge.textContent = countText;
+    });
+    const summary = $("agent-activity-filter-summary"), summaryText = `Showing ${number(visible.length)} of ${number(allEvents.length)} loaded events.`;
+    if (summary.textContent !== summaryText) summary.textContent = summaryText;
+    const feed = $("agent-activity-feed");
+    const signature = JSON.stringify([kind, visible.map((event) => [event.id, event.timestamp, event.kind, event.text, event.tool_name, event.state])]);
     if (signature === state.activity.feedSignature) return;
-    const nearEnd = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 24, priorTop = feed.scrollTop;
-    state.activity.feedSignature = signature;
-    if (!(events || []).length) { feed.replaceChildren(el("li", "agent-activity-empty", "No reported progress yet.")); return; }
-    feed.replaceChildren(...events.map((event) => {
+    const filterChanged = kind !== state.activity.renderedKind, priorTop = feed.scrollTop;
+    state.activity.feedSignature = signature; state.activity.renderedKind = kind;
+    if (!visible.length) {
+      const message = !allEvents.length ? "No reported activity yet." : `No ${ACTIVITY_KINDS[kind].toLowerCase()} events in the loaded activity. Choose All activity to see other categories.`;
+      feed.replaceChildren(el("li", "agent-activity-empty", message)); return;
+    }
+    feed.replaceChildren(...visible.map((event) => {
       const item = el("li", `agent-activity-event activity-kind-${safeClass(event.kind)}`), parts = [];
-      if (event.kind === "tool" && event.tool_name) parts.push(`Tool: ${event.tool_name}`);
+      if (event.kind === "tool" && event.tool_name) parts.push(event.tool_name);
       if (event.state) parts.push(titleCase(event.state));
-      if (event.text) parts.push(event.text);
-      item.append(el("div", "", parts.join(" \u00b7 ") || "Reported activity"), el("time", "", localTime(event.timestamp))); return item;
+      if (event.text && event.text !== event.tool_name) parts.push(event.text);
+      item.append(el("span", "agent-activity-kind", Object.hasOwn(ACTIVITY_KINDS, event.kind) ? ACTIVITY_KINDS[event.kind] : "Other"), el("div", "", parts.join(" \u00b7 ") || "Reported activity"), el("time", "", localTime(event.timestamp))); return item;
     }));
-    feed.scrollTop = state.activity.follow ? feed.scrollHeight : priorTop;
+    feed.scrollTop = state.activity.follow ? feed.scrollHeight : filterChanged ? 0 : priorTop;
   }
   function renderAgentActivity(focus = false) {
     const panel = $("agent-activity-panel"), agent = state.activity.agent;
@@ -1402,6 +1417,11 @@
   }
   function refreshNow() { if (state.demo) { exitDemo(); return; } state.retryMs = POLL_MS; fetchSnapshot({ force: true }); fetchAgentActivity({ force: true }); }
   function bindAgentActivity() {
+    $("agent-activity-filters").addEventListener("change", (event) => {
+      const input = event.target;
+      if (input.name !== "activity-kind" || (input.value !== "all" && !Object.hasOwn(ACTIVITY_KINDS, input.value))) return;
+      state.activity.kind = input.value; renderAgentActivity();
+    });
     $("close-agent-activity").addEventListener("click", () => closeAgentActivity({ clear: true }));
     $("agent-activity-follow").addEventListener("click", () => { state.activity.follow = !state.activity.follow; if (state.activity.follow) $("agent-activity-feed").scrollTop = $("agent-activity-feed").scrollHeight; renderAgentActivity(); });
     $("agent-activity-goal").addEventListener("click", () => { const goal = current().goals.find((item) => item.id === state.activity.agent?.goal_id); closeAgentActivity({ clear: true }); switchView("goals"); if (goal) showDetail("goal", goal); });

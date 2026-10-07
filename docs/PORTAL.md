@@ -98,6 +98,14 @@ user/system/developer messages, tool arguments, or raw tool output. Text is rend
 as text, not executable HTML. Reported progress is not a continuous view into the
 model's internal state, and silence does not establish that an agent is idle.
 
+Use **Show activity** to select **All activity**, **Progress** (public updates),
+**Tools** (starts, completions, and failures), **Status** (execution phase changes),
+or **Final output** (public final responses). Counts cover the loaded events,
+which may be a bounded or partial history. The selected category stays in effect
+when new activity arrives and when another agent is opened in this page. A category
+with no matching events explains the empty result; it does not mean the agent is
+idle. Filtering the feed leaves the agent's state and token metrics unchanged.
+
 Activity requires an existing Codex execution receipt with a registered thread,
 turn, and rollout path fingerprint. The server searches only the host's Codex
 sessions directory (`CODEX_HOME/sessions`, or `~/.codex/sessions`), then checks the

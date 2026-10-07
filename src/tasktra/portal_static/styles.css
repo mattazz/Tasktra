@@ -1164,6 +1164,21 @@ body.motion-off * {
 .agent-activity-context { color: var(--muted); font-size: .82rem; line-height: 1.55; margin: 0 0 .85rem; }
 .agent-activity-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .65rem; }
 .agent-activity-controls { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; margin-top: 1rem; }
+.agent-activity-filters { border: 0; padding: 0; margin: 1rem 0 .5rem; min-width: 0; }
+.agent-activity-filters legend { color: var(--muted); font-size: .75rem; margin-bottom: .5rem; }
+.agent-activity-choices { display: flex; flex-wrap: wrap; gap: .45rem; }
+.agent-activity-choice { position: relative; cursor: pointer; }
+.agent-activity-choice input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.agent-activity-choice > span { display: inline-flex; align-items: center; gap: .5rem; min-height: 2.25rem; padding: .35rem .7rem; border: 1px solid #ffffff24; border-radius: .5rem; background: #0b1627; color: var(--muted); font-size: .78rem; }
+.agent-activity-choice input:checked + span { border-color: var(--mint); color: var(--mint); background: #77e0c114; }
+.agent-activity-choice input:focus-visible + span { outline: 2px solid var(--mint); outline-offset: 3px; }
+.agent-activity-choice:hover > span { border-color: var(--mint); }
+.activity-count { font-size: .68rem; min-width: 1.15rem; text-align: center; border-radius: .7rem; background: #ffffff0b; padding: .08rem .3rem; }
+.agent-activity-kind { display: block; color: var(--mint); font-size: .65rem; font-weight: 700; margin-bottom: .2rem; }
+.activity-kind-tool .agent-activity-kind { color: var(--orange); }
+.activity-kind-status .agent-activity-kind { color: #87bfff; }
+.activity-kind-final .agent-activity-kind { color: #b4a9ff; }
+.agent-activity-event.activity-kind-status::before { background: #87bfff; box-shadow: 0 0 0 3px #87bfff22; }
 .agent-activity-feed { max-height: 22rem; overflow: auto; list-style: none; margin: .8rem 0 0; padding: 0 .2rem 0 1rem; border-top: 1px solid #ffffff12; }
 .agent-activity-event { position: relative; min-height: auto; height: auto; padding: .8rem 0 .8rem .75rem; border-bottom: 1px solid #ffffff0b; color: #cdd4dd; font-size: .8rem; line-height: 1.5; overflow: visible; }
 .agent-activity-event::before { content: ""; position: absolute; left: -.18rem; top: 1.12rem; width: .45rem; height: .45rem; border-radius: 50%; background: var(--mint); box-shadow: 0 0 0 3px #77e0c122; }
