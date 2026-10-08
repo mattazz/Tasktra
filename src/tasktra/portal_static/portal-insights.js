@@ -127,7 +127,16 @@
       $("attention-clear-filters").addEventListener("click", () => { state.severity = ""; state.category = ""; $("attention-severity-filter").value = ""; $("attention-category-filter").value = ""; renderAttention(latestData, options.scope?.()); });
       $("attention-list").addEventListener("click", (event) => { const button = event.target.closest("[data-attention-target]"); if (button) onTarget({ type: button.dataset.attentionTarget, id: button.dataset.attentionId || null, itemId: button.dataset.attentionItem || null }); });
     }
-    return { update, bind, state };
+    const getFilters = () => ({ severity: state.severity, category: state.category });
+    const setFilters = (next = {}) => {
+      state.severity = SEVERITIES.has(next.severity) ? next.severity : "";
+      state.category = typeof next.category === "string" ? next.category : "";
+      $("attention-severity-filter").value = state.severity;
+      $("attention-category-filter").value = state.category;
+      state.attentionSignature = null;
+      renderAttention(latestData, options.scope?.());
+    };
+    return { update, bind, state, getFilters, setFilters };
   }
   return { normalize, attentionContext, filterAttention, attentionSignature, diagnosticsRows, create };
 });

@@ -28,6 +28,7 @@
     portalInsights: null,
     portalTimeline: null,
     portalOutcomes: null,
+    workspace: { restoreGeneration: 0, pending: false, requested: null, projectKey: null, liveProjectKey: null, mode: "live", views: [], selectedViewId: "", notice: "", hashHandled: false, comparisonWorkIds: [], comparisonSignature: null },
   };
 
   const $ = (id) => document.getElementById(id);
@@ -516,6 +517,7 @@
   }
   function refreshDetail(snapshot) {
     if (!state.selected) return;
+    if (state.selected.type === "agent" && state.activity.workId === state.selected.id) return;
     const source =
       state.selected.type === "goal"
         ? snapshot.goals
@@ -556,6 +558,7 @@
   }
   function applySnapshot(snapshot, options = {}) {
     const normalized = normalizeSnapshot(snapshot);
+    const projectChanged = workspacePrepareSnapshot?.(normalized) || false;
     state.snapshot = normalized;
     state.lastError = null;
     state.retryMs = POLL_MS;
@@ -565,10 +568,17 @@
     }
     setConnection("good", state.demo ? "Demo mode" : state.live ? "Connected" : "Updates paused");
     render(normalized);
+    if (!projectChanged) workspaceObserveSnapshot?.(normalized);
+    renderWorkspace?.(normalized);
+    renderComparison?.(normalized);
+    if (projectChanged) {
+      workspaceNotice?.("Project identity changed. Cleared prior scope, filters, selections, pins, and saved-view namespace before reloading the new project.");
+      window.setTimeout(() => { if (!state.demo && validWorkspaceKey(normalized.project?.key) === state.workspace.projectKey) fetchSnapshot({ force: true }); }, 0);
+    }
   }
   function scheduleNext() {
     window.clearTimeout(state.timer);
-    if (state.live && !state.demo)
+    if (state.live && !state.demo && !state.workspace?.pending)
       state.timer = window.setTimeout(fetchSnapshot, state.retryMs);
   }
   function setDemoControls() {
@@ -576,6 +586,7 @@
     $("demo-header-button").textContent = state.demo ? "Exit demo" : "Demo";
   }
   function exitDemo() {
+    supersedeWorkspaceRestore?.();
     state.modeGeneration += 1;
     state.demo = false;
     state.selectedGoalId = null;
@@ -584,7 +595,10 @@
     $("detail-panel").hidden = true;
     state.snapshot = state.liveSnapshot || emptySnapshot();
     render(state.snapshot);
+    renderWorkspace?.(state.snapshot);
+    renderComparison?.(state.snapshot);
     setDemoControls();
+    fetchSnapshot({ force: true });
   }
   function refreshNow() {
     if (state.demo) exitDemo();
@@ -856,6 +870,7 @@
     });
   }
   function startDemo() {
+    supersedeWorkspaceRestore?.();
     state.modeGeneration += 1;
     state.demo = true;
     state.selectedGoalId = null;
@@ -874,25 +889,30 @@
   function handleClick(event) {
     const action = event.target.closest("[data-action]")?.dataset;
     if (action?.action === "select-goal") {
+      supersedeWorkspaceRestore?.();
       selectGoal(action.goalId);
       return;
     }
     if (action?.action === "select-job") {
+      supersedeWorkspaceRestore?.();
       const record = current().jobs.find((job) => job.id === action.jobId);
       if (record) showDetail("job", record);
       return;
     }
     if (action?.action === "select-agent") {
+      supersedeWorkspaceRestore?.();
       const record = current().agents.find(
         (agent) => agentKey(agent) === action.agentWorkId,
       );
       if (record) openAgentActivity(record);
       return;
     }
+    if (action?.action === "pin-comparison") { pinComparison?.(action.workId); return; }
+    if (action?.action === "open-comparison") { supersedeWorkspaceRestore?.(); const record = current().agents.filter((agent) => agent.work_id === action.workId); if (record.length === 1) openAgentActivity(record[0]); return; }
     const view =
       event.target.closest("[data-view]")?.dataset.view ||
       event.target.closest("[data-switch-view]")?.dataset.switchView;
-    if (view) switchView(view);
+    if (view) { supersedeWorkspaceRestore?.(); switchView(view); }
   }
   function bind() {
     document.addEventListener("click", handleClick);
@@ -910,20 +930,23 @@
         if (event.key === "Home") next = 0;
         if (event.key === "End") next = tabs.length - 1;
         event.preventDefault();
+        supersedeWorkspaceRestore?.();
         tabs[next].focus();
         switchView(tabs[next].dataset.view);
       });
-    $("job-search").addEventListener("input", () => renderJobs(current()));
-    $("job-status-filter").addEventListener("change", () =>
-      renderJobs(current()),
-    );
+    $("job-search").addEventListener("input", () => { supersedeWorkspaceRestore?.(); renderJobs(current()); });
+    $("job-status-filter").addEventListener("change", () => {
+      supersedeWorkspaceRestore?.(); renderJobs(current());
+    });
     $("clear-job-filters").addEventListener("click", () => {
+      supersedeWorkspaceRestore?.();
       $("job-search").value = "";
       $("job-status-filter").value = "all";
       render(current());
     });
     $("clear-goal-scope").addEventListener("click", () => changeGoalScope(""));
     $("close-detail").addEventListener("click", () => {
+      supersedeWorkspaceRestore?.();
       $("detail-panel").hidden = true;
       state.selected = null;
     });
@@ -935,8 +958,9 @@
       if (state.demo) refreshNow();
       else startDemo();
     });
-    $("refresh-button").addEventListener("click", refreshNow);
+    $("refresh-button").addEventListener("click", () => { supersedeWorkspaceRestore?.(); refreshNow(); });
     $("live-toggle").addEventListener("click", () => {
+      supersedeWorkspaceRestore?.();
       state.live = !state.live;
       $("live-toggle").textContent = `Live: ${state.live ? "on" : "paused"}`;
       $("live-toggle").setAttribute("aria-pressed", String(state.live));
@@ -962,7 +986,7 @@
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) {
         window.clearTimeout(state.timer);
-      } else if (state.live && !state.demo) {
+      } else if (state.live && !state.demo && !state.workspace?.pending) {
         state.retryMs = POLL_MS;
         fetchSnapshot();
       }
@@ -1075,7 +1099,9 @@
       const card = el("article", `agent-card ${agentIsActive(agent) ? "agent-active" : ""}`), top = el("div", "agent-card-top"), detail = el("button", "record-button"), foot = el("div", "agent-foot");
       top.append(agentAvatar(agent), status(agent.state)); detail.type = "button"; detail.dataset.action = "select-agent"; detail.dataset.agentWorkId = agentKey(agent);
       detail.append(textLine("div", "agent-role", agent.role || agent.id), textLine("div", "agent-meta", [agent.observed_model || agent.model, agent.observed_effort || agent.effort].filter(Boolean).join(" \u00b7 ") || "Model unavailable"));
-      foot.append(textLine("span", "agent-meta", observedActivityLabel(agent)), textLine("span", "agent-meta", Number.isFinite(agent.total_tokens) ? `${number(agent.total_tokens)} tokens` : "Usage unavailable")); card.append(top, detail, foot); return card;
+      foot.append(textLine("span", "agent-meta", observedActivityLabel(agent)), textLine("span", "agent-meta", Number.isFinite(agent.total_tokens) ? `${number(agent.total_tokens)} tokens` : "Usage unavailable"));
+      if (typeof agent.work_id === "string" && agent.work_id) { const compare = el("button", "text-button agent-compare", "Compare"); compare.type = "button"; compare.dataset.action = "pin-comparison"; compare.dataset.workId = agent.work_id; const open = el("button", "text-button agent-compare", "Open"); open.type = "button"; open.dataset.action = "open-comparison"; open.dataset.workId = agent.work_id; foot.append(compare, open); }
+      card.append(top, detail, foot); return card;
     }));
   }
   function usageReport(snapshot) {
@@ -1131,6 +1157,7 @@
     if (!state.relationshipMap) {
       state.relationshipMap = api.create($("relationship-map-host"), {
         onOpen({ type, record }) {
+          supersedeWorkspaceRestore?.();
           if (type === "agent") { openAgentActivity(record); return; }
           if (type === "goal") { switchView("goals"); showDetail("goal", record); return; }
           if (type === "job") { switchView("jobs"); showDetail("job", record); }
@@ -1146,6 +1173,7 @@
   function timelineScope(snapshot) { return state.demo ? "representative browser-only sample" : state.selectedGoalId ? `goal scope: ${scopedTitle(snapshot)}` : "recorded project scope"; }
   function renderPortalTimeline(snapshot) { if (state.portalTimeline) state.portalTimeline.update(snapshot, { demo: state.demo, scope: timelineScope(snapshot) }); }
   function handleTimelineTarget(target) {
+    supersedeWorkspaceRestore?.();
     const snapshot = current();
     if (target.type === "job") { const record = snapshot.jobs.find((item) => item.id === target.id); if (record) { switchView("jobs"); showDetail("job", record); return; } }
     if (target.type === "agent") { const record = snapshot.agents.find((item) => agentKey(item) === target.id); if (record) { openAgentActivity(record); return; } }
@@ -1159,7 +1187,7 @@
   }
   function outcomesScope(snapshot) { return state.demo ? "representative browser-only sample" : state.selectedGoalId ? `goal scope: ${scopedTitle(snapshot)}` : "recorded project scope"; }
   function renderPortalOutcomes(snapshot) { if (state.portalOutcomes) state.portalOutcomes.update(snapshot, { demo: state.demo, scope: outcomesScope(snapshot) }); }
-  function showOutcomeJob(jobId) { const record = current().jobs.find((job) => job.id === jobId); if (record) { switchView("jobs"); showDetail("job", record); } else setNotice("That recorded outcome job is not loaded in the current scope.", "warning"); }
+  function showOutcomeJob(jobId) { supersedeWorkspaceRestore?.(); const record = current().jobs.find((job) => job.id === jobId); if (record) { switchView("jobs"); showDetail("job", record); } else setNotice("That recorded outcome job is not loaded in the current scope.", "warning"); }
   function initPortalOutcomes() { const api = window.TasktraPortalOutcomes; if (!api || typeof api.create !== "function") return; state.portalOutcomes = api.create(document, { onJob: showOutcomeJob }); renderPortalOutcomes(current()); }
   function showDetail(type, record, shouldFocus = true) {
     state.selected = { type, id: type === "agent" ? agentKey(record) : record.id };
@@ -1273,10 +1301,12 @@
     }
     state.snapshot = snapshot;
     render(snapshot);
+    renderWorkspace?.(snapshot);
+    renderComparison?.(snapshot);
   }
   function changeGoalScope(id) {
+    supersedeWorkspaceRestore?.();
     state.selectedGoalId = id || null;
-    savePreference("tasktra-goal-scope", state.selectedGoalId);
     state.selected = null;
     closeAgentActivity({ clear: true });
     $("detail-panel").hidden = true;
@@ -1289,14 +1319,14 @@
     changeGoalScope(state.selectedGoalId === id ? "" : id);
     if (goal) showDetail("goal", goal);
   }
-  function fetchQuery() {
-    const params = new URLSearchParams();
-    if (state.selectedGoalId) params.set("goal_id", state.selectedGoalId);
-    if (state.analytics.model) params.set("model", state.analytics.model);
-    if (state.analytics.role) params.set("role", state.analytics.role);
+  function fetchQuery(override = {}) {
+    const params = new URLSearchParams(), goalId = Object.hasOwn(override, "goalId") ? override.goalId : state.selectedGoalId, analytics = override.analytics || state.analytics;
+    if (goalId) params.set("goal_id", goalId);
+    if (analytics.model) params.set("model", analytics.model);
+    if (analytics.role) params.set("role", analytics.role);
     const periods = { P1D: 1, P7D: 7, P30D: 30 };
-    if (state.analytics.since && periods[state.analytics.since]) {
-      params.set("since", new Date(Date.now() - periods[state.analytics.since] * 86400000).toISOString());
+    if (analytics.since && periods[analytics.since]) {
+      params.set("since", new Date(Date.now() - periods[analytics.since] * 86400000).toISOString());
     }
     return params.toString();
   }
@@ -1313,21 +1343,23 @@
     let timedOut = false;
     const timeout = window.setTimeout(() => { timedOut = true; controller.abort(); }, 8000);
     try {
-      const query = fetchQuery();
+      const query = fetchQuery(options.query || {});
       const response = await fetch(`/api/snapshot${query ? `?${query}` : ""}`, {
         headers: { Accept: "application/json" }, signal: controller.signal, cache: "no-store",
       });
       if (!response.ok) throw new Error(`Snapshot request returned ${response.status}`);
       const snapshot = await response.json();
-      if (sequence !== state.requestSequence || mode !== state.modeGeneration || state.demo) return;
+      if (sequence !== state.requestSequence || mode !== state.modeGeneration || state.demo || (options.workspaceRestoreGeneration && options.workspaceRestoreGeneration !== state.workspace.restoreGeneration)) return { ok: false, superseded: true };
       applySnapshot(snapshot);
+      return { ok: true, snapshot: state.snapshot, sequence, mode };
     } catch (error) {
-      if (sequence !== state.requestSequence || mode !== state.modeGeneration || state.demo) return;
-      if (error.name === "AbortError" && !timedOut) return;
+      if (sequence !== state.requestSequence || mode !== state.modeGeneration || state.demo || (options.workspaceRestoreGeneration && options.workspaceRestoreGeneration !== state.workspace.restoreGeneration)) return { ok: false, superseded: true };
+      if (error.name === "AbortError" && !timedOut) return { ok: false, superseded: true };
       state.lastError = error;
       setConnection("offline", state.snapshot ? "Stale data" : "Disconnected");
       setNotice("Could not refresh this scope. " + (state.live ? "Retrying shortly." : "Use Refresh to retry."), "warning");
       state.retryMs = Math.min(Math.round(state.retryMs * 1.8), MAX_BACKOFF_MS);
+      return { ok: false, error };
     } finally {
       window.clearTimeout(timeout);
       if (sequence === state.requestSequence) {
@@ -1352,13 +1384,13 @@
   }
   function bindInsights() {
     $("goal-scope-select").addEventListener("change", (event) => changeGoalScope(event.target.value));
-    [["agent-search", "query", "input"], ["agent-role-filter", "role", "change"], ["agent-model-filter", "model", "change"], ["agent-state-filter", "state", "change"], ["agent-sort", "sort", "change"]].forEach(([id, key, event]) => $(id).addEventListener(event, (e) => { state.agentFilters[key] = e.target.value; renderAgents(current()); }));
-    $("clear-agent-filters").addEventListener("click", () => { state.agentFilters = { query: "", role: "", model: "", state: "", sort: "recent" }; $("agent-search").value = ""; $("agent-role-filter").value = ""; $("agent-model-filter").value = ""; $("agent-state-filter").value = ""; $("agent-sort").value = "recent"; renderAgents(current()); });
-    [["usage-model-filter", "model"], ["usage-role-filter", "role"], ["usage-since-filter", "since"]].forEach(([id, key]) => $(id).addEventListener("change", (event) => { state.analytics[key] = event.target.value; state.selected = null; $("detail-panel").hidden = true; if (state.demo) render(current()); else fetchSnapshot({ force: true, replace: true }); }));
-    $("clear-usage-filters").addEventListener("click", () => { state.analytics = { model: "", role: "", since: "" }; $("usage-model-filter").value = ""; $("usage-role-filter").value = ""; $("usage-since-filter").value = ""; if (state.demo) render(current()); else fetchSnapshot({ force: true, replace: true }); });
+    [["agent-search", "query", "input"], ["agent-role-filter", "role", "change"], ["agent-model-filter", "model", "change"], ["agent-state-filter", "state", "change"], ["agent-sort", "sort", "change"]].forEach(([id, key, event]) => $(id).addEventListener(event, (e) => { supersedeWorkspaceRestore?.(); state.agentFilters[key] = e.target.value; renderAgents(current()); }));
+    $("clear-agent-filters").addEventListener("click", () => { supersedeWorkspaceRestore?.(); state.agentFilters = { query: "", role: "", model: "", state: "", sort: "recent" }; $("agent-search").value = ""; $("agent-role-filter").value = ""; $("agent-model-filter").value = ""; $("agent-state-filter").value = ""; $("agent-sort").value = "recent"; renderAgents(current()); });
+    [["usage-model-filter", "model"], ["usage-role-filter", "role"], ["usage-since-filter", "since"]].forEach(([id, key]) => $(id).addEventListener("change", (event) => { supersedeWorkspaceRestore?.(); state.analytics[key] = event.target.value; state.selected = null; $("detail-panel").hidden = true; if (state.demo) render(current()); else fetchSnapshot({ force: true, replace: true }); }));
+    $("clear-usage-filters").addEventListener("click", () => { supersedeWorkspaceRestore?.(); state.analytics = { model: "", role: "", since: "" }; $("usage-model-filter").value = ""; $("usage-role-filter").value = ""; $("usage-since-filter").value = ""; if (state.demo) render(current()); else fetchSnapshot({ force: true, replace: true }); });
   }
   function baseInit() {
-    state.live = loadPreference("tasktra-live", true); state.motion = loadPreference("tasktra-motion", !window.matchMedia("(prefers-reduced-motion: reduce)").matches); state.selectedGoalId = loadPreference("tasktra-goal-scope", null); document.body.classList.toggle("motion-off", !state.motion); $("motion-toggle").setAttribute("aria-pressed", String(state.motion)); $("live-toggle").setAttribute("aria-pressed", String(state.live)); $("live-toggle").textContent = `Live: ${state.live ? "on" : "paused"}`; bind(); bindInsights(); render(emptySnapshot()); setConnection("", state.live ? "Connecting" : "Updates paused"); if (state.live) fetchSnapshot(); else { setNotice("Live updates are paused. The current local snapshot was loaded once; use Refresh for a newer one.", "warning"); fetchSnapshot({ force: true }); }
+    state.live = loadPreference("tasktra-live", true); state.motion = loadPreference("tasktra-motion", !window.matchMedia("(prefers-reduced-motion: reduce)").matches); state.selectedGoalId = null; document.body.classList.toggle("motion-off", !state.motion); $("motion-toggle").setAttribute("aria-pressed", String(state.motion)); $("live-toggle").setAttribute("aria-pressed", String(state.live)); $("live-toggle").textContent = `Live: ${state.live ? "on" : "paused"}`; bind(); bindInsights(); render(emptySnapshot()); setConnection("", state.live ? "Connecting" : "Updates paused"); if (state.live) fetchSnapshot(); else { setNotice("Live updates are paused. The current local snapshot was loaded once; use Refresh for a newer one.", "warning"); fetchSnapshot({ force: true }); }
   }
 
 
@@ -1381,10 +1413,14 @@
   }
   function clearAgentActivityTimer() { window.clearTimeout(state.activity.timer); state.activity.timer = null; }
   function closeAgentActivity(options = {}) {
+    const closedWorkId = state.activity.workId;
     clearAgentActivityTimer(); state.activity.sequence += 1;
     if (state.activity.controller) state.activity.controller.abort();
     state.activity.controller = null; $("agent-activity-panel").hidden = true;
-    if (options.clear) Object.assign(state.activity, { workId: null, agent: null, data: null, feedSignature: null });
+    if (options.clear) {
+      Object.assign(state.activity, { workId: null, agent: null, data: null, feedSignature: null });
+      if (state.selected?.type === "agent" && state.selected.id === closedWorkId) state.selected = null;
+    }
   }
   function activityItem(label, value) { const item = el("div", "detail-item"); item.append(el("b", "", label), el("span", "", value)); return item; }
   function activityUsage(usage) { return usage && Number.isFinite(usage.total_tokens) ? `${number(usage.total_tokens)} total \u00b7 ${number(usage.input_tokens)} input \u00b7 ${number(usage.cached_input_tokens)} cached \u00b7 ${number(usage.output_tokens)} output` : "No reported usage"; }
@@ -1473,21 +1509,21 @@
     } finally { if (state.activity.controller === controller) state.activity.controller = null; if (sequence === state.activity.sequence) scheduleAgentActivity(); }
   }
   function openAgentActivity(agent) {
-    state.selected = null; $("detail-panel").hidden = true; clearAgentActivityTimer(); if (state.activity.controller) state.activity.controller.abort(); state.activity.sequence += 1;
+    state.selected = typeof agent?.work_id === "string" && agent.work_id ? { type: "agent", id: agent.work_id } : null; $("detail-panel").hidden = true; clearAgentActivityTimer(); if (state.activity.controller) state.activity.controller.abort(); state.activity.sequence += 1;
     Object.assign(state.activity, { workId: agent.work_id || null, agent, data: state.demo ? activityDemo(agent) : null, feedSignature: null, error: "" });
     switchView("agents"); renderAgentActivity(true); if (!state.demo && state.activity.workId) fetchAgentActivity({ force: true });
   }
-  function refreshNow() { if (state.demo) { exitDemo(); return; } state.retryMs = POLL_MS; fetchSnapshot({ force: true }); fetchAgentActivity({ force: true }); }
+  function refreshNow() { supersedeWorkspaceRestore?.(); if (state.demo) { exitDemo(); return; } state.retryMs = POLL_MS; fetchSnapshot({ force: true }); fetchAgentActivity({ force: true }); }
   function bindAgentActivity() {
     $("agent-activity-filters").addEventListener("change", (event) => {
       const input = event.target;
       if (input.name !== "activity-kind" || (input.value !== "all" && !Object.hasOwn(ACTIVITY_KINDS, input.value))) return;
-      state.activity.kind = input.value; renderAgentActivity();
+      supersedeWorkspaceRestore?.(); state.activity.kind = input.value; renderAgentActivity();
     });
-    $("close-agent-activity").addEventListener("click", () => closeAgentActivity({ clear: true }));
-    $("agent-activity-follow").addEventListener("click", () => { state.activity.follow = !state.activity.follow; if (state.activity.follow) $("agent-activity-feed").scrollTop = $("agent-activity-feed").scrollHeight; renderAgentActivity(); });
-    $("agent-activity-goal").addEventListener("click", () => { const goal = current().goals.find((item) => item.id === state.activity.agent?.goal_id); closeAgentActivity({ clear: true }); switchView("goals"); if (goal) showDetail("goal", goal); });
-    $("agent-activity-job").addEventListener("click", () => { const job = current().jobs.find((item) => item.id === state.activity.agent?.job_id); closeAgentActivity({ clear: true }); switchView("jobs"); if (job) showDetail("job", job); });
+    $("close-agent-activity").addEventListener("click", () => { supersedeWorkspaceRestore?.(); closeAgentActivity({ clear: true }); });
+    $("agent-activity-follow").addEventListener("click", () => { supersedeWorkspaceRestore?.(); state.activity.follow = !state.activity.follow; if (state.activity.follow) $("agent-activity-feed").scrollTop = $("agent-activity-feed").scrollHeight; renderAgentActivity(); });
+    $("agent-activity-goal").addEventListener("click", () => { supersedeWorkspaceRestore?.(); const goal = current().goals.find((item) => item.id === state.activity.agent?.goal_id); closeAgentActivity({ clear: true }); switchView("goals"); if (goal) showDetail("goal", goal); });
+    $("agent-activity-job").addEventListener("click", () => { supersedeWorkspaceRestore?.(); const job = current().jobs.find((item) => item.id === state.activity.agent?.job_id); closeAgentActivity({ clear: true }); switchView("jobs"); if (job) showDetail("job", job); });
     $("live-toggle").addEventListener("click", () => { if (state.live) fetchAgentActivity({ force: true }); else { clearAgentActivityTimer(); state.activity.sequence += 1; if (state.activity.controller) state.activity.controller.abort(); state.activity.controller = null; renderAgentActivity(); } });
   }
   function insightScope(snapshot) {
@@ -1503,6 +1539,7 @@
     if (state.portalInsights) state.portalInsights.update(snapshot, { demo: state.demo, scope: insightScope(snapshot) });
   }
   function handleInsightTarget(target) {
+    supersedeWorkspaceRestore?.();
     const snapshot = current();
     if (target.type === "diagnostics") { const panel = $("diagnostics-panel"); panel.open = true; $("diagnostics-summary").focus({ preventScroll: true }); panel.scrollIntoView({ behavior: state.motion ? "smooth" : "auto", block: "start" }); return; }
     if (target.type === "goal") { const record = snapshot.goals.find((item) => item.id === target.id); if (record) { switchView("goals"); showDetail("goal", record); return; } }
@@ -1517,7 +1554,311 @@
     state.portalInsights.bind();
     renderPortalInsights(current());
   }
-  function init() { baseInit(); bindAgentActivity(); initPortalInsights(); initPortalTimeline(); initPortalOutcomes(); }
+  function workspaceApi() {
+    const api = window.TasktraPortalWorkspace;
+    return api && ["normalizeSettings", "makeEnvelope", "parseFragment", "serializeFragment", "readViews", "upsertView", "removeView", "normalizeComparison", "comparisonRows"].every((key) => typeof api[key] === "function") ? api : null;
+  }
+  function workspaceMode() { return state.demo ? "demo" : "live"; }
+  function validWorkspaceKey(value) { return typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value) ? value : null; }
+  function workspaceContext(snapshot = current()) {
+    const projectKey = state.demo ? state.workspace.liveProjectKey : validWorkspaceKey(snapshot?.project?.key);
+    return projectKey ? { projectKey, mode: workspaceMode() } : null;
+  }
+  function workspaceStorage() {
+    try { return window.localStorage; } catch (_) { return null; }
+  }
+  function workspaceNotice(message) {
+    state.workspace.notice = message || "";
+    const node = $("workspace-notice");
+    if (node) node.textContent = state.workspace.notice;
+  }
+  function workspaceAllowed(snapshot) {
+    const unique = (items) => [...new Set((items || []).filter((value) => typeof value === "string" && value))];
+    const insightItems = snapshot?.insights?.attention?.items || [];
+    const timelineRows = snapshot?.insights?.timeline?.rows || [];
+    return {
+      goal_ids: unique([...(snapshot?.goal_options || []), ...(snapshot?.goals || [])].map((item) => item?.id)),
+      job_ids: unique((snapshot?.jobs || []).map((item) => item?.id)),
+      agent_work_ids: unique((snapshot?.agents || []).map((item) => item?.work_id)),
+      roles: unique([...(snapshot?.agents || []).map((item) => item?.role), ...(snapshot?.analytics?.options?.roles || [])]),
+      models: unique([...(snapshot?.agents || []).map((item) => item?.observed_model || item?.model), ...(snapshot?.analytics?.options?.models || []), ...timelineRows.map((item) => item?.model)]),
+      job_states: unique((snapshot?.jobs || []).map((item) => item?.status)),
+      agent_states: unique((snapshot?.agents || []).map((item) => item?.state)),
+      attention_categories: unique(insightItems.map((item) => item?.category)),
+      timeline_states: unique(timelineRows.map((item) => item?.state)),
+    };
+  }
+  function workspaceSettings() {
+    const insightFilters = state.portalInsights?.getFilters?.() || { severity: "", category: "" };
+    const timelineFilters = state.portalTimeline?.getFilters?.() || { kind: "", state: "", model: "" };
+    return {
+      view: state.activeView,
+      goal_id: state.selectedGoalId || "",
+      jobs: { query: $("job-search").value || "", status: $("job-status-filter").value === "all" ? "" : $("job-status-filter").value || "" },
+      agents: { ...state.agentFilters },
+      usage: { ...state.analytics },
+      attention: insightFilters,
+      timeline: timelineFilters,
+      map: { preset: state.relationshipMap?.getPreset?.() || "all" },
+      activity: { kind: state.activity.kind, follow: Boolean(state.activity.follow) },
+      selected: state.activity.workId && typeof state.activity.workId === "string" ? { type: "agent", id: state.activity.workId } : state.selected ? { type: state.selected.type, id: state.selected.id } : null,
+      comparison: { work_ids: [...state.workspace.comparisonWorkIds] },
+    };
+  }
+  function newWorkspaceId() {
+    if (window.crypto?.randomUUID) return window.crypto.randomUUID().replace(/-/g, "");
+    return `${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`.padEnd(16, "0").slice(0, 32);
+  }
+  function renderWorkspace(snapshot = current()) {
+    const api = workspaceApi(), context = workspaceContext(snapshot), disabled = !api || !context || state.workspace.pending;
+    ["workspace-save", "workspace-restore", "workspace-delete", "workspace-copy-link"].forEach((id) => { const node = $(id); if (node) node.disabled = disabled; });
+    const select = $("workspace-list");
+    if (!api || !context) {
+      if (select && document.activeElement !== select) { select.replaceChildren(el("option", "", "Saved views unavailable")); select.value = ""; }
+      if (!state.workspace.pending) workspaceNotice(state.demo && !state.workspace.liveProjectKey ? "Saved views need a verified live project identity before demo mode can use its separate workspace." : "Saved views will be available after the project identity is verified.");
+      return;
+    }
+    const loaded = api.readViews(workspaceStorage(), context.projectKey, context.mode);
+    state.workspace.views = loaded.value?.views || [];
+    if (!loaded.ok) workspaceNotice("Saved views are unavailable in this browser. Existing storage was left unchanged.");
+    else if (state.workspace.notice === "Saved views will be available after the project identity is verified.") workspaceNotice("");
+    if (select && document.activeElement !== select) {
+      const wanted = state.workspace.selectedViewId;
+      select.replaceChildren(el("option", "", "Choose a saved view")); select.firstChild.value = "";
+      state.workspace.views.forEach((view) => { const option = el("option", "", view.name); option.value = view.id; select.append(option); });
+      select.value = state.workspace.views.some((view) => view.id === wanted) ? wanted : "";
+    }
+    const save = $("workspace-save");
+    if (save) save.textContent = state.workspace.views.some((view) => view.id === state.workspace.selectedViewId) ? "Update selected view" : "Save new view";
+  }
+  function supersedeWorkspaceRestore(changedControl = null) {
+    if (!state.workspace.pending) return;
+    const previous = state.workspace.requested?.previous;
+    const focused = changedControl && changedControl.isConnected && "value" in changedControl ? changedControl : document.activeElement;
+    const focusedValue = focused && "value" in focused ? focused.value : undefined;
+    state.workspace.restoreGeneration += 1;
+    state.workspace.pending = false;
+    state.workspace.requested = null;
+    if (previous?.settings) {
+      workspaceApplyControls(previous.settings);
+      state.selected = previous.selected;
+      if (focused && focused.isConnected && focusedValue !== undefined && "value" in focused) focused.value = focusedValue;
+      render(current());
+      if (focused && focused.isConnected && focusedValue !== undefined && "value" in focused) focused.value = focusedValue;
+    }
+    workspaceNotice("View restoration was superseded by a newer action.");
+  }
+  function workspaceApplyControls(settings) {
+    state.selectedGoalId = settings.goal_id || null;
+    state.analytics = { ...settings.usage };
+    state.agentFilters = { ...settings.agents };
+    $("job-search").value = settings.jobs.query;
+    $("job-status-filter").value = settings.jobs.status || "all";
+    $("agent-search").value = settings.agents.query;
+    $("agent-role-filter").value = settings.agents.role;
+    $("agent-model-filter").value = settings.agents.model;
+    $("agent-state-filter").value = settings.agents.state;
+    $("agent-sort").value = settings.agents.sort;
+    $("usage-model-filter").value = settings.usage.model;
+    $("usage-role-filter").value = settings.usage.role;
+    $("usage-since-filter").value = settings.usage.since;
+    state.portalInsights?.setFilters?.(settings.attention);
+    state.portalTimeline?.setFilters?.(settings.timeline);
+    state.relationshipMap?.setPreset?.(settings.map.preset);
+    state.activity.kind = settings.activity.kind;
+    state.activity.follow = settings.activity.follow;
+    state.workspace.comparisonWorkIds = [...settings.comparison.work_ids];
+  }
+  function resolveWorkspaceIdentities(settings, snapshot) {
+    let note = "";
+    state.selected = null;
+    $("detail-panel").hidden = true;
+    closeAgentActivity({ clear: true });
+    if (settings.selected) {
+      const source = settings.selected.type === "goal" ? snapshot.goals : settings.selected.type === "job" ? snapshot.jobs : snapshot.agents;
+      const matches = (source || []).filter((item) => settings.selected.type === "agent" ? item?.work_id === settings.selected.id : item?.id === settings.selected.id);
+      if (matches.length === 1) {
+        if (settings.selected.type === "agent") openAgentActivity(matches[0]);
+        else showDetail(settings.selected.type, matches[0], false);
+      } else note = "The saved selected record is not available in this scope.";
+    }
+    const pins = workspaceApi()?.normalizeComparison(state.workspace.comparisonWorkIds, snapshot.agents || []);
+    if (pins && pins.value.pins.some((pin) => !pin.found)) note = `${note}${note ? " " : ""}One or more saved comparison records are unavailable in this scope.`;
+    return note;
+  }
+  async function restoreWorkspaceSettings(settings, meta = {}) {
+    const api = workspaceApi(), context = workspaceContext();
+    if (state.workspace.pending && meta.source === "link") supersedeWorkspaceRestore();
+    if (!api || !context || state.workspace.pending) { workspaceNotice(state.workspace.pending ? "A view is still restoring; wait for it to finish." : "Saved views are unavailable for this project."); return; }
+    const generation = ++state.workspace.restoreGeneration;
+    const immutable = JSON.parse(JSON.stringify(settings));
+    const previous = { settings: JSON.parse(JSON.stringify(workspaceSettings())), selected: state.selected ? { ...state.selected } : null, activityWorkId: state.activity.workId || null };
+    state.workspace.pending = true;
+    state.workspace.requested = { generation, settings: immutable, context: { ...context }, source: meta.source || "saved", previous };
+    workspaceNotice("Restoring this view…");
+    if (state.controller) state.controller.abort();
+    state.selectedGoalId = immutable.goal_id || null;
+    state.analytics = { ...immutable.usage };
+    if (state.demo) {
+      renderDemoScope();
+      const normalized = api.normalizeSettings(immutable, workspaceAllowed(current()));
+      if (generation !== state.workspace.restoreGeneration || !state.workspace.pending) return;
+      workspaceFinishRestore(normalized, current(), generation);
+      return;
+    }
+    const result = await fetchSnapshot({ force: true, workspaceRestoreGeneration: generation });
+    if (generation !== state.workspace.restoreGeneration || !state.workspace.pending) return;
+    if (!result?.ok || !result.snapshot) {
+      const previous = state.workspace.requested?.previous;
+      state.workspace.pending = false; state.workspace.requested = null;
+      if (previous?.settings) {
+        workspaceApplyControls(previous.settings);
+        state.selected = previous.selected;
+        render(current());
+      } else {
+        state.selected = null; state.workspace.comparisonWorkIds = [];
+      }
+      workspaceNotice("Could not restore this view because its requested scope could not be loaded. The prior view remains active."); renderWorkspace(current()); renderComparison(current()); return;
+    }
+    const latestContext = workspaceContext(result.snapshot);
+    if (!latestContext || latestContext.projectKey !== context.projectKey || latestContext.mode !== context.mode) {
+      state.workspace.pending = false; state.workspace.requested = null; state.selected = null; state.workspace.comparisonWorkIds = [];
+      workspaceNotice("This view belongs to a different project or mode and was not restored."); renderWorkspace(current()); renderComparison(current()); return;
+    }
+    workspaceFinishRestore(api.normalizeSettings(immutable, workspaceAllowed(result.snapshot)), result.snapshot, generation);
+  }
+  function workspaceFinishRestore(normalized, snapshot, generation) {
+    if (generation !== state.workspace.restoreGeneration || !state.workspace.pending) return;
+    workspaceApplyControls(normalized.value);
+    const selectedAgent = normalized.ok && normalized.value.selected?.type === "agent";
+    switchView(selectedAgent ? "agents" : normalized.value.view);
+    const identityNotice = normalized.ok ? resolveWorkspaceIdentities(normalized.value, snapshot) : "Some saved filters are no longer available in this scope and were cleared.";
+    const notice = selectedAgent && normalized.value.view !== "agents" ? `Opened Agents to show the saved selected agent.${identityNotice ? ` ${identityNotice}` : ""}` : identityNotice;
+    state.workspace.pending = false; state.workspace.requested = null;
+    render(snapshot); renderComparison(snapshot); renderWorkspace(snapshot);
+    workspaceNotice(notice || "Saved view restored.");
+  }
+  function clearWorkspaceProjectState(key) {
+    state.workspace.restoreGeneration += 1;
+    state.workspace.pending = false;
+    state.workspace.requested = null;
+    state.workspace.projectKey = key;
+    state.workspace.liveProjectKey = key;
+    state.workspace.hashHandled = false;
+    state.workspace.views = [];
+    state.workspace.selectedViewId = "";
+    state.workspace.comparisonWorkIds = [];
+    state.workspace.comparisonSignature = null;
+    state.selectedGoalId = null;
+    state.selected = null;
+    resetLocalFilters();
+    closeAgentActivity({ clear: true });
+    $("detail-panel").hidden = true;
+    baseSwitchView("overview");
+  }
+  function workspacePrepareSnapshot(snapshot) {
+    const key = validWorkspaceKey(snapshot?.project?.key);
+    if (state.demo || !key) return false;
+    const previous = state.workspace.projectKey;
+    if (previous && previous !== key) {
+      clearWorkspaceProjectState(key);
+      return true;
+    }
+    state.workspace.projectKey = key;
+    state.workspace.liveProjectKey = key;
+    return false;
+  }
+  function workspaceObserveSnapshot(snapshot) {
+    const key = validWorkspaceKey(snapshot?.project?.key);
+    if (state.workspace.hashHandled || !workspaceApi() || !key || state.demo) return;
+    state.workspace.hashHandled = true;
+    if (!window.location.hash) return;
+    const parsed = workspaceApi().parseFragment(window.location.hash, {});
+    if (!parsed.ok || !parsed.value) { workspaceNotice("This view link is invalid or unsupported."); return; }
+    const context = workspaceContext(snapshot);
+    if (!context || parsed.value.project_key !== context.projectKey || parsed.value.mode !== context.mode) { workspaceNotice("This view link belongs to a different project or mode."); return; }
+    restoreWorkspaceSettings(parsed.value.settings, { source: "link" });
+  }
+  function displayComparisonValue(value, percent = false) { return Number.isFinite(value) ? (percent ? `${Math.round(value * 100)}%` : number(value)) : "Unknown"; }
+  function renderComparison(snapshot = current(), forcePickers = false) {
+    const panel = $("comparison-panel"), api = workspaceApi();
+    if (!panel || !api) return;
+    const pins = api.normalizeComparison(state.workspace.comparisonWorkIds, snapshot.agents || []);
+    const value = pins.value || { requested: [], pins: [], ready: false };
+    const counts = new Map();
+    (snapshot.agents || []).forEach((agent) => counts.set(agent.work_id, (counts.get(agent.work_id) || 0) + 1));
+    const options = (snapshot.agents || []).filter((agent) => typeof agent.work_id === "string" && agent.work_id && counts.get(agent.work_id) === 1);
+    const syncPicker = (id, currentId) => { const select = $(id); if (!select || (!forcePickers && document.activeElement === select)) return; select.replaceChildren(el("option", "", "Choose an agent")); select.firstChild.value = ""; options.forEach((agent) => { const option = el("option", "", `${agent.role || agent.work_id} · ${agent.work_id}`); option.value = agent.work_id; select.append(option); }); if (currentId && !options.some((agent) => agent.work_id === currentId)) { const missing = el("option", "", `${currentId} (unavailable)`); missing.value = currentId; select.append(missing); } select.value = currentId || ""; };
+    syncPicker("comparison-first-picker", value.requested[0] || ""); syncPicker("comparison-second-picker", value.requested[1] || "");
+    panel.hidden = false;
+    const statusNode = $("comparison-status"), grid = $("comparison-grid");
+    if (!value.requested.length) { statusNode.textContent = "Choose Compare on two recorded agents to inspect imported snapshot values."; grid.replaceChildren(); state.workspace.comparisonSignature = null; return; }
+    const result = api.comparisonRows(value.pins[0], value.pins[1]).value;
+    statusNode.textContent = value.requested.length === 1 && value.pins[0]?.found ? "Choose a second agent to compare with the first recorded agent." : result.stale ? "One or more pinned records are unavailable in the current scope. No replacement was selected." : "Imported snapshot values only. Difference is second agent minus first agent. Observation timestamps do not measure execution duration.";
+    const signature = JSON.stringify([value, result]);
+    if (signature === state.workspace.comparisonSignature) return;
+    const focused = grid.contains(document.activeElement) ? document.activeElement : null;
+    const focusKey = focused?.dataset.action ? [focused.dataset.action, focused.dataset.workId || "", focused.dataset.goalId || "", focused.dataset.jobId || "", focused.closest("th, td")?.cellIndex] : null;
+    state.workspace.comparisonSignature = signature; grid.replaceChildren();
+    const left = result.left?.agent, right = result.right?.agent;
+    const table = el("table", "comparison-table"), head = el("thead", ""), header = el("tr", ""), body = el("tbody", "");
+    const heading = (label, agent) => { const cell = el("th", "comparison-heading"); cell.scope = "col"; if (agent) { const button = el("button", "text-button", label); button.type = "button"; button.dataset.action = "open-comparison"; button.dataset.workId = agent.work_id; button.title = "Open recorded agent activity"; cell.append(button); } else cell.textContent = label; header.append(cell); };
+    heading("Metric"); heading(left?.work_id || value.requested[0] || "First", left); heading(right?.work_id || value.requested[1] || "Second", right); heading("Second − first");
+    head.append(header); table.append(head, body); grid.append(table);
+    const add = (label, leftValue, rightValue, diff = "") => { const row = el("tr", ""), metric = el("th", "comparison-metric", label); metric.scope = "row"; row.append(metric); for (const value of [leftValue, rightValue]) { const cell = el("td", ""); if (value instanceof Node) cell.append(value); else cell.textContent = value || "Unknown"; row.append(cell); } row.append(el("td", diff ? "comparison-difference" : "comparison-unknown", diff || "Not comparable")); body.append(row); };
+    add("Role", left?.role, right?.role); add("Model / effort", [left?.model, left?.effort].filter(Boolean).join(" · "), [right?.model, right?.effort].filter(Boolean).join(" · "));
+    add("State", left?.state, right?.state);
+    const contextCell = (agent) => { const cell = el("div", "comparison-context"); if (!agent?.goal_id && !agent?.job_id) { cell.textContent = "Unknown"; return cell; } if (agent.goal_id) { const goal = el("button", "text-button", `Goal ${agent.goal_id}`); goal.type = "button"; goal.dataset.action = "select-goal"; goal.dataset.goalId = agent.goal_id; cell.append(goal); } if (agent.job_id) { const job = el("button", "text-button", `Job ${agent.job_id}`); job.type = "button"; job.dataset.action = "select-job"; job.dataset.jobId = agent.job_id; cell.append(job); } return cell; };
+    add("Goal / job", contextCell(left), contextCell(right));
+    add("Reported start", localTime(left?.started_at), localTime(right?.started_at)); add("Last observed", localTime(left?.last_observed_at), localTime(right?.last_observed_at)); add("Outcome", left?.outcome, right?.outcome);
+    const coverage = (agent) => Number.isSafeInteger(agent?.usage?.total_tokens) ? "Measured imported values" : "Not measured";
+    add("Usage coverage", coverage(left), coverage(right)); add("Record source", left?.provenance, right?.provenance);
+    result.metrics.forEach((row) => add(titleCase(row.label), displayComparisonValue(row.left, row.key === "cache_fraction"), displayComparisonValue(row.right, row.key === "cache_fraction"), row.comparable ? (row.key === "cache_fraction" ? `${(row.difference * 100).toFixed(1)} percentage points` : displayComparisonValue(row.difference)) : ""));
+    if (focusKey) Array.from(grid.querySelectorAll("button[data-action]")).find((button) => [button.dataset.action, button.dataset.workId || "", button.dataset.goalId || "", button.dataset.jobId || "", button.closest("th, td")?.cellIndex].every((value, index) => value === focusKey[index]))?.focus({ preventScroll: true });
+  }
+  function pinComparison(workId) {
+    if (typeof workId !== "string" || !workId) return;
+    supersedeWorkspaceRestore();
+    const existing = state.workspace.comparisonWorkIds.filter((id) => id !== workId);
+    state.workspace.comparisonWorkIds = existing.length >= 2 ? [existing[1], workId] : [...existing, workId];
+    state.workspace.comparisonSignature = null; renderComparison(current()); switchView("agents");
+  }
+  function bindWorkspace() {
+    $("workspace-save").addEventListener("click", () => {
+      if (state.workspace.pending) { workspaceNotice("Wait for view restoration to finish before saving."); return; }
+      const api = workspaceApi(), context = workspaceContext(); if (!api || !context) { workspaceNotice("Saved views are unavailable for this project."); return; }
+      const name = $("workspace-name").value.trim(), existing = state.workspace.views.find((view) => view.id === state.workspace.selectedViewId);
+      if (!name && !existing) { workspaceNotice("Enter a name to save a new view."); return; }
+      const settings = api.normalizeSettings(workspaceSettings(), workspaceAllowed(current()));
+      if (!settings.ok) { workspaceNotice("This view contains filters that are not available in the current snapshot."); return; }
+      const entry = { id: existing?.id || newWorkspaceId(), name: name || existing.name, settings: settings.value, updated_at: new Date().toISOString() };
+      const saved = api.upsertView(workspaceStorage(), context.projectKey, context.mode, entry);
+      state.workspace.views = saved.value?.views || state.workspace.views;
+      if (saved.ok && saved.value?.saved) { state.workspace.selectedViewId = saved.value.saved.id; $("workspace-name").value = saved.value.saved.name; workspaceNotice(existing ? "Saved view updated." : "Saved view created."); } else workspaceNotice("Could not save this view. Existing browser storage was not changed.");
+      renderWorkspace(current());
+    });
+    $("workspace-list").addEventListener("change", (event) => { state.workspace.selectedViewId = event.target.value || ""; const view = state.workspace.views.find((item) => item.id === state.workspace.selectedViewId); $("workspace-name").value = view?.name || ""; });
+    $("workspace-restore").addEventListener("click", () => { const view = state.workspace.views.find((item) => item.id === state.workspace.selectedViewId); if (!view) { workspaceNotice("Choose a saved view to restore."); return; } restoreWorkspaceSettings(view.settings, { source: "saved" }); });
+    $("workspace-delete").addEventListener("click", () => { const api = workspaceApi(), context = workspaceContext(), id = state.workspace.selectedViewId; if (!api || !context || !id) { workspaceNotice("Choose a saved view to delete."); return; } const result = api.removeView(workspaceStorage(), context.projectKey, context.mode, id); state.workspace.views = result.value?.views || state.workspace.views; if (result.ok && result.value?.removed) { state.workspace.selectedViewId = ""; $("workspace-name").value = ""; workspaceNotice("Saved view deleted."); } else workspaceNotice("Could not delete that saved view. Existing browser storage was not changed."); renderWorkspace(current()); });
+    $("workspace-copy-link").addEventListener("click", async () => { const api = workspaceApi(), context = workspaceContext(); if (state.workspace.pending) { workspaceNotice("Wait for view restoration to finish before copying a link."); return; } if (!api || !context) { workspaceNotice("A verified project identity is needed before copying a view link."); return; } const settings = api.normalizeSettings(workspaceSettings(), workspaceAllowed(current())); const envelope = settings.ok && api.makeEnvelope(settings.value, context); const fragment = envelope?.ok && api.serializeFragment(envelope.value); if (!fragment?.ok) { workspaceNotice("This view could not be encoded as a shareable link."); return; } const link = `${window.location.href.split("#")[0]}${fragment.value}`; const fallback = $("workspace-link-fallback"), wrap = $("workspace-link-fallback-wrap"); fallback.value = link; try { if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable"); await navigator.clipboard.writeText(link); wrap.hidden = true; workspaceNotice("View link copied. It does not change the current URL."); } catch (_) { wrap.hidden = false; fallback.focus(); fallback.select(); workspaceNotice("Copy is unavailable here. Select the read-only link to copy it manually."); } });
+    ["comparison-first-picker", "comparison-second-picker"].forEach((id, index) => {
+      $(id).addEventListener("change", (event) => { supersedeWorkspaceRestore(); const ids = [...state.workspace.comparisonWorkIds]; ids[index] = event.target.value || ""; state.workspace.comparisonWorkIds = ids.filter(Boolean); if (!ids[0] && ids[1]) workspaceNotice("The remaining agent is now first. Choose a second agent to compare."); state.workspace.comparisonSignature = null; renderComparison(current(), true); });
+      $(id).addEventListener("blur", () => renderComparison(current(), true));
+    });
+    $("comparison-clear").addEventListener("click", () => { supersedeWorkspaceRestore(); state.workspace.comparisonWorkIds = []; state.workspace.comparisonSignature = null; renderComparison(current()); });
+    window.addEventListener("hashchange", () => { supersedeWorkspaceRestore(); const api = workspaceApi(), context = workspaceContext(); if (!api || !context) return; state.workspace.hashHandled = true; const parsed = api.parseFragment(window.location.hash, {}); if (!parsed.ok || !parsed.value) { workspaceNotice("This view link is invalid or unsupported."); return; } if (parsed.value.project_key !== context.projectKey || parsed.value.mode !== context.mode) { workspaceNotice("This view link belongs to a different project or mode."); return; } restoreWorkspaceSettings(parsed.value.settings, { source: "link" }); });
+  }
+  function initWorkspace() {
+    bindWorkspace();
+    document.addEventListener("change", (event) => {
+      if (["attention-severity-filter", "attention-category-filter", "timeline-kind-filter", "timeline-state-filter", "timeline-model-filter", "relationship-map-preset"].includes(event.target?.id)) supersedeWorkspaceRestore(event.target);
+    }, true);
+    document.addEventListener("click", (event) => {
+      if (["attention-clear-filters", "timeline-clear-filters"].includes(event.target?.id)) supersedeWorkspaceRestore();
+    }, true);
+    renderWorkspace(current());
+  }
+  function init() { baseInit(); bindAgentActivity(); initPortalInsights(); initPortalTimeline(); initPortalOutcomes(); initWorkspace(); }
 
   init();
 })();

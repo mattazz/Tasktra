@@ -1,6 +1,6 @@
 # Portal development plan
 
-Status: in progress. The human authorized phased implementation, validation, and a push to `main` at each completed phase. The working branch is `codex/portal-roadmap`, starting at `f4fe3f62b41d64b23b2e7122b815bc2849e1293c`.
+Status: all four phases implemented and locally validated; exact publication and live-install results are retained in checkpoint receipts. The human authorized phased implementation, validation, and a push to `main` at each completed phase. The working branch is `codex/portal-roadmap`, starting at `f4fe3f62b41d64b23b2e7122b815bc2849e1293c`.
 
 ## Outcome
 
@@ -58,8 +58,8 @@ Failed validation stops the checkpoint. A rolled-back installation retains its o
 | --- | --- | --- | --- |
 | 1 | Published and installed | `c6b7153e5d423bab5b5f3053d60b40fbc1feeb41`; [CI 37694046057](https://github.com/mattazz/Tasktra/actions/runs/37694046057), all 9 jobs passed | Friendsmas configured checks and all 7 live browser checks passed; schema and 54 managed files unchanged |
 | 2 | Published and installed | `85deacd8b640e6b77de7c133ad0302e90057ddca`; [CI 37698295535](https://github.com/mattazz/Tasktra/actions/runs/37698295535), all 9 jobs passed | Friendsmas configured checks and all 8 live browser checks passed; schema and 54 managed files unchanged |
-| 3 | In progress | Pending | Pending |
-| 4 | Planned | Pending | Pending |
+| 3 | Published and installed | `49bfd31256a651e7f08c44c99e4acd82f5d79b80`; [CI 37704538252](https://github.com/mattazz/Tasktra/actions/runs/37704538252), all 9 jobs passed | Friendsmas configured checks and all 8 live browser checks passed; schema and 54 managed files unchanged |
+| 4 | Final checkpoint | This revision; exact commit and nine-job CI results are retained in the Phase 4 publication receipt | Guarded Friendsmas install and live browser acceptance are required before the checkpoint closes |
 
 Phase source commits carry their completed local validation notes. Publication and live-install receipts remain in the project's ignored runtime evidence, and the next phase's plan update records the preceding release identifiers.
 
@@ -83,3 +83,12 @@ Independent review required conservative handling of capped or filtered historie
 
 
 The initial Phase 3 CI run exposed different JSON decoder recursion behavior on newer Linux Python versions. The repair applies an explicit iterative nesting limit, with boundary tests, so the same malformed evidence receives the same unverified/partial result across platforms. The initial commit and failed CI receipt are retained; publication requires a fresh complete nine-job run on the repair commit.
+
+
+### Phase 4 local checkpoint
+
+Implemented browser-local named views, bounded project-bound links, and comparison of two exact agent runs. Views retain goal scope, Jobs and Agents filters, usage filters, attention and timeline filters, map presets, public activity preferences, and the selected record. Storage changes occur only on explicit save, update, or delete actions. Shared links contain IDs and preferences; they do not contain stored measurements or activity text.
+
+The comparison table separates recorded role, model, effort, state, goal/job links, observation timestamps, outcome, measurement coverage, and provenance. Imported counters remain independent from the live activity sample. Token deltas use second minus first; cache-fraction differences use percentage points. Missing data remains unknown. The four-column table scrolls within narrow screens and keeps its row and column headers aligned.
+
+Independent review strengthened strict schema and storage boundaries, canonical browser/Node fragment decoding, exact identity handling, project transitions, failed and superseded restores, and preservation of selected-agent activity. Final local validation passed 665 tests (18 platform/optional skips) and the configured compile check, 21 workspace data contracts, 25 primary browser scenarios, 6 additional restore/isolation scenarios, 3 comparison accessibility/focus checks, and 9 checks against actual Friendsmas data. The 19 Phase 2 and 12 Phase 3 browser regression scenarios also passed. Independent final-source review found no remaining actionable issues. Exact-commit CI, guarded installation, and live acceptance remain mandatory publication gates; their results are retained in the final checkpoint receipt.

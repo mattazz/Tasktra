@@ -1309,3 +1309,39 @@ body.motion-off * {
 .outcome-evidence-list ul { max-height: 15rem; overflow-y: auto; overscroll-behavior: contain; margin: 0; padding-left: 1.1rem; padding-right: .35rem; color: var(--muted); font-size: .76rem; line-height: 1.65; overflow-wrap: anywhere; }
 .outcome-evidence-list a { color: var(--mint); overflow-wrap: anywhere; }
 @media (max-width: 560px) { .job-evidence-panel { padding: 1rem; } }
+
+/* Phase 4: browser-local saved views and imported agent comparison. */
+.workspace-controls { margin: 1rem 0; padding: 1rem 1.15rem; }
+.workspace-heading { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; }
+.workspace-heading h2 { margin: .15rem 0 0; font-size: 1rem; }
+.workspace-heading .efficiency-note { margin: 0; }
+.workspace-toolbar, .comparison-pickers { display: flex; flex-wrap: wrap; align-items: end; gap: .6rem; margin-top: .75rem; }
+.workspace-name-label { flex: 1 1 12rem; min-width: 10rem; }
+.workspace-list-label { flex: 1 1 13rem; min-width: 10rem; }
+.workspace-list-label select { min-width: 0; }
+.workspace-link-fallback { display: grid; gap: .3rem; margin-top: .75rem; color: var(--muted); font-size: .75rem; }
+.workspace-link-fallback input { width: 100%; min-width: 0; }
+.comparison-panel { padding: 1.15rem; margin: 1rem 0 1.2rem; border-color: #b4a9ff55; }
+.comparison-pickers { margin-top: .5rem; }
+.comparison-pickers .select-label { min-width: min(100%, 15rem); flex: 1 1 14rem; }
+.comparison-grid { display: block; width: 100%; margin-top: .9rem; overflow-x: auto; overscroll-behavior-x: contain; border: 1px solid #ffffff14; border-radius: .55rem; }
+.comparison-table { width: 100%; min-width: 44rem; table-layout: fixed; border-collapse: collapse; text-align: left; }
+.comparison-table th, .comparison-table td { padding: .65rem .75rem; background: #0c1728; border-bottom: 1px solid #ffffff14; font-size: .78rem; line-height: 1.5; overflow-wrap: anywhere; vertical-align: top; }
+.comparison-table th { font-weight: 600; }
+.comparison-table thead th { background: #132137; }
+.comparison-table th:first-child { width: 20%; }
+.comparison-table tr:last-child > * { border-bottom: 0; }
+.comparison-table .text-button { text-align: left; overflow-wrap: anywhere; }
+.comparison-context { display: grid; gap: .35rem; }
+.comparison-grid .comparison-heading, .comparison-grid .comparison-metric, .comparison-grid .comparison-unknown { color: var(--muted); }
+.comparison-grid .comparison-difference { color: var(--mint); }
+.agent-compare { margin-top: .35rem; }
+@media (max-width: 700px) {
+  .workspace-heading { align-items: flex-start; flex-direction: column; gap: .3rem; }
+  .workspace-toolbar > .text-button { flex: 1 1 auto; }
+}
+@media (max-width: 470px) {
+  .workspace-controls { padding: .9rem; }
+  .workspace-toolbar, .comparison-pickers { align-items: stretch; }
+  .workspace-name-label, .workspace-list-label, .comparison-pickers .select-label { flex-basis: 100%; }
+}

@@ -40,6 +40,7 @@ _STATIC_ROUTES = {
     "/app.js": ("app.js", "application/javascript; charset=utf-8"),
     "/portal-insights.js": ("portal-insights.js", "application/javascript; charset=utf-8"),
     "/portal-outcomes.js": ("portal-outcomes.js", "application/javascript; charset=utf-8"),
+    "/portal-workspace.js": ("portal-workspace.js", "application/javascript; charset=utf-8"),
     "/portal-timeline.js": ("portal-timeline.js", "application/javascript; charset=utf-8"),
     "/relationship-map.js": ("relationship-map.js", "application/javascript; charset=utf-8"),
     "/vendor-cytoscape-3.34.3.min.js": ("vendor-cytoscape-3.34.3.min.js", "application/javascript; charset=utf-8"),

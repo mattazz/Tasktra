@@ -166,6 +166,23 @@
           </div>
         </section>
 
+        <section class="workspace-controls panel" id="workspace-controls" aria-label="Saved views">
+          <div class="workspace-heading">
+            <div><p class="eyebrow">Workspace</p><h2>Saved views</h2></div>
+            <p class="efficiency-note">Saved in this browser for this project and mode.</p>
+          </div>
+          <div class="workspace-toolbar">
+            <label class="search workspace-name-label"><span class="sr-only">Saved view name</span><input id="workspace-name" type="text" maxlength="80" placeholder="Name this view" autocomplete="off" /></label>
+            <button class="text-button" id="workspace-save" type="button">Save new view</button>
+            <label class="select-label workspace-list-label">Saved view <select id="workspace-list"><option value="">Choose a saved view</option></select></label>
+            <button class="text-button" id="workspace-restore" type="button">Restore</button>
+            <button class="text-button" id="workspace-delete" type="button">Delete</button>
+            <button class="text-button" id="workspace-copy-link" type="button">Copy view link</button>
+          </div>
+          <p id="workspace-notice" class="efficiency-note" role="status" aria-live="polite"></p>
+          <label id="workspace-link-fallback-wrap" class="workspace-link-fallback" hidden>View link <input id="workspace-link-fallback" type="text" readonly aria-label="View link to copy manually" /></label>
+        </section>
+
         <nav class="view-tabs" aria-label="Portal views" role="tablist">
           <button
             role="tab"
@@ -408,6 +425,16 @@
             <p id="agent-activity-filter-summary" class="efficiency-note" role="status" aria-live="polite"></p>
             <ol class="agent-activity-feed" id="agent-activity-feed" aria-label="Recorded agent activity"></ol>
           </section>
+          <section class="panel comparison-panel" id="comparison-panel" aria-labelledby="comparison-heading" hidden>
+            <div class="panel-heading"><div><p class="eyebrow">Imported snapshot values</p><h3 id="comparison-heading">Compare recorded agents</h3></div></div>
+            <p id="comparison-status" class="efficiency-note" role="status" aria-live="polite"></p>
+            <div class="comparison-pickers">
+              <label class="select-label">First agent <select id="comparison-first-picker"><option value="">Choose an agent</option></select></label>
+              <label class="select-label">Second agent <select id="comparison-second-picker"><option value="">Choose an agent</option></select></label>
+              <button class="text-button" id="comparison-clear" type="button">Clear comparison</button>
+            </div>
+            <div class="comparison-grid" id="comparison-grid" aria-live="polite" role="region" tabindex="0" aria-label="Agent comparison; scroll horizontally for all columns"></div>
+          </section>
           <div class="toolbar" aria-label="Filter agents">
             <label class="search"><span class="sr-only">Search agents by role, name, or task</span><input id="agent-search" type="search" placeholder="Search role, name, or task" /></label>
             <label class="select-label">Role <select id="agent-role-filter"><option value="">All roles</option></select></label>
@@ -545,6 +572,7 @@
     <script src="/vendor-cytoscape-fcose-2.2.0.js" defer></script>
     <script src="/relationship-map.js" defer></script>
     <script src="/portal-insights.js" defer></script>
+    <script src="/portal-workspace.js" defer></script>
     <script src="/portal-timeline.js" defer></script>
     <script src="/portal-outcomes.js" defer></script>
     <script src="/app.js" defer></script>
