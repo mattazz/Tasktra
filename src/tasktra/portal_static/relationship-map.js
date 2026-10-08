@@ -16,6 +16,58 @@
   const number = (value) => new Intl.NumberFormat().format(value);
   const shortId = (value) => { const source = text(value); return source.length <= 9 ? source : source.slice(-8); };
   const runLabel = (record, jobs) => { const job = record?.job_id != null ? jobs.get(text(record.job_id)) : null, name = job?.title || record?.job_title || record?.title; return name ? `${text(name)} \u00b7 ${shortId(record.work_id || record.id)}` : `${text(record?.role || "run")} \u00b7 ${shortId(record?.work_id || record?.id)}`; };
+  const READABLE_MIN_ZOOM = .84;
+  const NODE_PRESENTATION = {
+    goal: { width: 272, height: 118, textMaxWidth: 228 },
+    job: { width: 256, height: 110, textMaxWidth: 216 },
+    "job-group": { width: 244, height: 102, textMaxWidth: 204 },
+    agent: { width: 268, height: 112, textMaxWidth: 228 },
+    "agent-group": { width: 236, height: 102, textMaxWidth: 196 },
+    missing: { width: 212, height: 112, textMaxWidth: 166 }
+  };
+  const ellipsis = (value, limit) => { const source = text(value).trim(); return source.length <= limit ? source : `${source.slice(0, Math.max(1, limit - 1)).trimEnd()}…`; };
+  const visualUnits = (value) => [...text(value)].reduce((total, character) => total + (character.codePointAt(0) > 0xffff ? 1.55 : /[\u2E80-\u9FFF\uF900-\uFAFF]/.test(character) ? 1.9 : /[WM@#%&]/.test(character) ? 1.65 : /[A-Z]/.test(character) ? 1.25 : 1), 0);
+  const visualEllipsis = (value, limit) => {
+    const source = text(value).trim(), safe = Math.max(1, Number(limit) || 1);
+    if (visualUnits(source) <= safe) return source;
+    const budget = Math.max(.25, safe - 1), chars = [];
+    let used = 0;
+    for (const character of source) { const next = visualUnits(character); if (used + next > budget) break; chars.push(character); used += next; }
+    return `${chars.join("").trimEnd() || source.slice(0, 1)}…`;
+  };
+  // Cytoscape labels need explicit line breaks: its word wrap has no line-count cap,
+  // which can otherwise put a correct label outside a fixed-size node.
+  const wrapNodeLabel = (value, lineLength = 25, maxLines = 3) => {
+    const words = text(value).replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
+    if (!words.length) return "Unnamed record";
+    const lines = [], safeLength = Math.max(1, Number(lineLength) || 1), safeLines = Math.max(1, Math.floor(maxLines));
+    let line = "";
+    for (const original of words) {
+      let word = original;
+      while (word) {
+        if (!line && visualUnits(word) > safeLength) {
+          let part = "", used = 0;
+          for (const character of word) { const next = visualUnits(character); if (used + next > safeLength) break; part += character; used += next; }
+          lines.push(part || word.slice(0, 1)); word = word.slice(part.length || 1); continue;
+        }
+        const candidate = line ? `${line} ${word}` : word;
+        if (visualUnits(candidate) <= safeLength) { line = candidate; word = ""; continue; }
+        lines.push(line); line = "";
+      }
+    }
+    if (line) lines.push(line);
+    return lines.length <= safeLines ? lines.join("\n") : `${lines.slice(0, safeLines - 1).join("\n")}${safeLines > 1 ? "\n" : ""}${visualEllipsis(lines.slice(safeLines - 1).join(" "), safeLength)}`;
+  };
+  const nodePresentation = (node) => {
+    const type = node?.missing ? "missing" : node?.type;
+    const metrics = NODE_PRESENTATION[type] || NODE_PRESENTATION.job;
+    if (type === "agent") {
+      const record = node.record || {}, role = visualEllipsis(record.role || "run", 14), model = visualEllipsis(record.observed_model || record.model || "unknown model", 12), run = shortId(record.work_id || record.id || node.relationId || node.id);
+      return { ...metrics, label: `RUN\n${role}\n${run} · ${model}` };
+    }
+    const category = type === "goal" ? "GOAL" : type === "job" ? "JOB" : type === "job-group" ? "JOB GROUP" : type === "agent-group" ? "RUN GROUP" : "REFERENCE";
+    return { ...metrics, label: `${category}\n${wrapNodeLabel(node?.label, type === "goal" ? 21 : type === "missing" ? 15 : 20, 2)}` };
+  };
   const layoutKey = (projectKey, scopeKey, preset, demo) => `tasktra.map.positions.v1:${encodeURIComponent(text(projectKey || "project"))}:${encodeURIComponent(text(scopeKey || "all"))}:${preset === "active" || preset === "failed" ? preset : "all"}:${demo ? "demo" : "live"}`;
   const validPositions = (value, allowed) => { const result = new Map(); if (!value || typeof value !== "object" || value.version !== 1 || !Array.isArray(value.positions) || value.positions.length > MAX_VISIBLE_NODES) return result; value.positions.forEach((entry) => { if (!Array.isArray(entry) || entry.length !== 3 || !allowed.has(text(entry[0])) || !Number.isFinite(entry[1]) || !Number.isFinite(entry[2]) || Math.abs(entry[1]) > 100000 || Math.abs(entry[2]) > 100000) return; result.set(text(entry[0]), { x: entry[1], y: entry[2] }); }); return result; };
   function presetGraph(graph, preset) {
@@ -158,33 +210,34 @@
   function create(element, options = {}) {
     if (!element || !element.ownerDocument) throw new Error("A map host element is required.");
     const doc = element.ownerDocument, win = typeof window !== "undefined" ? window : globalThis, make = (tag, className, value) => { const node = doc.createElement(tag); if (className) node.className = className; if (value != null) node.textContent = value; return node; };
-    const root = make("div", "relationship-map"), toolbar = make("div", "relationship-map-toolbar"), searchLabel = make("label", "relationship-map-search"), search = make("input"), pickerLabel = make("label", "relationship-map-picker"), picker = make("select"), presetLabel = make("label", "relationship-map-picker"), preset = make("select"), resetLayout = make("button", "text-button", "Reset layout"), focus = make("button", "text-button", "Focus selected"), toggle = make("label", "relationship-map-toggle"), lineage = make("input"), zoomOut = make("button", "icon-button", "−"), zoomIn = make("button", "icon-button", "+"), fit = make("button", "text-button", "Fit view");
+    const root = make("div", "relationship-map"), toolbar = make("div", "relationship-map-toolbar"), searchLabel = make("label", "relationship-map-search"), search = make("input"), pickerLabel = make("label", "relationship-map-picker"), picker = make("select"), presetLabel = make("label", "relationship-map-picker"), preset = make("select"), resetLayout = make("button", "text-button", "Reset layout"), focus = make("button", "text-button", "Focus selected"), readable = make("button", "text-button relationship-map-readable", "Readable view"), toggle = make("label", "relationship-map-toggle"), lineage = make("input"), zoomOut = make("button", "icon-button", "−"), zoomIn = make("button", "icon-button", "+"), fit = make("button", "text-button", "Fit all");
     searchLabel.htmlFor = "relationship-map-search-input"; searchLabel.append(make("span", "sr-only", "Search the relationship map")); search.type = "search"; search.id = "relationship-map-search-input"; search.placeholder = "Search goals, jobs, agents, or references"; search.autocomplete = "off"; searchLabel.append(search);
     pickerLabel.append(make("span", "sr-only", "Jump to a map record or reference")); picker.id = "relationship-map-node-picker"; picker.setAttribute("aria-label", "Jump to a map record or reference"); pickerLabel.append(picker);
     presetLabel.append(make("span", "sr-only", "Map preset")); preset.setAttribute("aria-label", "Map preset"); [["all", "All recorded"], ["active", "Active last reported state"], ["failed", "Failed last reported state"]].forEach(([value, label]) => { const option = make("option", "", label); option.value = value; preset.append(option); }); presetLabel.append(preset); resetLayout.type = "button"; resetLayout.setAttribute("aria-label", "Reset layout");
-    focus.type = "button"; focus.disabled = true; focus.setAttribute("aria-pressed", "false"); lineage.type = "checkbox"; toggle.append(lineage, make("span", "", "Parent lineage")); zoomOut.type = "button"; zoomOut.setAttribute("aria-label", "Zoom out"); zoomIn.type = "button"; zoomIn.setAttribute("aria-label", "Zoom in"); fit.type = "button"; toolbar.append(searchLabel, pickerLabel, presetLabel, resetLayout, focus, toggle, zoomOut, zoomIn, fit);
+    focus.type = "button"; focus.disabled = true; focus.setAttribute("aria-pressed", "false"); readable.type = "button"; readable.setAttribute("aria-label", "Return to a readable map scale"); lineage.type = "checkbox"; toggle.append(lineage, make("span", "", "Parent lineage")); zoomOut.type = "button"; zoomOut.setAttribute("aria-label", "Zoom out"); zoomIn.type = "button"; zoomIn.setAttribute("aria-label", "Zoom in"); fit.type = "button"; toolbar.append(searchLabel, pickerLabel, presetLabel, resetLayout, focus, readable, toggle, zoomOut, zoomIn, fit);
     const summary = make("p", "relationship-map-summary"); summary.setAttribute("role", "status"); summary.setAttribute("aria-live", "polite");
+    const guidance = make("p", "relationship-map-guidance", "Readable view keeps node labels at a comfortable size; pan with the arrow keys or drag the canvas. Fit all shows every record.");
     const legend = make("ul", "relationship-map-legend"); [["goal", "Goal"], ["job", "Job"], ["job-group", "Job group"], ["agent", "Individual run"], ["agent-group", "Historical run group"], ["missing", "Not-loaded reference"], ["goal-job", "Goal → job"], ["job-agent", "Job → run"], ["direct", "Goal membership"], ["lineage", "Parent lineage"]].forEach(([kind, label]) => { const item = make("li", `relationship-map-legend-${kind}`); item.append(make("span"), make("span", "", label)); legend.append(item); });
     const workspace = make("div", "relationship-map-workspace"), wrap = make("div", "relationship-map-canvas"), canvas = make("div", "relationship-map-cytoscape"), details = make("aside", "relationship-map-details"); canvas.tabIndex = 0; canvas.setAttribute("role", "application"); canvas.setAttribute("aria-label", "Interactive recorded relationship map. Use search and the record picker to explore without a pointer."); details.hidden = true; details.setAttribute("aria-live", "polite"); wrap.append(canvas); workspace.append(wrap, details); const navigation = make("nav", "relationship-map-navigation"); navigation.setAttribute("aria-label", "Map scope");
     const home = make("button", "text-button", "Overview"), breadcrumb = make("span", "relationship-map-breadcrumb", "All recorded relationships"), previous = make("button", "text-button", "Previous page"), nextPage = make("button", "text-button", "Next page");
     breadcrumb.setAttribute("role", "status"); breadcrumb.setAttribute("aria-live", "polite");
     home.type = previous.type = nextPage.type = "button"; navigation.append(home, breadcrumb, previous, nextPage);
-    root.append(toolbar, navigation, summary, legend, workspace); element.replaceChildren(root);
+    root.append(toolbar, navigation, summary, guidance, legend, workspace); element.replaceChildren(root);
     if (!win.cytoscape) { summary.textContent = "The local relationship map renderer did not load. Refresh this page to retry."; return { update() {}, destroy() { element.replaceChildren(); } }; }
     if (win.cytoscapeFcose && !win.__tasktraFcoseRegistered) { win.cytoscape.use(win.cytoscapeFcose); win.__tasktraFcoseRegistered = true; }
     const cy = win.cytoscape({ container: canvas, elements: [], wheelSensitivity: .17, style: [
-      { selector: "node", style: { label: "data(label)", color: "#edf6ff", "font-size": 17, "font-weight": 650, "text-wrap": "wrap", "text-max-width": 176, "text-valign": "center", "text-halign": "center", "background-color": "#213c59", "border-width": 2, "border-color": "#76b8ff", "overlay-opacity": 0, "text-outline-width": 0, "text-outline-color": "#10213a" } },
-      { selector: 'node[type = "goal"]', style: { shape: "round-rectangle", "background-color": "#573122", "border-color": "#ff9b75", width: 200, height: 76 } }, { selector: 'node[type = "job"], node[type = "job-group"]', style: { shape: "round-rectangle", "background-color": "#183b5b", "border-color": "#77baff", width: 190, height: 68 } }, { selector: 'node[type = "agent"]', style: { shape: "ellipse", "background-color": "#17463f", "border-color": "#77e0c1", width: 142, height: 64 } }, { selector: 'node[type = "agent-group"]', style: { shape: "round-rectangle", "background-color": "#16443d", "border-color": "#77e0c1", "border-style": "dashed", width: 180, height: 68 } }, { selector: 'node[missing = "yes"]', style: { shape: "diamond", "background-color": "#293244", "border-color": "#a8afba", "border-style": "dashed", width: 154, height: 72 } },
+      { selector: "node", style: { label: "data(label)", color: "#f4f8ff", "font-size": 17, "font-weight": 600, "text-wrap": "wrap", "text-max-width": "data(textMaxWidth)", "text-valign": "center", "text-halign": "center", "background-color": "#213c59", "border-width": 2.5, "border-color": "#76b8ff", width: "data(width)", height: "data(height)", "overlay-opacity": 0, "text-outline-width": 0, "text-outline-color": "#10213a" } },
+      { selector: 'node[type = "goal"]', style: { shape: "round-rectangle", "background-color": "#573122", "border-color": "#ff9b75" } }, { selector: 'node[type = "job"], node[type = "job-group"]', style: { shape: "round-rectangle", "background-color": "#183b5b", "border-color": "#77baff" } }, { selector: 'node[type = "agent"]', style: { shape: "round-rectangle", "background-color": "#17463f", "border-color": "#77e0c1" } }, { selector: 'node[type = "agent-group"]', style: { shape: "round-rectangle", "background-color": "#16443d", "border-color": "#77e0c1", "border-style": "dashed" } }, { selector: 'node[missing = "yes"]', style: { shape: "round-rectangle", "background-color": "#293244", "border-color": "#a8afba", "border-style": "dashed" } },
       { selector: "edge", style: { width: 2.2, "curve-style": "bezier", "line-color": "#61809e", opacity: .78, "overlay-opacity": 0 } }, { selector: 'edge[type = "goal-job"]', style: { "line-color": "#ff9b75" } }, { selector: 'edge[type = "job-agent"]', style: { "line-color": "#77e0c1" } }, { selector: 'edge[type = "goal-agent"]', style: { "line-color": "#b7a9ff", "line-style": "dotted" } }, { selector: 'edge[type = "parent-lineage"]', style: { "line-color": "#c4a9ff", "line-style": "dashed", "target-arrow-shape": "triangle", "target-arrow-color": "#c4a9ff" } }, { selector: ".is-selected", style: { "border-color": "#fff", "border-width": 4, "shadow-blur": 14, "shadow-color": "#b9fff0", "shadow-opacity": .65 } }, { selector: ".is-muted", style: { opacity: .14 } }
     ] });
     canvas._tasktraCy = cy;
     let detailSignature = "", pickerSignature = "";
     let graph = { nodes: [], edges: [] }, view = null, selected = "", focusId = "", groups = new Set(), overview = true, groupScope = null, signature = "", active = false, timer = null, needsLayout = false, presetValue = "all", layoutIdentity = "", layoutOptions = { projectKey: "", scopeKey: "all", demo: false }, userPositions = new Map();
-    const positions = new Map(), canonical = (nodeId) => graph.nodes.find((node) => node.id === nodeId), projected = (nodeId) => view && view.nodes.find((node) => node.id === nodeId), graphSignature = (result) => JSON.stringify([result.nodes.map((node) => [node.id, node.label, node.type]), result.edges.map((edge) => edge.id)]), activeGraph = () => presetGraph(graph, presetValue);
+    const positions = new Map(), canonical = (nodeId) => graph.nodes.find((node) => node.id === nodeId), projected = (nodeId) => view && view.nodes.find((node) => node.id === nodeId), graphSignature = (result) => JSON.stringify([result.nodes.map((node) => [node.id, node.label, node.type, nodePresentation(node).label]), result.edges.map((edge) => edge.id)]), activeGraph = () => presetGraph(graph, presetValue);
     const readPositions = () => { try { const raw = win.localStorage?.getItem(layoutIdentity); if (!raw || raw.length > 24000) return new Map(); return validPositions(JSON.parse(raw), new Set(graph.nodes.map((node) => node.id))); } catch (_) { return new Map(); } };
     const savePositions = () => { try { if (!layoutIdentity || !userPositions.size) return; win.localStorage?.setItem(layoutIdentity, JSON.stringify({ version: 1, positions: [...userPositions.entries()].slice(0, MAX_VISIBLE_NODES).map(([nodeId, point]) => [nodeId, point.x, point.y]) })); } catch (_) {} };
     const setLayoutIdentity = (nextOptions) => { layoutOptions = { ...layoutOptions, ...nextOptions }; const next = layoutKey(layoutOptions.projectKey, layoutOptions.scopeKey, presetValue, layoutOptions.demo); if (next === layoutIdentity) return false; layoutIdentity = next; positions.clear(); userPositions = readPositions(); userPositions.forEach((point, nodeId) => positions.set(nodeId, point)); signature = ""; return true; };
-    const toNode = (node) => ({ group: "nodes", data: { id: node.id, label: node.label, type: node.type, missing: node.missing ? "yes" : "" } }), toEdge = (edge) => ({ group: "edges", data: { id: edge.id, source: edge.source, target: edge.target, type: edge.type, count: edge.count, canonicalEdgeIds: edge.canonicalEdgeIds } });
+    const toNode = (node) => ({ group: "nodes", data: { id: node.id, ...nodePresentation(node), type: node.type, missing: node.missing ? "yes" : "" } }), toEdge = (edge) => ({ group: "edges", data: { id: edge.id, source: edge.source, target: edge.target, type: edge.type, count: edge.count, canonicalEdgeIds: edge.canonicalEdgeIds } });
     const selection = () => { const ids = new Set(selected ? [selected] : []); if (selected) cy.$id(selected).connectedEdges().forEach((edge) => { ids.add(edge.source().id()); ids.add(edge.target().id()); }); return ids; };
     const applySelection = () => { const show = cy.$id(selected).length > 0, near = selection(); cy.elements().removeClass("is-selected is-muted"); if (show) { cy.$id(selected).addClass("is-selected"); cy.nodes().forEach((node) => { if (!near.has(node.id())) node.addClass("is-muted"); }); cy.edges().forEach((edge) => { if (!near.has(edge.source().id()) || !near.has(edge.target().id())) edge.addClass("is-muted"); }); } const node = projected(selected); focus.disabled = !show || !canonical(selected); focus.textContent = "Focus selected"; focus.setAttribute("aria-pressed", String(Boolean(focusId))); picker.value = canonical(selected) ? selected : ""; };
     const field = (label, value) => { const row = make("div", "detail-item"); row.append(make("b", "", label), make("span", "", value || "Unavailable")); return row; };
@@ -257,7 +310,37 @@
         item.eles.nodes().positions(node => ({ x: node.position("x") + dx, y: node.position("y") + dy }));
       }));
     };
-    const layout = (fitView) => { if (!cy.nodes().length) { canvas.dataset.mapReady = "true"; needsLayout = false; return; } if (!active) { needsLayout = true; return; } needsLayout = false; if (timer) win.clearTimeout(timer); canvas.dataset.mapReady = "false"; const runner = cy.layout({ name: "fcose", quality: "default", randomize: true, animate: false, fit: false, nodeDimensionsIncludeLabels: true, padding: 24, nodeRepulsion: 2100, idealEdgeLength: 76, edgeElasticity: .1, gravity: .3, numIter: 2200, tile: true, tilingPaddingVertical: 16, tilingPaddingHorizontal: 16 }); cy.one("layoutstop", () => { packComponents(); userPositions.forEach((point, nodeId) => { const node = cy.$id(nodeId); if (node.length) node.position(point); }); cy.nodes().forEach((node) => positions.set(node.id(), node.position())); if (fitView) cy.fit(cy.elements(), 30); canvas.dataset.mapReady = "true"; }); runner.run(); };
+    // fCoSE includes label dimensions, but a compact connected layout can still leave
+    // two padded labels touching. Resolve only those fresh-layout collisions before
+    // restoring any user-dragged positions.
+    const separateOverlaps = () => {
+      const gap = 26;
+      for (let pass = 0; pass < 12; pass++) {
+        let moved = false;
+        const nodes = cy.nodes().toArray();
+        for (let index = 0; index < nodes.length; index++) for (let next = index + 1; next < nodes.length; next++) {
+          const left = nodes[index], right = nodes[next], a = left.boundingBox({ includeLabels: true, includeOverlays: false }), b = right.boundingBox({ includeLabels: true, includeOverlays: false });
+          const overlapX = Math.min(a.x2, b.x2) - Math.max(a.x1, b.x1), overlapY = Math.min(a.y2, b.y2) - Math.max(a.y1, b.y1);
+          if (overlapX <= 0 || overlapY <= 0) continue;
+          const leftCenter = left.position(), rightCenter = right.position(), horizontal = overlapX <= overlapY;
+          const sign = horizontal ? (rightCenter.x >= leftCenter.x ? 1 : -1) : (rightCenter.y >= leftCenter.y ? 1 : -1), amount = (horizontal ? overlapX : overlapY) / 2 + gap / 2;
+          if (horizontal) { left.position({ x: leftCenter.x - sign * amount, y: leftCenter.y }); right.position({ x: rightCenter.x + sign * amount, y: rightCenter.y }); }
+          else { left.position({ x: leftCenter.x, y: leftCenter.y - sign * amount }); right.position({ x: rightCenter.x, y: rightCenter.y + sign * amount }); }
+          moved = true;
+        }
+        if (!moved) return;
+      }
+    };
+    const readableView = (elements = cy.elements()) => {
+      if (!elements.length) return;
+      cy.fit(elements, 42);
+      if (cy.zoom() < READABLE_MIN_ZOOM) {
+        cy.zoom({ level: READABLE_MIN_ZOOM, renderedPosition: { x: canvas.clientWidth / 2, y: canvas.clientHeight / 2 } });
+        const target = selected ? cy.$id(selected) : cy.collection();
+        cy.center(target.length ? target : elements);
+      }
+    };
+    const layout = (fitView) => { if (!cy.nodes().length) { canvas.dataset.mapReady = "true"; needsLayout = false; return; } if (!active) { needsLayout = true; return; } needsLayout = false; if (timer) win.clearTimeout(timer); canvas.dataset.mapReady = "false"; const runner = cy.layout({ name: "fcose", quality: "default", randomize: true, animate: false, fit: false, nodeDimensionsIncludeLabels: true, padding: 40, nodeRepulsion: 4800, idealEdgeLength: 150, edgeElasticity: .12, gravity: .28, numIter: 2600, tile: true, tilingPaddingVertical: 30, tilingPaddingHorizontal: 30 }); cy.one("layoutstop", () => { packComponents(); separateOverlaps(); userPositions.forEach((point, nodeId) => { const node = cy.$id(nodeId); if (node.length) node.position(point); }); cy.nodes().forEach((node) => positions.set(node.id(), node.position())); if (fitView) readableView(); canvas.dataset.mapReady = "true"; }); runner.run(); };
     const syncPicker = () => { const next = JSON.stringify(activeGraph().nodes.map(node => [node.id, node.label, node.relationId])); if (next === pickerSignature) return; pickerSignature = next; const current = picker.value, placeholder = make("option", "", "Jump to a map record or reference"); placeholder.value = ""; picker.replaceChildren(placeholder); sort(activeGraph().nodes).forEach((node) => { const option = make("option", "", `${node.type.replace(/-/g, " ")} · ${node.label} · ${node.relationId || node.id}`); option.value = node.id; picker.append(option); }); picker.value = [...picker.options].some((option) => option.value === current) ? current : ""; };
     const refresh = ({ layout: shouldLayout = false, fit: fitView = false } = {}) => {
       const source = activeGraph();
@@ -306,7 +389,7 @@
       if (summary.textContent !== summaryText) summary.textContent = summaryText;
       applySelection(); renderDetails();
       if (shouldLayout || (changed && !positions.size)) layout(fitView || !positions.size);
-      else if (fitView && active) cy.fit(cy.elements(), 30);
+      else if (fitView && active) readableView();
     };
     const select = (nodeId, makeFocus) => {
       selected = nodeId;
@@ -328,14 +411,19 @@
     lineage.addEventListener("change", () => refresh({ layout: true, fit: true }));
     preset.addEventListener("change", () => { presetValue = preset.value; setLayoutIdentity({}); groupScope = null; selected = ""; focusId = ""; overview = true; search.value = ""; syncPicker(); refresh({ layout: true, fit: true }); });
     resetLayout.addEventListener("click", () => { try { if (layoutIdentity) win.localStorage?.removeItem(layoutIdentity); } catch (_) {} userPositions.clear(); positions.clear(); signature = ""; refresh({ layout: true, fit: true }); });
+    readable.addEventListener("click", () => readableView());
     zoomIn.addEventListener("click", () => cy.zoom({ level: Math.min(3, cy.zoom() * 1.22), renderedPosition: { x: canvas.clientWidth / 2, y: canvas.clientHeight / 2 } }));
     zoomOut.addEventListener("click", () => cy.zoom({ level: Math.max(.16, cy.zoom() / 1.22), renderedPosition: { x: canvas.clientWidth / 2, y: canvas.clientHeight / 2 } }));
     fit.addEventListener("click", () => cy.fit(cy.elements(), 30));
     cy.on("tap", "node", event => select(event.target.id(), false));
     cy.on("dragfree", "node", event => { if (!canonical(event.target.id())) return; const point = event.target.position(); if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) return; userPositions.set(event.target.id(), { x: point.x, y: point.y }); savePositions(); });
-    canvas.addEventListener("keydown", event => { if (event.key === "Escape") { event.preventDefault(); closeDetails(); } });
+    canvas.addEventListener("keydown", event => {
+      if (event.key === "Escape") { event.preventDefault(); closeDetails(); return; }
+      const pan = { ArrowLeft: [72, 0], ArrowRight: [-72, 0], ArrowUp: [0, 72], ArrowDown: [0, -72] }[event.key];
+      if (pan) { event.preventDefault(); cy.panBy({ x: pan[0], y: pan[1] }); }
+    });
     const resize = () => { if (active) cy.resize(); }, observer = typeof win.ResizeObserver === "function" ? new win.ResizeObserver(resize) : null; if (observer) observer.observe(wrap);
     return { update(snapshot, options = {}) { const old = JSON.stringify([graph.nodes.map((node) => node.id), graph.edges.map((edge) => edge.id)]), wasActive = active, pendingLayout = needsLayout; graph = buildGraph(snapshot); const identityChanged = setLayoutIdentity(options); const next = JSON.stringify([graph.nodes.map((node) => node.id), graph.edges.map((edge) => edge.id)]); active = Boolean(options.active); if (options.reset) { groupScope = null; overview = true; selected = ""; focusId = ""; groups = new Set(); search.value = ""; lineage.checked = false; positions.clear(); userPositions.forEach((point, nodeId) => positions.set(nodeId, point)); signature = ""; } syncPicker(); const shouldLayout = Boolean(options.reset) || identityChanged || old !== next || pendingLayout; refresh({ layout: shouldLayout, fit: Boolean(options.reset) || identityChanged || !signature || pendingLayout || !wasActive }); if (active) win.requestAnimationFrame(resize); }, setActive(value) { active = Boolean(value); if (active) win.requestAnimationFrame(() => { resize(); if (needsLayout) layout(true); }); }, getPreset() { return presetValue; }, setPreset(value) { const next = value === "active" || value === "failed" ? value : "all"; if (next === presetValue) return; presetValue = next; preset.value = next; setLayoutIdentity({}); groupScope = null; selected = ""; focusId = ""; overview = true; search.value = ""; syncPicker(); refresh({ layout: true, fit: true }); }, destroy() { if (timer) win.clearTimeout(timer); if (observer) observer.disconnect(); cy.destroy(); element.replaceChildren(); } };
   }
-  return { buildGraph, filterGraph, projectGraph, projectOverview, projectGroupPage, presetGraph, runLabel, layoutKey, validPositions, create };
+  return { buildGraph, filterGraph, projectGraph, projectOverview, projectGroupPage, presetGraph, runLabel, wrapNodeLabel, nodePresentation, READABLE_MIN_ZOOM, layoutKey, validPositions, create };
 });

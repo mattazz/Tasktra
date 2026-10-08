@@ -1196,7 +1196,9 @@ body.motion-off * {
 .relationship-map-search input, .relationship-map-picker select { width: 100%; color: var(--ink); background: #101c30; border: 1px solid var(--line); border-radius: .5rem; padding: .62rem .75rem; font-size: .78rem; }
 .relationship-map-search input:focus, .relationship-map-picker select:focus { outline: 2px solid var(--mint); outline-offset: 2px; }
 .relationship-map-picker { flex: 1 1 13rem; max-width: 20rem; }
-.relationship-map-summary { margin: .8rem 0 .55rem; color: var(--muted); font-size: .76rem; line-height: 1.45; }
+.relationship-map-summary { margin: .8rem 0 .35rem; color: var(--muted); font-size: .76rem; line-height: 1.45; }
+.relationship-map-guidance { margin: 0 0 .55rem; color: #b8cce2; font-size: .76rem; line-height: 1.45; }
+.relationship-map-readable { border: 1px solid #77e0c170; border-radius: .45rem; background: #77e0c116; color: #b9fff0; }
 .relationship-map-legend { display: flex; flex-wrap: wrap; gap: .55rem 1rem; padding: 0; margin: 0 0 .9rem; list-style: none; color: var(--muted); font-size: .7rem; }
 .relationship-map-legend li { display: inline-flex; align-items: center; gap: .35rem; }
 .relationship-map-legend li > span:first-child { width: .72rem; height: .72rem; border: 1px solid currentColor; }

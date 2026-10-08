@@ -1,6 +1,6 @@
 "use strict";
 const assert = require("node:assert/strict");
-const { buildGraph, filterGraph, projectGraph, projectOverview, projectGroupPage, presetGraph, runLabel, layoutKey, validPositions } = require("../src/tasktra/portal_static/relationship-map.js");
+const { buildGraph, filterGraph, projectGraph, projectOverview, projectGroupPage, presetGraph, runLabel, wrapNodeLabel, nodePresentation, READABLE_MIN_ZOOM, layoutKey, validPositions } = require("../src/tasktra/portal_static/relationship-map.js");
 let checks = 0;
 function check(name, run) { run(); checks++; console.log("PASS " + name); }
 const fixture = {
@@ -298,6 +298,27 @@ check("presets retain only matching runs and their exact recorded goal or job co
 check("run labels are distinguishable and never infer a job title",()=>{
   assert.equal(runLabel({work_id:"long-run-123",role:"tester"},new Map()),"tester \u00b7 -run-123");
   assert.equal(runLabel({work_id:"work",job_id:"j"},new Map([["j",{title:"Exact job"}]])),"Exact job \u00b7 work");
+});
+check("visual node labels are bounded, categorized, and retain concise run identity",()=>{
+  const agent={id:"agent:abcdefghijk",type:"agent",relationId:"abcdefghijk",label:"A very long job title that must remain canonical",record:{work_id:"abcdefghijk",role:"implementation specialist with a long role",model:"gpt-6.1-sol"}};
+  const display=nodePresentation(agent);
+  assert.equal(agent.label,"A very long job title that must remain canonical");
+  assert.match(display.label,/^RUN\n/);
+  assert.match(display.label,/defghijk/);
+  assert.match(display.label,/gpt-6\.1-sol/);
+  assert.ok(display.label.split("\n").length<=3);
+  assert.ok(display.label.split("\n").every(line=>line.length<=26));
+  assert.match(nodePresentation({id:"agent:r",type:"agent",record:{work_id:"review-run",role:"reviewer",model:"gpt-6.1-sol"}}).label,/\nreviewer\n/);
+  assert.ok(display.width>display.textMaxWidth);
+  assert.equal(nodePresentation({type:"goal",label:"A title"}).label,"GOAL\nA title");
+  const job=nodePresentation({type:"job",label:"Readable ability telegraphs and accurate gameplay feedback"});
+  const missing=nodePresentation({type:"stub-job",missing:true,label:"averylongunbrokenreferencethatmustnotescapeitsnode"});
+  const group=nodePresentation({type:"agent-group",label:"implementation specialist · 127 historical runs"});
+  for(const item of [job,missing,group]) assert.ok(item.label.split("\n").length<=3);
+  assert.ok(job.label.includes("…"));assert.ok(missing.label.includes("…"));
+  assert.equal(wrapNodeLabel("one two three four five six",3,2),"one\ntw…");
+  assert.equal(wrapNodeLabel("abcdefghijklmnop",4,2),"abcd\nefg…");
+  assert.ok(READABLE_MIN_ZOOM >= 14 / 17);
 });
 check("stored layouts are scoped and accept only finite loaded coordinates",()=>{
   assert.notEqual(layoutKey("p","g","all",false),layoutKey("p","g","failed",false));
