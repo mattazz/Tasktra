@@ -7,6 +7,7 @@ import unittest
 from tasktra.autonomy import AutonomyStore
 from tasktra.authority import authority_envelope_sha256
 from tasktra.state import StateError, StateStore
+from tests.runtime_schema_helpers import peel_schema13_interventions
 
 
 def envelope(goal_id="goal-one"):
@@ -147,6 +148,7 @@ class Stage3LedgerTests(unittest.TestCase):
             store.create_goal(title="Ship", description="Ledger", goal_id="goal-one")
             connection = sqlite3.connect(path)
             try:
+                peel_schema13_interventions(connection, target_version=3)
                 connection.execute("PRAGMA user_version=3")
                 connection.commit()
             finally:
@@ -215,6 +217,7 @@ class Stage3LedgerTests(unittest.TestCase):
             connection = sqlite3.connect(path)
             try:
                 connection.execute("DROP TABLE authority_seals")
+                peel_schema13_interventions(connection, target_version=3)
                 connection.execute("PRAGMA user_version=3")
                 connection.commit()
             finally:

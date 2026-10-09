@@ -1,0 +1,313 @@
+{
+  "archive": "tasktra-common10-client.zip",
+  "archive_sha256": "f1c858fedbf80bf885c19b064d2de86c5b3918b844a5ee51465863811d676390",
+  "source_commit": "1ecc62675e6f5ed6a08a608cd22b321562cd6b46",
+  "source": "historical Git source",
+  "files": [
+    {
+      "path": "tasktra/__init__.py",
+      "sha256": "e6369c3b1c2d333c828e38e92cfbe03196c6cd3d2df307963895d6267bd9e532",
+      "bytes": 161
+    },
+    {
+      "path": "tasktra/__main__.py",
+      "sha256": "307299fda7b77d22c64cb51430ec75e5f59d78e9c948786afb3b2544fe45e4b7",
+      "bytes": 79
+    },
+    {
+      "path": "tasktra/adoption.py",
+      "sha256": "28fa2620d7427a71ef20e6d36bdaadb789e48fabdc815716a1eb475770ac7a7b",
+      "bytes": 8505
+    },
+    {
+      "path": "tasktra/authority.py",
+      "sha256": "14f10f69b711afb4b2aeae5358f4c05f14cf8d99073f1d38e970b7d979691a1d",
+      "bytes": 24150
+    },
+    {
+      "path": "tasktra/autonomy.py",
+      "sha256": "acad5ef1827664f6007e74beb43242ab1a925259b208dd9d6a5f0ff3984ffdbc",
+      "bytes": 101732
+    },
+    {
+      "path": "tasktra/benchmarking.py",
+      "sha256": "4a7919ca97cf48194f6f9548aa363d7ee220384e25d5b1bd0e8e9b3c4156c806",
+      "bytes": 9150
+    },
+    {
+      "path": "tasktra/cli.py",
+      "sha256": "8e4b7388eac8fe6a5c6d8f3e055315d3bb29bb804b2fbd128a40fa8d15a399eb",
+      "bytes": 88283
+    },
+    {
+      "path": "tasktra/compiler.py",
+      "sha256": "f37f726166b0a6417036b54af69aca019e39e7c20c251b8a9a05dfd68ea93c08",
+      "bytes": 46507
+    },
+    {
+      "path": "tasktra/config.py",
+      "sha256": "a7307ed907ece876d8865f9b7cb7e43271e85587a74a4d859dd3a0f0612b5b6a",
+      "bytes": 10540
+    },
+    {
+      "path": "tasktra/contracts.py",
+      "sha256": "a439260aadf9c4444d02967732350828e4a9c28e0630dee6ea2a66a464bbbe46",
+      "bytes": 5808
+    },
+    {
+      "path": "tasktra/delegation.py",
+      "sha256": "45f44be1c0f0aa4cf435e770620ab76e4397897703377cc049127d08066ba1ae",
+      "bytes": 3414
+    },
+    {
+      "path": "tasktra/ecosystem.py",
+      "sha256": "e6a8b5bf20e78972971a67208eaf43b1aa82917f6588c10585a0ebc118a0f24a",
+      "bytes": 15732
+    },
+    {
+      "path": "tasktra/handoffs.py",
+      "sha256": "f6dd749d0bae12f7ee46466159167a8657c52189a70e948f03c0f9458fea7b06",
+      "bytes": 9671
+    },
+    {
+      "path": "tasktra/identifiers.py",
+      "sha256": "bca8b810e8bd503038d0cb0ad132b7235caf9d6f7d7b6a40414c437330b432ea",
+      "bytes": 1171
+    },
+    {
+      "path": "tasktra/jira_sync.py",
+      "sha256": "8f6fd5e49f79f13172f3b0cbdde0f563265e762b4726ba5dca502f3950280cac",
+      "bytes": 5424
+    },
+    {
+      "path": "tasktra/lessons.py",
+      "sha256": "190122ac876de55be3fdc5d71f455890e5734c772b8538282cf1a8ced776b065",
+      "bytes": 22233
+    },
+    {
+      "path": "tasktra/lifecycle.py",
+      "sha256": "ee466948216381f30f52b56dc837fdfac720c6d9d7a977f2cdb6dc1ef2b27af3",
+      "bytes": 22397
+    },
+    {
+      "path": "tasktra/manifest.py",
+      "sha256": "16a43343af9c2786aef4553b0c69cd7a41cd6462b7b32af5518d6baee120f77b",
+      "bytes": 16496
+    },
+    {
+      "path": "tasktra/migrations.py",
+      "sha256": "f9a82949cc9df50f838acbef9c681bc93c1cda38e8dc5c98431a4078d9b3afcf",
+      "bytes": 26834
+    },
+    {
+      "path": "tasktra/model_policy.py",
+      "sha256": "333bfbb2d9760ab10be0bed93c81abd92bdd1d5438e6d8778265500e204f1e4c",
+      "bytes": 2376
+    },
+    {
+      "path": "tasktra/operations.py",
+      "sha256": "50fb9514b8f3bd1b0d4d621fb2ce3902247e9628e8cf845ba1a5f9bb3f09eb05",
+      "bytes": 11251
+    },
+    {
+      "path": "tasktra/provider_adapters.py",
+      "sha256": "5cd815782958dc7eafe1cdcb1f72456feb5a912934f6103d94b8e6668524d092",
+      "bytes": 74926
+    },
+    {
+      "path": "tasktra/provider_execution.py",
+      "sha256": "b05d26d07354cee04b4da216a617b9c025abb936beb7bcef74d8e161b781b1b5",
+      "bytes": 8942
+    },
+    {
+      "path": "tasktra/providers.py",
+      "sha256": "9d3a5191a4fbcf4fb8a240bec0aaaac92b465a41c00376303b76ab3f868fcb62",
+      "bytes": 27678
+    },
+    {
+      "path": "tasktra/release.py",
+      "sha256": "827a6e61e7eb6101dcff965ef756d3eb2765933b348e534645aab2fba36bd55e",
+      "bytes": 21984
+    },
+    {
+      "path": "tasktra/routing.py",
+      "sha256": "7531c37bd734cc959e76f3658731f828c247c1f8be533919f034f330d77ce4cf",
+      "bytes": 9439
+    },
+    {
+      "path": "tasktra/scheduling.py",
+      "sha256": "34ae123487df1a83824f140fc62408941e6611369ee6bdd5bc29b76905562c67",
+      "bytes": 12974
+    },
+    {
+      "path": "tasktra/schemas/approval.json",
+      "sha256": "c61f943780f01b0bf7ba62c563ce3188f2e3c55f3953681b9360518800de7e77",
+      "bytes": 1138
+    },
+    {
+      "path": "tasktra/schemas/authority-envelope-v2.json",
+      "sha256": "200b04142021dfdecc07170890b92ba779f8d58fec6ed5b51eb226d12b8279df",
+      "bytes": 3807
+    },
+    {
+      "path": "tasktra/schemas/authority-envelope.json",
+      "sha256": "bf70238092fad4fdadf7a1dcd05ffd2967475fb33f2f33ae843640e575fcc0f8",
+      "bytes": 2977
+    },
+    {
+      "path": "tasktra/schemas/generated-manifest.json",
+      "sha256": "8bbddef8aa00c46bd02aea4a4432b9e3d07dd5e587e106fe363489899ecffdfe",
+      "bytes": 823
+    },
+    {
+      "path": "tasktra/schemas/goal.json",
+      "sha256": "d824d338fc2a0040a331198920fe5d23997c25ba246178f54535c211d55043ea",
+      "bytes": 867
+    },
+    {
+      "path": "tasktra/schemas/handoff.json",
+      "sha256": "1dfc530771092e4be2818a5477fe0835786f3f66e054728eaf10af84d734c5a8",
+      "bytes": 5858
+    },
+    {
+      "path": "tasktra/schemas/lesson-proposal.schema.json",
+      "sha256": "e181a0cd3daedba56dd953f6a6412576b5f8521cfde884aafd8135e4bff60444",
+      "bytes": 4361
+    },
+    {
+      "path": "tasktra/schemas/lockfile.json",
+      "sha256": "14c14f1a944bc9d1923b13527440f079747a27ce3aab62eee9ee288af34a318d",
+      "bytes": 1558
+    },
+    {
+      "path": "tasktra/schemas/pack.json",
+      "sha256": "ab4b44495f32039e8d1c9ce8c5f692c34dc8064c6bb54c80d1e889590e144fbf",
+      "bytes": 3830
+    },
+    {
+      "path": "tasktra/schemas/project.json",
+      "sha256": "ab839c62cc814d432ba44ad135b5cf270a9c55f9b795cdb3a2485f37367d9c90",
+      "bytes": 2690
+    },
+    {
+      "path": "tasktra/schemas/provider-health-report.json",
+      "sha256": "9494dca3e54311fa634e87879a17a86653393ff8506341ef7bd93ca6c77cb06b",
+      "bytes": 1344
+    },
+    {
+      "path": "tasktra/schemas/provider-operation-descriptor.json",
+      "sha256": "64bc78a6cf9207521a8403fee073d1a5d7a1270f52d51c908b332e289e41febe",
+      "bytes": 1614
+    },
+    {
+      "path": "tasktra/schemas/provider-resource-scope.json",
+      "sha256": "10cfe7f6a6ac4a81b4e31d2027bb202e9b37c7ca433f9417ce6c451b52e233f7",
+      "bytes": 797
+    },
+    {
+      "path": "tasktra/schemas/provider-result.json",
+      "sha256": "c59584efc469060a9c96fd64204b521238ebcc8749f4823321f40699b48d212c",
+      "bytes": 578
+    },
+    {
+      "path": "tasktra/schemas/routing-decision.json",
+      "sha256": "c297b9963947ef8da7388af91f53eee59b1cc722a5279b2f208e97aac55ab71f",
+      "bytes": 749
+    },
+    {
+      "path": "tasktra/schemas/routing-request.json",
+      "sha256": "68daaab377b6249b0d84f1b708d1c5518817bfa551d8d5b882ac75ee1700f7aa",
+      "bytes": 2226
+    },
+    {
+      "path": "tasktra/schemas/schedule-preview.json",
+      "sha256": "b44a7fc0b019678c5d07f46429f701292e8492108bc9e757971122a2a88a3d44",
+      "bytes": 2852
+    },
+    {
+      "path": "tasktra/schemas/scheduler-health-report.json",
+      "sha256": "763b2ccc44cbc45b01baa579030525e9c3e9d52649ca079189a7eb26ff73d843",
+      "bytes": 1025
+    },
+    {
+      "path": "tasktra/schemas/transition-approval-v2.json",
+      "sha256": "fbd71fc3b8b3dc83edcf1a2f4a4531aea14cb6d1fa867990138a0a3ffb04e4b4",
+      "bytes": 2829
+    },
+    {
+      "path": "tasktra/schemas/transition-approval-v3.json",
+      "sha256": "b547b25e27c0ec378885b76265fb5dd216a09781cd09b568cc07434f78291808",
+      "bytes": 3420
+    },
+    {
+      "path": "tasktra/schemas/transition-approval-v4.json",
+      "sha256": "fe9481118e9d3c68f51ef7c51cc5d8a24193efae81fb4bd67349f3e04636300b",
+      "bytes": 3503
+    },
+    {
+      "path": "tasktra/schemas/transition-approval.json",
+      "sha256": "a9abd31c73b29dd6fb4870fe3fa3d866329d748be1dd7bf0ede1f35ecf26fbed",
+      "bytes": 2035
+    },
+    {
+      "path": "tasktra/schemas/work-item.json",
+      "sha256": "769d861a5a3f4af95114d60cbb6a736b524d81d79bbb0724a58f3cac621d6757",
+      "bytes": 1227
+    },
+    {
+      "path": "tasktra/schemas/work-unit.json",
+      "sha256": "afd571b5173e49d9a742e175067f395ba954d5d39c5a15ef39d9dc8e45cb2c61",
+      "bytes": 1271
+    },
+    {
+      "path": "tasktra/schemas/workflow-brief.json",
+      "sha256": "3935d671d670a7b4b6432158f5142c64118ee88e283c13f16ea68410d4afd32e",
+      "bytes": 2257
+    },
+    {
+      "path": "tasktra/schemas/workflow-completion-token.json",
+      "sha256": "9301a4c4452c39f00de72abeff68b37ed00f58f1fccbeb48c3407168ed621259",
+      "bytes": 936
+    },
+    {
+      "path": "tasktra/schemas/workflow-state.json",
+      "sha256": "19230422c721ae96c950014bf17a5cf504f49e976ed27e6b82a8688e5188f24f",
+      "bytes": 1729
+    },
+    {
+      "path": "tasktra/state.py",
+      "sha256": "7662348fc1d7d249b8197d453592bdb31bd83529f981ef44fa1a04840eebdc0c",
+      "bytes": 156776
+    },
+    {
+      "path": "tasktra/telemetry.py",
+      "sha256": "676069d056443df52a53d3fee323b325f82e702142a3cb93cbd6abb3491370c7",
+      "bytes": 18891
+    },
+    {
+      "path": "tasktra/upgrades.py",
+      "sha256": "9e80113b341fa0332ce6639f8329f1584190e5f3738a509e1d97afa3df35660e",
+      "bytes": 17329
+    },
+    {
+      "path": "tasktra/validation.py",
+      "sha256": "83455781a5c7d8ea6b33b0a365c7255abbc2b1a9809ae114a4e7e2c07a352669",
+      "bytes": 12320
+    },
+    {
+      "path": "tasktra/workflow.py",
+      "sha256": "39e2f3df26093a81c4936869474306d85103fbabd1914d5b84ae4898961b598a",
+      "bytes": 10665
+    },
+    {
+      "path": "tasktra/workitems.py",
+      "sha256": "155e85a8bca6746a207d7b2660554be943381ddfacd44016c2f5ddae335c912e",
+      "bytes": 27074
+    },
+    {
+      "path": "tasktra/workspace.py",
+      "sha256": "93324490816ac073a804ab6642141de3f1ee83cd07b7f9077171948cb47b3da2",
+      "bytes": 8834
+    }
+  ]
+}

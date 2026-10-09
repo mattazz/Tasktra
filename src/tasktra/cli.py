@@ -21,15 +21,25 @@ from . import __version__
 from .adoption import preview_initialization
 from .benchmarking import BenchmarkObservation, BenchmarkPlan, compare_observations
 from .compiler import CatalogError, _discover_project_agents, catalog_digest, check_drift, compile_catalog, load_catalog, resolve_packs, write_projection
+from .codex_runs import sha256_json
 from .ecosystem import preflight_packs, preview_pack_migrations, recommend_packs
-from .config import ConfigError, config_path, initialize_project, load_project_config
+from .config import ConfigError, config_path, initialize_project, load_project_config, update_enabled_packs
 from .delegation import DelegationError, agent_profile, delegation_plan, projection_overrides
+from .diagnostics import runtime_provenance
 from .execution import ExecutionError, ExecutionStore
 from .handoffs import MAX_HANDOFF_BYTES, HandoffError, load_handoff, validate_handoff
+from .interventions import (
+    MAX_INTERVENTION_CANONICAL_BYTES,
+    InterventionError,
+    load_intervention_request,
+    load_intervention_response,
+    request_from_handoff,
+)
 from .lessons import LessonError, LessonProposalStore
 from .lifecycle import LifecycleError, preview_adoption, preview_upgrade
 from .manifest import (
     ManifestError,
+    TasktraLock,
     build_generated_manifest,
     build_lockfile,
     read_lockfile,
@@ -39,6 +49,8 @@ from .manifest import (
     write_manifest,
 )
 from .operations import MAX_AUDIT_EXPORT, MAX_DETAIL_LIMIT, export_audit, operational_status
+from .overview import format_overview, orchestration_overview
+from .operator_cockpit import capture_operator_cockpit, export_operator_cockpit
 from .migrations import CommittedRuntimeRecoveryRequired, MigrationError
 from .contracts import validate_named
 from .providers import (
@@ -55,9 +67,10 @@ from .provider_adapters import BoundedArgvRunner, GitHubCliAdapter, JiraConnecto
 from .provider_execution import ProviderEffectExecutor
 from .jira_sync import JiraSyncError, build_sync_plan
 from .state import SCHEMA_VERSION as STATE_SCHEMA_VERSION, StateError, StateStore
+from .workplans import MAX_WORK_PLAN_BYTES, WorkPlanError, load_work_plan
 from .telemetry import TelemetryError, TelemetryStore
 from .upgrades import UpgradeError, apply_upgrade, rollback_upgrade, upgrade_plan_digest
-from .autonomy import AutonomyStore
+from .autonomy import AutonomyStore, InterventionConflictError
 from .authority import (
     VERIFICATION_POLICIES,
     load_authority_envelope,
@@ -94,6 +107,8 @@ def _store(root: Path) -> StateStore:
 
 
 _MAX_RUNTIME_JSON_BYTES = 64 * 1024
+_MAX_CODEX_RESULT_BYTES = 64 * 1024
+_MAX_EXECUTION_RECOVERY_OBSERVATION_BYTES = 32 * 1024
 
 
 class _StrictArgumentParser(argparse.ArgumentParser):
@@ -124,6 +139,10 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--apply", action="store_true", help="Apply the previewed project profile")
     init.add_argument("--verbose", action="store_true", help="Include per-file instruction inventory and hashes")
 
+    guide = subcommands.add_parser("guide", help="Explain the current project's next Tasktra steps in plain language")
+    guide.add_argument("--root", default=".")
+    guide.add_argument("--json", action="store_true", help="Return the guide as structured JSON instead of terminal text")
+
     bootstrap = subcommands.add_parser(
         "bootstrap", help="Create a local runtime while preserving an existing project profile"
     )
@@ -134,6 +153,20 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--root", default=".")
     status.add_argument("--goal-id")
     status.add_argument("--detail-limit", type=int, default=0)
+
+    overview = subcommands.add_parser("overview", help="Understand goals, progress, and work needing attention")
+    overview.add_argument("--root", default=".")
+    overview.add_argument("--goal-id", help="Drill into one goal and its work units")
+    overview.add_argument("--limit", type=int, default=20, help="Page size, from 1 to 100")
+    overview.add_argument("--offset", type=int, default=0, help="Goal or work-unit page offset")
+    overview.add_argument("--json", action="store_true", help="Emit structured data for tools")
+
+    cockpit = subcommands.add_parser("cockpit", help="Export a self-contained read-only operator cockpit")
+    cockpit.add_argument("--root", default=".")
+    cockpit_commands = cockpit.add_subparsers(dest="cockpit_command", required=True)
+    cockpit_export = cockpit_commands.add_parser("export", help="Write one bounded static HTML snapshot")
+    cockpit_export.add_argument("output")
+    cockpit_export.add_argument("--page-size", type=int, default=20, help="Client page size, from 1 to 100")
 
     portal = subcommands.add_parser("portal", help="Open a read-only local progress dashboard")
     portal.add_argument("--root", default=".")
@@ -256,14 +289,55 @@ def build_parser() -> argparse.ArgumentParser:
         help="Delete unchanged stale managed outputs after hash verification",
     )
 
-    delegation = subcommands.add_parser("delegation", help="Create a read-only Codex-host delegation plan")
+    delegation = subcommands.add_parser("delegation", help="Plan or record bounded Codex-host delegation receipts")
     delegation.add_argument("--root", default=".")
     delegation_commands = delegation.add_subparsers(dest="delegation_command", required=True)
     delegation_plan_command = delegation_commands.add_parser("plan", help="Resolve a bounded worker brief without dispatching")
     delegation_plan_command.add_argument("request")
     delegation_plan_command.add_argument("--handoff")
+    delegation_prepare = delegation_commands.add_parser("prepare", help="Prepare one lease-bound Codex run; this never dispatches")
+    delegation_prepare.add_argument("attempt_id")
+    delegation_prepare.add_argument("--actor", required=True)
+    delegation_prepare.add_argument("--request", required=True, help="bounded routing request JSON file")
+    delegation_prepare.add_argument("--idempotency-key", required=True)
+    delegation_prepare.add_argument("--handoff", help="bounded verified handoff JSON file")
+    delegation_prepare.add_argument("--lease-token-env", default="TASKTRA_LEASE_TOKEN")
+    delegation_start = delegation_commands.add_parser("start", help="Record an observed host identity for a prepared run")
+    delegation_start.add_argument("run_id")
+    delegation_start.add_argument("--actor", required=True)
+    delegation_start.add_argument("--host-canonical-name", required=True)
+    delegation_start.add_argument("--host-agent-id")
+    delegation_finish = delegation_commands.add_parser("finish", help="Record a terminal observed result digest for a started run")
+    delegation_finish.add_argument("run_id")
+    delegation_finish.add_argument("--actor", required=True)
+    delegation_finish.add_argument("--outcome", choices=("completed", "failed", "interrupted", "needs-attention"), required=True)
+    delegation_finish.add_argument("--usage-status", choices=("measured", "unavailable"), required=True)
+    delegation_finish.add_argument("--input-tokens", type=int)
+    delegation_finish.add_argument("--output-tokens", type=int)
+    delegation_finish.add_argument("--result-stdin", action="store_true", help="hash one bounded UTF-8 result read from standard input")
+    delegation_unresolved = delegation_commands.add_parser(
+        "unresolved", help="List bounded unresolved Codex host-run observations without changing them",
+    )
+    delegation_unresolved.add_argument("--goal-id")
+    delegation_unresolved.add_argument("--limit", type=int, default=50, help="Page size, from 1 to 100")
+    delegation_unresolved.add_argument("--after-run-id")
+    delegation_reconcile = delegation_commands.add_parser(
+        "reconcile", help="Record one closed host-tree observation without launching or controlling work",
+    )
+    delegation_reconcile.add_argument("run_id")
+    delegation_reconcile.add_argument("--actor", required=True)
+    delegation_reconcile.add_argument("--observation", required=True, help="closed host-tree observation JSON file")
+    delegation_reconcile.add_argument(
+        "--result-stdin", action="store_true", help="read exact completed final text bytes from standard input",
+    )
+    delegation_show = delegation_commands.add_parser("show", help="Show one bounded Codex run projection")
+    delegation_show.add_argument("run_id")
+    delegation_list = delegation_commands.add_parser("list", help="List bounded Codex run projections")
+    delegation_list.add_argument("--attempt-id")
+    delegation_list.add_argument("--limit", type=int, default=50)
+    delegation_list.add_argument("--after-run-id")
 
-    packs = subcommands.add_parser("packs", help="Preview ecosystem pack recommendations and activation")
+    packs = subcommands.add_parser("packs", help="List, preview, and manage optional ecosystem packs")
     packs.add_argument("--root", default=".")
     pack_commands = packs.add_subparsers(dest="pack_command", required=True)
     recommend = pack_commands.add_parser("recommend", help="Inspect bounded local evidence without writing")
@@ -271,6 +345,9 @@ def build_parser() -> argparse.ArgumentParser:
     recommend.add_argument("--trust-catalog", action="store_true")
     recommend.add_argument("--max-files", type=int, default=256)
     recommend.add_argument("--max-depth", type=int, default=4)
+    pack_list = pack_commands.add_parser("list", help="List enabled and available packs without writing")
+    pack_list.add_argument("--catalog")
+    pack_list.add_argument("--trust-catalog", action="store_true")
     preflight = pack_commands.add_parser("preflight", help="Report capability and trust blockers")
     preflight.add_argument("--catalog")
     preflight.add_argument("--trust-catalog", action="store_true")
@@ -282,6 +359,14 @@ def build_parser() -> argparse.ArgumentParser:
     migrations.add_argument("--trust-catalog", action="store_true")
     migrations.add_argument("--pack", action="append", default=[])
     migrations.add_argument("--trust-executable", action="append", default=[], help="Trusted pack token id@version:sha256")
+    for action in ("add", "remove"):
+        change = pack_commands.add_parser(action, help=f"Preview adding or removing one pack; use --apply to update project.toml")
+        change.add_argument("pack")
+        change.add_argument("--catalog")
+        change.add_argument("--trust-catalog", action="store_true")
+        change.add_argument("--capability", action="append", default=[])
+        change.add_argument("--trust-executable", action="append", default=[], help="Trusted pack token id@version:sha256")
+        change.add_argument("--apply", action="store_true", help="Apply the reviewed project-profile change")
 
     jira_sync = subcommands.add_parser("jira-sync", help="Plan an optional Jira status transition without contacting Jira")
     jira_sync.add_argument("--root", default=".")
@@ -431,7 +516,7 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--budget", type=int)
     create.add_argument("--acceptance", action="append", default=[])
     listing = goal_commands.add_parser("list", help="List goals")
-    listing.add_argument("--status", choices=["planned", "active", "paused", "blocked", "complete", "stopped"])
+    listing.add_argument("--status", choices=["planned", "active", "draining", "paused", "blocked", "complete", "stopped"])
     show = goal_commands.add_parser("show", help="Show one goal and budget")
     show.add_argument("goal_id")
 
@@ -467,10 +552,51 @@ def build_parser() -> argparse.ArgumentParser:
         item = goal_commands.add_parser(name); item.add_argument("goal_id"); item.add_argument("--actor", required=True); item.add_argument("--envelope-sha256", required=True)
     for name in ("pause", "stop"):
         item = goal_commands.add_parser(name); item.add_argument("goal_id"); item.add_argument("--actor", required=True)
+    drain = goal_commands.add_parser("drain", help="Stop new claims while current workers finish")
+    drain.add_argument("goal_id")
+    drain_choice = drain.add_mutually_exclusive_group(required=True)
+    drain_choice.add_argument("--preview", action="store_true", help="Inspect the effect without changing the goal")
+    drain_choice.add_argument("--apply", action="store_true", help="Close intake and pause after the last lease finishes")
+    drain.add_argument("--actor", help="Required when applying the drain")
+    drain.add_argument("--limit", type=int, default=20)
+    drain.add_argument("--offset", type=int, default=0)
 
     work = subcommands.add_parser("work", help="Create and safely execute work units")
     work.add_argument("--root", default="."); work_commands = work.add_subparsers(dest="work_command", required=True)
     work_create = work_commands.add_parser("create"); work_create.add_argument("goal_id"); work_create.add_argument("title"); work_create.add_argument("--id"); work_create.add_argument("--scope", required=True, help="bounded closed JSON scope file"); work_create.add_argument("--checkpoint", help="contract checkpoint identifier")
+    work_create.add_argument("--depends-on", action="append", default=[], help="Existing prerequisite unit in this goal; repeat up to 64 times")
+    plan_preview = work_commands.add_parser("plan-preview", help="Validate a complete work plan without changing the ledger")
+    plan_preview.add_argument("manifest", help="Bounded tasktra.work-plan JSON file")
+    plan_apply = work_commands.add_parser("plan-apply", help="Create all new definitions from one exact work-plan preview")
+    plan_apply.add_argument("manifest", help="The same work-plan manifest reviewed in preview")
+    plan_apply.add_argument("--preview-sha256", required=True, help="Exact preview digest for this runtime and plan")
+    dependencies = work_commands.add_parser("dependencies", help="Inspect immutable work prerequisites without changing the ledger")
+    dependencies.add_argument("goal_id")
+    dependencies.add_argument("--work-unit-id")
+    dependencies.add_argument("--limit", type=int, default=20)
+    dependencies.add_argument("--offset", type=int, default=0)
+    impact = work_commands.add_parser("impact", help="Trace prerequisite blockers and downstream work without changing the ledger")
+    impact.add_argument("goal_id")
+    impact.add_argument("work_unit_id")
+    impact.add_argument("--direction", choices=("both", "prerequisites", "dependents"), default="both")
+    impact.add_argument("--limit", type=int, default=20)
+    impact.add_argument("--offset", type=int, default=0)
+    readiness = work_commands.add_parser(
+        "readiness",
+        help="Map structural readiness, blocker leverage and operational gates without claiming work",
+    )
+    readiness.add_argument("goal_id")
+    readiness.add_argument("--limit", type=int, default=20)
+    readiness.add_argument("--offset", type=int, default=0)
+    inspect = work_commands.add_parser(
+        "inspect",
+        help="Inspect one verified, read-only work-unit snapshot without changing it",
+    )
+    inspect.add_argument("goal_id")
+    inspect.add_argument("work_unit_id")
+    inspect.add_argument("--limit", type=int, default=20)
+    inspect.add_argument("--before-sequence", type=int)
+    inspect.add_argument("--before-attempt-no", type=int)
     work_create.add_argument("--verification-policy", choices=sorted(VERIFICATION_POLICIES), default="implementation-review")
     policy_plan = work_commands.add_parser("plan-policy", help="Recommend a policy from explicit requirements and current authority")
     policy_plan.add_argument("goal_id")
@@ -480,13 +606,65 @@ def build_parser() -> argparse.ArgumentParser:
     assign_checkpoint = work_commands.add_parser("assign-checkpoint", help="Explicitly bind an unleased legacy work unit to a contract checkpoint")
     assign_checkpoint.add_argument("work_unit_id"); assign_checkpoint.add_argument("checkpoint_id"); assign_checkpoint.add_argument("--human-actor", required=True)
     claim = work_commands.add_parser("claim"); claim.add_argument("goal_id"); claim.add_argument("--actor", required=True); claim.add_argument("--envelope-sha256", required=True); claim.add_argument("--lease-seconds", type=int, default=300); claim.add_argument("--token-reservation", type=int, default=0); claim.add_argument("--repository", required=True); claim.add_argument("--revision", required=True); claim.add_argument("--branch", required=True); claim.add_argument("--workspace", required=True); claim.add_argument("--lease-token-env", default="TASKTRA_LEASE_TOKEN")
+    explain = work_commands.add_parser("explain", help="Explain next-work selection without claiming or changing work")
+    explain.add_argument("goal_id")
+    explain.add_argument("--actor", required=True)
+    explain.add_argument("--envelope-sha256", required=True)
+    explain.add_argument("--lease-seconds", type=int, default=300)
+    explain.add_argument("--token-reservation", type=int, default=0)
+    explain.add_argument("--work-unit-id", help="Show one unit's reasons while preserving the full queue's next selection")
+    explain.add_argument("--limit", type=int, default=20, help="Number of units to explain (1-100)")
+    explain.add_argument("--offset", type=int, default=0)
     for name in ("heartbeat", "finish"):
         item = work_commands.add_parser(name); item.add_argument("attempt_id"); item.add_argument("--actor", required=True); item.add_argument("--lease-token-env", default="TASKTRA_LEASE_TOKEN")
         if name == "heartbeat": item.add_argument("--lease-seconds", type=int, default=300)
-        else: item.add_argument("--outcome", required=True); item.add_argument("--tokens-consumed", type=int, default=0); item.add_argument("--workflow"); item.add_argument("--evidence-json")
+        else:
+            item.add_argument("--outcome", required=True)
+            item.add_argument("--tokens-consumed", type=int)
+            item.add_argument("--accounting-source", choices=("caller-declared", "host-measured", "unavailable"))
+            item.add_argument("--workflow")
+            item.add_argument("--evidence-json")
+    yield_intervention = work_commands.add_parser("yield", help="Yield a lease with one bounded operator intervention request")
+    yield_intervention.add_argument("attempt_id")
+    yield_intervention.add_argument("--actor", required=True)
+    yield_intervention.add_argument("--request", required=True, help="bounded intervention request JSON file")
+    yield_intervention.add_argument("--tokens-consumed", type=int)
+    yield_intervention.add_argument("--accounting-source", choices=("caller-declared", "host-measured", "unavailable"))
+    yield_intervention.add_argument("--elapsed-ms", type=int)
+    yield_intervention.add_argument("--lease-token-env", default="TASKTRA_LEASE_TOKEN")
     recover = work_commands.add_parser("recover"); recover.add_argument("--goal-id")
     requeue = work_commands.add_parser("requeue", help="Evidently resume blocked or approval-required work")
     requeue.add_argument("work_unit_id"); requeue.add_argument("--actor", required=True); requeue.add_argument("--envelope-sha256", required=True); requeue.add_argument("--evidence-json", required=True)
+    requeue.add_argument("--request-id", help="current structured intervention request identity")
+    requeue.add_argument("--response-id", help="explicitly reviewed current intervention response identity")
+    requeue.add_argument("--response-sha256", help="explicitly reviewed current intervention response digest")
+    intervention = subcommands.add_parser("intervention", help="Read or record bounded operator intervention evidence")
+    intervention.add_argument("--root", default=".")
+    intervention_commands = intervention.add_subparsers(dest="intervention_command", required=True)
+    intervention_list = intervention_commands.add_parser("list", help="List bounded intervention inbox rows")
+    intervention_list.add_argument("--goal-id")
+    intervention_list.add_argument("--work-unit-id")
+    intervention_list.add_argument("--include-closed", action="store_true")
+    intervention_list.add_argument("--no-legacy", action="store_true")
+    intervention_list.add_argument("--limit", type=int, default=20)
+    intervention_list.add_argument("--offset", type=int, default=0)
+    intervention_show = intervention_commands.add_parser("show", help="Show one structured intervention request")
+    intervention_show.add_argument("request_id")
+    intervention_responses = intervention_commands.add_parser("responses", help="Read bounded immutable response history")
+    intervention_responses.add_argument("request_id")
+    intervention_responses.add_argument("--after-revision", type=int, default=0)
+    intervention_responses.add_argument("--limit", type=int, default=20)
+    intervention_respond = intervention_commands.add_parser("respond", help="Record one bounded intervention response")
+    intervention_respond.add_argument("response", help="bounded intervention response JSON file")
+    intervention_respond.add_argument("--actor", required=True)
+    intervention_respond.add_argument("--actor-kind", choices=("human", "steward"), required=True)
+    from_handoff = intervention_commands.add_parser("request-from-handoff", help="Build one pure request draft from selected handoff fields")
+    from_handoff.add_argument("handoff", help="validated tasktra.handoff JSON file")
+    from_handoff.add_argument("--request-id", required=True)
+    from_handoff.add_argument("--attempt-id", required=True)
+    from_handoff.add_argument("--blocker-id", required=True)
+    from_handoff.add_argument("--action-id", required=True)
+    from_handoff.add_argument("--evidence-id", action="append", default=[])
     evidence = subcommands.add_parser("acceptance-evidence", help="Record bounded evidence for an acceptance criterion")
     evidence.add_argument("--root", default="."); evidence.add_argument("goal_id"); evidence.add_argument("criterion_id"); evidence.add_argument("--actor", required=True); evidence.add_argument("--envelope-sha256", required=True); evidence.add_argument("--evidence", required=True)
     effect = subcommands.add_parser("effect", help="Prepare, record, or inspect an idempotent effect")
@@ -549,10 +727,80 @@ def _init(args: argparse.Namespace) -> dict[str, Any]:
         "database": str(state.path),
         "instruction_summary": _instruction_summary(preview),
         "preserved_instruction_count": len(preview.instructions),
+        "next_steps": [
+            "Run `tasktra guide` for a short project-specific walkthrough.",
+            "Run `tasktra packs recommend` to see optional packs that fit this project.",
+            "Run `tasktra compile --trust-catalog` after choosing packs to generate agent skills.",
+        ],
     }
     if args.verbose:
         result["instructions"] = [item.as_dict() for item in preview.instructions]
     return result
+
+
+def _guide(args: argparse.Namespace) -> dict[str, Any]:
+    """Provide human-readable onboarding without modifying a project."""
+    root = _root(args.root)
+    profile = config_path(root)
+    if not profile.is_file():
+        return {
+            "ok": True, "action": "guide", "initialized": False, "root": str(root),
+            "summary": "This folder is not initialized for Tasktra yet.",
+            "steps": [{
+                "title": "Initialize Tasktra",
+                "why": "Preview first, then create this project's local profile and workflow database.",
+                "command": "tasktra init --preview && tasktra init --apply",
+            }],
+        }
+    config = load_project_config(root)
+    generated = root / ".tasktra" / "generated" / "manifest.json"
+    steps: list[dict[str, str]] = []
+    if not generated.is_file():
+        steps.append({
+            "title": "Generate your agent skills",
+            "why": "Tasktra has your selected packs, but their Codex and agent projections have not been generated yet.",
+            "command": "tasktra compile --trust-catalog",
+        })
+    if tuple(config.enabled_packs) == ("core",):
+        steps.append({
+            "title": "Choose optional packs",
+            "why": "Core provides the safe local workflow. Recommendations can add planning, language, delivery, or integration skills.",
+            "command": "tasktra packs recommend",
+        })
+    else:
+        steps.append({
+            "title": "Review enabled packs",
+            "why": "See the roles and skills currently available to this project.",
+            "command": "tasktra packs list",
+        })
+    steps.append({
+        "title": "Check local health",
+        "why": "This confirms that configuration and Tasktra's local workflow database are ready.",
+        "command": "tasktra doctor",
+    })
+    if "planning" in config.enabled_packs:
+        steps.append({
+            "title": "Plan a new project or major feature",
+            "why": "Use the planning pack's conversational discovery skill to turn an idea into a reviewed plan.",
+            "command": "/tasktra-discovery",
+        })
+    return {
+        "ok": True, "action": "guide", "initialized": True, "root": str(root),
+        "project": {"name": config.name, "packs": list(config.enabled_packs)},
+        "summary": "Tasktra is configured locally. Work through the suggested next steps in order.",
+        "steps": steps,
+    }
+
+
+def _guide_text(guide: dict[str, Any]) -> str:
+    lines = ["Tasktra guide", "", str(guide["summary"]), ""]
+    if guide.get("initialized"):
+        project = guide["project"]
+        lines.extend([f"Project: {project['name']}", f"Enabled packs: {', '.join(project['packs'])}", ""])
+    lines.append("Next steps:")
+    for index, step in enumerate(guide["steps"], start=1):
+        lines.extend([f"{index}. {step['title']}", f"   {step['why']}", f"   {step['command']}"])
+    return "\n".join(lines) + "\n"
 
 
 def _bootstrap(args: argparse.Namespace) -> dict[str, Any]:
@@ -564,6 +812,13 @@ def _bootstrap(args: argparse.Namespace) -> dict[str, Any]:
     preserves the profile byte-for-byte and initializes only that local runtime.
     """
     root = _root(args.root)
+    # A checked-in lock is project authority.  Validate it before creating a
+    # profile or runtime so bootstrap cannot turn an invalid checkout into a
+    # partially initialized one.
+    try:
+        existing_lock = read_lockfile(root)
+    except FileNotFoundError:
+        existing_lock = None
     profile = config_path(root)
     if profile.exists():
         # Validate before writing runtime state so a malformed preserved profile
@@ -574,7 +829,34 @@ def _bootstrap(args: argparse.Namespace) -> dict[str, Any]:
         profile = initialize_project(root, name=args.name)
         config_action = "create"
     state = _store(root)
-    schema_version = state.migrate()
+    if state.path.exists():
+        schema_version = state.inspect_schema_version()
+        if schema_version != STATE_SCHEMA_VERSION:
+            raise StateError(
+                "existing runtime schema migration requires an exact authority-bound "
+                "tasktra upgrade preview/apply plan"
+            )
+    else:
+        schema_version = state.migrate()
+        # A fresh runtime is derived local state.  Rebind only the lock's
+        # already-declared runtime schema; all projection and profile metadata
+        # remains exactly as installed.  Unadopted projects have no lock and
+        # bootstrap deliberately leaves that metadata absent.
+        if existing_lock is not None and "runtime" in dict(existing_lock.schema_versions):
+            schemas = dict(existing_lock.schema_versions)
+            if schemas["runtime"] != schema_version:
+                schemas["runtime"] = schema_version
+                write_lockfile(root, TasktraLock(
+                    tasktra_version=existing_lock.tasktra_version,
+                    catalog_version=existing_lock.catalog_version,
+                    packs=existing_lock.packs,
+                    pack_versions=existing_lock.pack_versions,
+                    generated_manifest_sha256=existing_lock.generated_manifest_sha256,
+                    catalog_source_sha256=existing_lock.catalog_source_sha256,
+                    schema_versions=tuple(sorted(schemas.items())),
+                    pack_contracts=existing_lock.pack_contracts,
+                    schema_version=existing_lock.schema_version,
+                ))
     return {
         "ok": True,
         "action": "bootstrap",
@@ -608,13 +890,85 @@ def _audit(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _overview(args: argparse.Namespace) -> dict[str, Any]:
+    root = _root(args.root)
+    config = load_project_config(root)
+    report = orchestration_overview(
+        StateStore(config.database_path(root)), goal_id=args.goal_id,
+        limit=args.limit, offset=args.offset,
+    )
+    # Commands returned for a different --root must keep that project binding.
+    # Argv arrays remain unambiguous across terminal quoting conventions.
+    goals = [report["goal"]] if report["goal"] is not None else report["goals"]
+    for goal in goals:
+        for recommendation in goal["recommendations"]:
+            _bind_overview_recommendation(recommendation, root=root, goal_id=str(goal["id"]))
+    return {"ok": True, "project": {"name": config.name, "root": str(root)}, **report}
+
+
+def _bind_overview_recommendation(recommendation: dict[str, Any], *, root: Path, goal_id: str) -> None:
+    """Bind only known read-only overview commands to this project's root.
+
+    Overview owns recommendation semantics.  The CLI only inserts an explicit
+    project binding and deliberately does not parse arbitrary command text.
+    """
+    if recommendation.get("kind") != "read-only-command":
+        return
+    command = recommendation.get("command")
+    argv = recommendation.get("argv")
+    if command == f"tasktra status --goal-id {goal_id}":
+        recommendation.pop("command", None)
+        recommendation["argv"] = ["tasktra", "status", "--root", str(root), "--goal-id", goal_id]
+        recommendation["detail"] = "Inspect goal status in this project."
+        return
+    if command == f"tasktra intervention list --goal-id {goal_id}":
+        recommendation.pop("command", None)
+        recommendation["argv"] = ["tasktra", "intervention", "--root", str(root), "list", "--goal-id", goal_id]
+        return
+    if argv == ["tasktra", "delegation", "unresolved", "--goal-id", goal_id]:
+        recommendation["argv"] = [
+            "tasktra", "delegation", "--root", str(root), "unresolved", "--goal-id", goal_id,
+        ]
+        return
+    # A future overview addition remains visible as authored rather than being
+    # rewritten into a different command by an unsafe generic parser.
+
+
+def _cockpit(args: argparse.Namespace) -> dict[str, Any]:
+    root = _root(args.root)
+    config = load_project_config(root)
+    snapshot = capture_operator_cockpit(
+        StateStore(config.database_path(root)), project_root=root, project_name=config.name,
+        source_provenance=runtime_provenance(root), page_size=args.page_size,
+    )
+    exported = export_operator_cockpit(snapshot, Path(args.output))
+    return {"ok": True, "action": "cockpit-export", "read_only_runtime": True, **exported}
+
+
 def _doctor(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     root = _root(args.root)
+    provenance = runtime_provenance(root)
     checks: list[dict[str, Any]] = [{"name": "root", "ok": root.is_dir(), "detail": str(root)}]
+    if provenance["project_source_path"] is not None:
+        matches = provenance["source_matches_project"]
+        checks.append({
+            "name": "runtime_source", "ok": not provenance["foreign_source_checkout"],
+            "detail": (
+                "Tasktra is loaded from this source checkout"
+                if matches else (
+                "Tasktra is loaded from another location; select this checkout's "
+                "Python environment or set PYTHONPATH to its src directory before "
+                "considering a runtime migration"
+                if provenance["foreign_source_checkout"] else
+                "Using an installed or copied Tasktra package outside this source checkout; "
+                "see provenance for the selected implementation"
+                )
+            ),
+        })
     path = config_path(root)
     if not path.is_file():
         checks.append({"name": "configuration", "ok": False, "detail": f"missing {path}"})
-        return {"ok": False, "checks": checks}, 1
+        return {"ok": False, "checks": checks, "provenance": provenance}, 1
     try:
         config = load_project_config(root)
         checks.append({"name": "configuration", "ok": True, "detail": str(path)})
@@ -622,17 +976,26 @@ def _doctor(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         checks.append({"name": "runtime_database", "ok": database.exists(), "detail": str(database)})
         if database.exists():
             version = StateStore(database).inspect_schema_version()
+            provenance["database_runtime_schema"] = version
             current = version == STATE_SCHEMA_VERSION
-            detail = (
-                f"schema {version} is current"
-                if current
-                else f"schema {version} requires explicit migration to {STATE_SCHEMA_VERSION}"
-            )
+            if current:
+                detail = f"schema {version} is current"
+            elif provenance["foreign_source_checkout"]:
+                detail = (
+                    f"database schema {version}, loaded build supports {STATE_SCHEMA_VERSION}; "
+                    "resolve the runtime_source mismatch before considering a migration"
+                )
+            elif version > STATE_SCHEMA_VERSION:
+                detail = f"schema {version} is newer than supported {STATE_SCHEMA_VERSION}; use a compatible Tasktra build"
+            else:
+                detail = f"schema {version} requires explicit migration to {STATE_SCHEMA_VERSION}"
             checks.append({"name": "runtime_state", "ok": current, "detail": detail})
-    except (ConfigError, StateError, OSError) as error:
+    except ConfigError as error:
         checks.append({"name": "configuration", "ok": False, "detail": str(error)})
+    except (StateError, OSError, sqlite3.Error) as error:
+        checks.append({"name": "runtime_state", "ok": False, "detail": str(error)})
     healthy = all(check["ok"] for check in checks)
-    return {"ok": healthy, "checks": checks}, 0 if healthy else 1
+    return {"ok": healthy, "checks": checks, "provenance": provenance}, 0 if healthy else 1
 
 
 def _validate_project(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
@@ -1167,12 +1530,29 @@ def _packs(args: argparse.Namespace) -> dict[str, Any]:
             allow_source_checkout=args.catalog is None,
         ),
     )
-    selected = tuple(args.pack) if getattr(args, "pack", None) else config.enabled_packs
+    selected = tuple(args.pack) if isinstance(getattr(args, "pack", None), list) and args.pack else config.enabled_packs
     if args.pack_command == "recommend":
         return {
             "ok": True,
             "action": "pack-recommendation-preview",
             **recommend_packs(root, catalog, max_files=args.max_files, max_depth=args.max_depth).to_dict(),
+        }
+    if args.pack_command == "list":
+        return {
+            "ok": True,
+            "action": "pack-list",
+            "enabled": list(config.enabled_packs),
+            "available": [
+                {
+                    "id": identifier,
+                    "version": pack.version,
+                    "dependencies": list(pack.dependencies),
+                    "skills": list(pack.skills),
+                    "activation_conditions": list(pack.activation_conditions),
+                }
+                for identifier, pack in sorted(catalog.packs.items())
+            ],
+            "mutation": "none",
         }
     if args.pack_command == "preflight":
         return {
@@ -1198,6 +1578,60 @@ def _packs(args: argparse.Namespace) -> dict[str, Any]:
                 trusted_executable_packs=args.trust_executable,
             ),
         }
+    if args.pack_command in {"add", "remove"}:
+        identifier = args.pack
+        if identifier not in catalog.packs:
+            raise CatalogError(f"unknown pack: {identifier}")
+        current = tuple(config.enabled_packs)
+        if args.pack_command == "add":
+            requested = current if identifier in current else (*current, identifier)
+        else:
+            if identifier == "core":
+                raise ConfigError("the core pack is required and cannot be removed")
+            requested = tuple(item for item in current if item != identifier)
+        preflight = preflight_packs(
+            catalog, requested, available_capabilities=args.capability,
+            trusted_executable_packs=args.trust_executable,
+        )
+        try:
+            locked = dict(read_lockfile(root).pack_versions)
+        except FileNotFoundError:
+            locked = {}
+        migration = preview_pack_migrations(
+            catalog, locked, requested, trusted_executable_packs=args.trust_executable,
+        )
+        result: dict[str, Any] = {
+            "ok": bool(preflight["ok"] and migration["ok"]),
+            "action": f"pack-{args.pack_command}-preview",
+            "current_packs": list(current),
+            "requested_packs": list(requested),
+            "preflight": preflight,
+            "migration": migration,
+            "profile_change": {
+                "path": str(config_path(root)),
+                "field": "packs.enabled",
+                "before": list(current),
+                "after": list(requested),
+            },
+            "next_steps": [
+                "Review this preview.",
+                f"Run `tasktra packs {args.pack_command} {identifier} --apply` to update the project profile.",
+                "Run `tasktra compile --trust-catalog` after applying to generate the revised agent projections.",
+            ],
+            "mutation": "none",
+        }
+        if not args.apply:
+            return result
+        if not preflight["ok"] or not migration["ok"]:
+            raise CatalogError("pack change is blocked; review the preflight and migration preview")
+        destination = update_enabled_packs(root, requested)
+        result.update({
+            "ok": True,
+            "action": f"pack-{args.pack_command}",
+            "config": str(destination),
+            "mutation": "project-profile-updated",
+        })
+        return result
     raise AssertionError(f"Unhandled pack command: {args.pack_command}")
 
 
@@ -1225,16 +1659,176 @@ def _jira_sync(args: argparse.Namespace) -> dict[str, Any]:
 def _delegation(args: argparse.Namespace) -> dict[str, Any]:
     root = _root(args.root)
     config = load_project_config(root)
-    catalog_root = _catalog_root(root, None)
-    catalog = load_catalog(
-        catalog_root,
-        source_trust=_catalog_source_trust(
-            catalog_root, config.catalog_trusted, allow_source_checkout=True
-        ),
-    )
-    request = _runtime_json(args.request)
-    handoff = _read_bounded_json_contract(args.handoff, MAX_HANDOFF_BYTES, load_handoff) if args.handoff else None
-    return {"ok": True, "action": "delegation-plan", **delegation_plan(catalog, config, request, handoff=handoff)}
+    if args.delegation_command == "plan":
+        catalog_root = _catalog_root(root, None)
+        catalog = load_catalog(
+            catalog_root,
+            source_trust=_catalog_source_trust(
+                catalog_root, config.catalog_trusted, allow_source_checkout=True,
+            ),
+        )
+        request = _runtime_json(args.request)
+        handoff = _read_bounded_json_contract(args.handoff, MAX_HANDOFF_BYTES, load_handoff) if args.handoff else None
+        plan = delegation_plan(catalog, config, request, handoff=handoff)
+        return {
+            "ok": True, "action": "delegation-plan", **plan,
+            "plan_sha256": sha256_json(plan), "brief_sha256": sha256_json(plan["brief"]),
+        }
+
+    store = AutonomyStore(config.database_path(root))
+    if args.delegation_command == "unresolved":
+        from .execution_recovery import unresolved_codex_runs
+
+        runs = unresolved_codex_runs(
+            store, goal_id=args.goal_id, limit=args.limit, after_run_id=args.after_run_id,
+        )
+        for run in runs["items"]:
+            prefix = ["tasktra", "delegation", "--root", str(root)]
+            run["next_action"]["show"]["argv"] = [*prefix, "show", run["run_id"]]
+            run["next_action"]["reconcile"]["argv_template"] = [
+                *prefix, "reconcile", run["run_id"], "--actor", "<actor>", "--observation", "<observation.json>",
+            ]
+        return {"ok": True, "action": "delegation-unresolved", "read_only": True, "runs": runs}
+    if args.delegation_command == "reconcile":
+        from .execution_recovery import reconcile_codex_run
+
+        observation = _execution_recovery_observation(args.observation)
+        observation_kind = _observation_kind(observation)
+        if observation_kind == "running" and args.result_stdin:
+            raise StateError("running reconciliation does not accept --result-stdin")
+        if observation_kind == "completed" and not args.result_stdin:
+            raise StateError("completed reconciliation requires --result-stdin")
+        result_bytes = _read_result_stdin_bytes() if args.result_stdin else None
+        result = reconcile_codex_run(
+            store, args.run_id, observer_id=args.actor, observation=observation, result_bytes=result_bytes,
+        )
+        return {
+            "ok": True,
+            "action": "delegation-reconcile",
+            "observation_kind": observation_kind,
+            "mutation": result["mutation"],
+            "idempotent": result["idempotent"],
+            "attribution_preserved": result["attribution_preserved"],
+            "run": result,
+        }
+    if args.delegation_command == "prepare":
+        catalog_root = _catalog_root(root, None)
+        catalog = load_catalog(
+            catalog_root,
+            source_trust=_catalog_source_trust(
+                catalog_root, config.catalog_trusted, allow_source_checkout=True,
+            ),
+        )
+        request = _runtime_json(args.request)
+        handoff = _read_bounded_json_contract(args.handoff, MAX_HANDOFF_BYTES, load_handoff) if args.handoff else None
+        run = store.prepare_codex_run(
+            attempt_id=args.attempt_id,
+            performer_id=args.actor,
+            lease_token=_lease_token(args.lease_token_env),
+            catalog=catalog,
+            config=config,
+            routing_request=request,
+            idempotency_key=args.idempotency_key,
+            handoff=handoff,
+        )
+        return {"ok": True, "action": "delegation-prepare", "run": run}
+    if args.delegation_command == "start":
+        run = store.record_codex_start(
+            run_id=args.run_id,
+            observer_id=args.actor,
+            host_canonical_name=args.host_canonical_name,
+            host_agent_id=args.host_agent_id,
+        )
+        return {"ok": True, "action": "delegation-start", "run": run}
+    if args.delegation_command == "finish":
+        result_sha256 = _result_stdin_sha256() if args.result_stdin else None
+        run = store.record_codex_finish(
+            run_id=args.run_id,
+            observer_id=args.actor,
+            outcome=args.outcome,
+            result_status="observed" if args.result_stdin else "unavailable",
+            result_sha256=result_sha256,
+            usage_status=args.usage_status,
+            input_tokens=args.input_tokens,
+            output_tokens=args.output_tokens,
+        )
+        return {"ok": True, "action": "delegation-finish", "run": run}
+    if args.delegation_command == "show":
+        run = store.get_codex_run(args.run_id)
+        if run is None:
+            raise StateError(f"Codex run not found: {args.run_id}")
+        return {"ok": True, "action": "delegation-show", "run": run}
+    if args.delegation_command == "list":
+        return {
+            "ok": True,
+            "action": "delegation-list",
+            "runs": store.list_codex_runs(
+                attempt_id=args.attempt_id,
+                limit=args.limit,
+                after_run_id=args.after_run_id,
+            ),
+        }
+    raise AssertionError(f"Unhandled delegation command: {args.delegation_command}")
+
+
+def _result_stdin_sha256() -> str:
+    """Hash a bounded UTF-8 observation without retaining or emitting its contents."""
+    return sha256(_read_result_stdin_bytes()).hexdigest()
+
+
+def _read_result_stdin_bytes() -> bytes:
+    """Read exact bounded UTF-8 bytes; callers must not emit the result text."""
+    source = getattr(sys.stdin, "buffer", sys.stdin)
+    value = source.read(_MAX_CODEX_RESULT_BYTES + 1)
+    payload = value.encode("utf-8") if isinstance(value, str) else value
+    if not isinstance(payload, bytes):
+        raise StateError("Codex result input must be bytes or text")
+    if len(payload) > _MAX_CODEX_RESULT_BYTES:
+        raise StateError("Codex result input exceeds 64KiB")
+    try:
+        payload.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise StateError("Codex result input must be valid UTF-8") from error
+    return payload
+
+
+def _execution_recovery_observation(path_value: str | Path) -> dict[str, Any]:
+    """Load the transient closed observation with a smaller recovery-specific cap."""
+    def reject_duplicates(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in items:
+            if key in result:
+                raise StateError("duplicate JSON key in recovery observation")
+            result[key] = value
+        return result
+
+    def reject_constant(value: str) -> None:
+        raise StateError("non-finite JSON value in recovery observation")
+
+    path = Path(path_value).expanduser().resolve()
+    with path.open("rb") as handle:
+        payload = handle.read(_MAX_EXECUTION_RECOVERY_OBSERVATION_BYTES + 1)
+    if len(payload) > _MAX_EXECUTION_RECOVERY_OBSERVATION_BYTES:
+        raise StateError("recovery observation exceeds 32KiB")
+    try:
+        value = json.loads(payload.decode("utf-8"), object_pairs_hook=reject_duplicates, parse_constant=reject_constant)
+    except UnicodeDecodeError as error:
+        raise StateError("recovery observation must be valid UTF-8 JSON") from error
+    except json.JSONDecodeError as error:
+        raise StateError("recovery observation must be valid JSON") from error
+    except RecursionError as error:
+        raise StateError("recovery observation nesting exceeds the supported depth") from error
+    if not isinstance(value, dict):
+        raise StateError("recovery observation must be an object")
+    return value
+
+
+def _observation_kind(observation: dict[str, Any]) -> str | None:
+    """Read only the discriminator needed to keep stdin transport closed."""
+    target = observation.get("target")
+    status = target.get("status") if isinstance(target, dict) else None
+    kind = status.get("kind") if isinstance(status, dict) else None
+    return kind if isinstance(kind, str) else None
 
 
 def _lifecycle_inputs(args: argparse.Namespace) -> tuple[Path, Any, Any, Path]:
@@ -1759,6 +2353,14 @@ def _goal(args: argparse.Namespace) -> dict[str, Any]:
         if result is None:
             raise StateError(f"Unknown goal: {args.goal_id}")
         return {"ok": True, "goal": result, "budget": store.budget_summary(args.goal_id), "checkpoints": store.get_goal_checkpoints(args.goal_id)}
+    if args.goal_command == "drain":
+        if args.preview:
+            result = store.preview_goal_drain(args.goal_id, limit=args.limit, offset=args.offset)
+        else:
+            if not args.actor:
+                raise StateError("goal drain --apply requires --actor")
+            result = store.drain_goal(args.goal_id, actor_id=args.actor, limit=args.limit, offset=args.offset)
+        return {"ok": True, "action": "goal-drain-preview" if args.preview else "goal-drain", "drain": result}
     if args.goal_command in {"activate", "resume", "complete"}:
         runtime = _autonomy(_root(args.root))
         if args.goal_command == "activate": result = runtime.activate_goal(args.goal_id, actor_id=args.actor, envelope_sha256=args.envelope_sha256)
@@ -1795,6 +2397,73 @@ def _lease_token(name: str) -> str:
     if not token:
         raise StateError(f"lease token environment variable is unset: {name}")
     return token
+
+
+def _bind_readiness_argv(argv: list[str], root: Path) -> list[str]:
+    """Bind a known readiness drilldown to this invocation's resolved root.
+
+    The read model intentionally produces portable service-level argv arrays.
+    The CLI is their presentation boundary: it supplies the project root without
+    interpreting placeholders or replacing the referenced subcommand.
+    """
+    if len(argv) < 2 or argv[0] != "tasktra" or argv[1] not in {
+        "work", "intervention", "delegation",
+    }:
+        raise StateError("goal readiness returned an unsupported drilldown argv")
+    # A row can legitimately occur in both readiness frontiers.  The read model
+    # may share its immutable drilldown array between those rendered rows, so
+    # binding must be idempotent while still rejecting a mismatched root.
+    if len(argv) >= 4 and argv[2] == "--root":
+        if argv[3] != str(root):
+            raise StateError("goal readiness returned a drilldown bound to another root")
+        return list(argv)
+    return [argv[0], argv[1], "--root", str(root), *argv[2:]]
+
+
+def _bind_readiness_report_argv(report: dict[str, Any], root: Path) -> dict[str, Any]:
+    """Bind the report's closed, documented drilldown arrays to ``root``."""
+    def bind(container: dict[str, Any], field: str) -> None:
+        value = container.get(field)
+        if value is not None:
+            if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                raise StateError("goal readiness returned an invalid drilldown argv")
+            container[field] = _bind_readiness_argv(value, root)
+
+    claimability = report.get("claimability_drilldown")
+    if isinstance(claimability, dict):
+        bind(claimability, "report_template")
+
+    gates = report.get("operational_gates")
+    if isinstance(gates, dict):
+        for gate_name in ("interventions", "unresolved_runs"):
+            gate = gates.get(gate_name)
+            if isinstance(gate, dict):
+                bind(gate, "inspection_argv")
+
+    frontiers = report.get("frontiers")
+    if not isinstance(frontiers, dict):
+        raise StateError("goal readiness returned an invalid frontiers report")
+    for frontier_name in ("ready_frontier", "blocking_frontier"):
+        frontier = frontiers.get(frontier_name)
+        if not isinstance(frontier, dict):
+            raise StateError("goal readiness returned an invalid frontier page")
+        rows = frontier.get("items")
+        if not isinstance(rows, list):
+            raise StateError("goal readiness returned invalid frontier items")
+        for row in rows:
+            if not isinstance(row, dict):
+                raise StateError("goal readiness returned an invalid frontier row")
+            drilldowns = row.get("drilldowns")
+            if not isinstance(drilldowns, dict):
+                raise StateError("goal readiness returned invalid frontier drilldowns")
+            for field in (
+                "dependencies_argv",
+                "impact_argv",
+                "intervention_argv",
+                "explain_argv_template",
+            ):
+                bind(drilldowns, field)
+    return report
 
 
 def _state(args: argparse.Namespace) -> dict[str, Any]:
@@ -1882,6 +2551,13 @@ def _approval(args: argparse.Namespace) -> dict[str, Any]:
 
 def _work(args: argparse.Namespace) -> dict[str, Any]:
     root = _root(args.root); store = _autonomy(root)
+    if args.work_command in {"plan-preview", "plan-apply"}:
+        with Path(args.manifest).expanduser().resolve().open("rb") as handle:
+            manifest = load_work_plan(handle.read(MAX_WORK_PLAN_BYTES + 1))
+        result = store.preview_work_plan(manifest) if args.work_command == "plan-preview" else store.apply_work_plan(
+            manifest, expected_preview_sha256=args.preview_sha256,
+        )
+        return {"ok": True, "action": f"work-{args.work_command}", "plan": result}
     if args.work_command == "plan-policy":
         from .workflow_planning import plan_verification_policy
 
@@ -1902,20 +2578,121 @@ def _work(args: argparse.Namespace) -> dict[str, Any]:
         checks = ([list(command) for command in load_project_config(root).validation_commands]
                   if args.verification_policy == "implementation-deterministic-review" else None)
         return {"ok": True, "work_unit": store.create_work_unit(goal_id=args.goal_id, title=args.title, work_unit_id=args.id,
-            scope=scope, checkpoint_id=args.checkpoint, verification_policy=args.verification_policy, acceptance_checks=checks)}
+            scope=scope, checkpoint_id=args.checkpoint, verification_policy=args.verification_policy, acceptance_checks=checks, prerequisite_ids=args.depends_on)}
+    if args.work_command == "dependencies":
+        return {"ok": True, "action": "work-dependencies", "dependencies": store.work_dependencies(
+            args.goal_id, work_unit_id=args.work_unit_id, limit=args.limit, offset=args.offset,
+        )}
+    if args.work_command == "impact":
+        from .dependency_impact import dependency_impact
+        return {"ok": True, "action": "work-impact", "impact": dependency_impact(
+            store, goal_id=args.goal_id, work_unit_id=args.work_unit_id,
+            direction=args.direction, limit=args.limit, offset=args.offset,
+        )}
+    if args.work_command == "readiness":
+        from .goal_readiness import goal_readiness
+        readiness = goal_readiness(
+            store, goal_id=args.goal_id, limit=args.limit, offset=args.offset,
+        )
+        return {
+            "ok": True,
+            "action": "work-readiness",
+            "readiness": _bind_readiness_report_argv(readiness, root),
+        }
+    if args.work_command == "inspect":
+        from .work_inspection import inspect_work_unit
+
+        inspection = inspect_work_unit(
+            store,
+            project_root=root,
+            goal_id=args.goal_id,
+            work_unit_id=args.work_unit_id,
+            limit=args.limit,
+            before_sequence=args.before_sequence,
+            before_attempt_no=args.before_attempt_no,
+        )
+        return {"ok": True, "action": "work-inspect", "inspection": inspection}
     if args.work_command == "assign-checkpoint":
         return {"ok": True, "work_unit": store.assign_work_unit_checkpoint(args.work_unit_id, args.checkpoint_id, actor_id=args.human_actor, actor_kind="human")}
     if args.work_command == "claim":
         result = store.claim_next_work(goal_id=args.goal_id, performer_id=args.actor, envelope_sha256=args.envelope_sha256, lease_seconds=args.lease_seconds, token_reservation=args.token_reservation, repository=args.repository, revision=args.revision, branch=args.branch, workspace=args.workspace, lease_token=_lease_token(args.lease_token_env))
         return {"ok": True, "claim": result}
+    if args.work_command == "explain":
+        explanation = store.explain_next_work(
+            goal_id=args.goal_id, performer_id=args.actor, envelope_sha256=args.envelope_sha256,
+            lease_seconds=args.lease_seconds, token_reservation=args.token_reservation,
+            work_unit_id=args.work_unit_id, limit=args.limit, offset=args.offset,
+        )
+        return {"ok": True, "action": "work-explain", "explanation": explanation}
     if args.work_command == "heartbeat": return {"ok": True, "heartbeat": store.heartbeat(attempt_id=args.attempt_id, performer_id=args.actor, lease_token=_lease_token(args.lease_token_env), lease_seconds=args.lease_seconds)}
     if args.work_command == "finish":
         workflow = _runtime_json(args.workflow, load_workflow) if args.workflow else None
         evidence = _runtime_json(args.evidence_json) if args.evidence_json else {}
-        return {"ok": True, "finish": store.finish_attempt(attempt_id=args.attempt_id, performer_id=args.actor, lease_token=_lease_token(args.lease_token_env), outcome=args.outcome, tokens_consumed=args.tokens_consumed, workflow=workflow, outcome_evidence=evidence)}
+        return {"ok": True, "finish": store.finish_attempt(
+            attempt_id=args.attempt_id, performer_id=args.actor,
+            lease_token=_lease_token(args.lease_token_env), outcome=args.outcome,
+            tokens_consumed=args.tokens_consumed, accounting_source=args.accounting_source,
+            workflow=workflow, outcome_evidence=evidence,
+        )}
+    if args.work_command == "yield":
+        request = _read_bounded_json_contract(
+            args.request, MAX_INTERVENTION_CANONICAL_BYTES, load_intervention_request,
+        )
+        return {"ok": True, "yield": store.yield_for_intervention(
+            attempt_id=args.attempt_id, performer_id=args.actor,
+            lease_token=_lease_token(args.lease_token_env), request=request,
+            tokens_consumed=args.tokens_consumed, accounting_source=args.accounting_source,
+            elapsed_ms=args.elapsed_ms,
+        )}
     if args.work_command == "requeue":
-        return {"ok": True, "work_unit": store.requeue_work(work_unit_id=args.work_unit_id, performer_id=args.actor, envelope_sha256=args.envelope_sha256, evidence=_runtime_json(args.evidence_json))}
+        return {"ok": True, "work_unit": store.requeue_work(
+            work_unit_id=args.work_unit_id, performer_id=args.actor,
+            envelope_sha256=args.envelope_sha256, evidence=_runtime_json(args.evidence_json),
+            intervention_request_id=args.request_id,
+            expected_intervention_response_id=args.response_id,
+            expected_intervention_response_sha256=args.response_sha256,
+        )}
     return {"ok": True, "recovered": store.recover_expired_leases(goal_id=args.goal_id)}
+
+
+def _intervention(args: argparse.Namespace) -> dict[str, Any]:
+    """Dispatch CLI-only intervention operations without adding transition policy."""
+    if args.intervention_command == "request-from-handoff":
+        handoff = _read_bounded_json_contract(args.handoff, MAX_HANDOFF_BYTES, load_handoff)
+        request = request_from_handoff(
+            handoff, request_id=args.request_id, attempt_id=args.attempt_id,
+            blocker_id=args.blocker_id, action_id=args.action_id,
+            evidence_ids=args.evidence_id,
+        )
+        return {"ok": True, "action": "intervention-request-from-handoff", "request": request}
+
+    if args.intervention_command == "respond":
+        response = _read_bounded_json_contract(
+            args.response, MAX_INTERVENTION_CANONICAL_BYTES, load_intervention_response,
+        )
+        store = _autonomy(_root(args.root))
+        store_response = store.record_intervention_response(
+            response=response, responder_id=args.actor, responder_kind=args.actor_kind,
+        )
+        return {"ok": True, "action": "intervention-respond", "response": store_response}
+
+    # Read projections are lazy wrappers so this CLI module retains a small
+    # dependency surface while the frozen pure contract remains usable alone.
+    from .interventions import intervention_detail, intervention_inbox, intervention_response_history
+    store = _autonomy(_root(args.root))
+    if args.intervention_command == "list":
+        return {"ok": True, "action": "intervention-list", "inbox": intervention_inbox(
+            store, goal_id=args.goal_id, work_unit_id=args.work_unit_id,
+            include_closed=args.include_closed, include_legacy=not args.no_legacy,
+            limit=args.limit, offset=args.offset,
+        )}
+    if args.intervention_command == "show":
+        return {"ok": True, "action": "intervention-show", "detail": intervention_detail(store, args.request_id)}
+    if args.intervention_command == "responses":
+        return {"ok": True, "action": "intervention-responses", "responses": intervention_response_history(
+            store, args.request_id, after_revision=args.after_revision, limit=args.limit,
+        )}
+    raise AssertionError(f"Unhandled intervention command: {args.intervention_command}")
 
 
 def _acceptance_evidence(args: argparse.Namespace) -> dict[str, Any]:
@@ -2000,10 +2777,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _portal(args)
         if args.command == "init":
             output, code = _init(args), 0
+        elif args.command == "guide":
+            output, code = _guide(args), 0
         elif args.command == "bootstrap":
             output, code = _bootstrap(args), 0
         elif args.command == "status":
             output, code = _status(args), 0
+        elif args.command == "overview":
+            output, code = _overview(args), 0
+        elif args.command == "cockpit":
+            output, code = _cockpit(args), 0
         elif args.command == "doctor":
             output, code = _doctor(args)
         elif args.command == "validate":
@@ -2059,6 +2842,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             output, code = _approval(args), 0
         elif args.command == "work":
             output, code = _work(args), 0
+        elif args.command == "intervention":
+            output, code = _intervention(args), 0
         elif args.command == "run":
             output = _run(args)
             code = 0 if output["ok"] else 1
@@ -2070,6 +2855,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             output, code = _effect(args), 0
         else:
             raise AssertionError(f"Unhandled command: {args.command}")
+    except (WorkPlanError, InterventionConflictError) as error:
+        _emit({"ok": False, "error": str(error), "error_code": error.code, "details": error.details}, stream=sys.stderr)
+        return 2
     except CommittedRuntimeRecoveryRequired as error:
         recovery = {
             key: error.verification.get(key)
@@ -2089,8 +2877,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             stream=sys.stderr,
         )
         return 2
-    except (CatalogError, ConfigError, ExecutionError, FileExistsError, FileNotFoundError, HandoffError, LessonError, LifecycleError, ManifestError, MigrationError, SchedulerError, StateError, TelemetryError, UpgradeError, ValidationError, WorkflowError, WorkItemError, OSError, ValueError) as error:
+    except (CatalogError, ConfigError, ExecutionError, FileExistsError, FileNotFoundError, HandoffError, InterventionError, LessonError, LifecycleError, ManifestError, MigrationError, SchedulerError, StateError, TelemetryError, UpgradeError, ValidationError, WorkflowError, WorkItemError, OSError, ValueError) as error:
         _emit({"ok": False, "error": str(error)}, stream=sys.stderr)
         return 2
-    _emit(output)
+    if args.command == "guide" and not args.json:
+        sys.stdout.write(_guide_text(output))
+    elif args.command == "overview" and not args.json:
+        sys.stdout.write(format_overview(output))
+    else:
+        _emit(output)
     return code

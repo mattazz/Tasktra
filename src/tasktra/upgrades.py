@@ -383,6 +383,9 @@ def _migration_preview(plan: Mapping[str, object], snapshot_paths: tuple[str, ..
         "blockers": [],
         "mutation": "none",
         "snapshot_paths": list(snapshot_paths),
+        # Snapshot identity must bind the full lifecycle preview.  Pack steps
+        # and write paths alone can be identical for distinct runtime plans.
+        "upgrade_plan_sha256": upgrade_plan_digest(plan),
     }
 
 

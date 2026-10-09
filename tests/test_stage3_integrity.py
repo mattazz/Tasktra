@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from tasktra.state import SCHEMA_VERSION, StateError, StateStore
+from tests.runtime_schema_helpers import peel_schema13_interventions
 
 
 class CurrentStateIntegrityTests(unittest.TestCase):
@@ -155,6 +156,7 @@ class CurrentStateIntegrityTests(unittest.TestCase):
                 try:
                     connection.execute(statement)
                     connection.execute("DROP TABLE authority_seals")
+                    peel_schema13_interventions(connection, target_version=3)
                     connection.execute("PRAGMA user_version=3")
                     connection.commit()
                 finally:
@@ -201,6 +203,7 @@ class CurrentStateIntegrityTests(unittest.TestCase):
             connection = sqlite3.connect(store.path)
             try:
                 connection.execute("DROP TABLE authority_seals")
+                peel_schema13_interventions(connection, target_version=3)
                 connection.execute("PRAGMA user_version=3")
                 connection.commit()
             finally:
@@ -228,6 +231,7 @@ class CurrentStateIntegrityTests(unittest.TestCase):
                 connection.execute("UPDATE work_units SET scope=? WHERE id='work-one'", ('{"paths":["."]}',))
                 connection.execute("DROP TABLE goal_checkpoints")
                 connection.execute("DROP TABLE authority_seals")
+                peel_schema13_interventions(connection, target_version=3)
                 connection.execute("PRAGMA user_version=3")
                 connection.commit()
             finally:
@@ -258,6 +262,7 @@ class CurrentStateIntegrityTests(unittest.TestCase):
             try:
                 connection.execute("UPDATE transition_approvals SET scope='{}' WHERE id='approval-one'")
                 connection.execute("DROP TABLE authority_seals")
+                peel_schema13_interventions(connection, target_version=3)
                 connection.execute("PRAGMA user_version=3")
                 connection.commit()
             finally:

@@ -239,8 +239,11 @@ def preview_schedule(
         raise SchedulerError("schedule preview requires the exact current authority envelope hash")
     if checkpoint_id != unit["checkpoint_id"]:
         raise SchedulerError("schedule checkpoint must exactly match the existing work unit")
-    if goal["status"] not in {"active", "paused"}:
-        raise SchedulerError("schedule preview requires an active or paused existing goal")
+    if goal["status"] not in {"active", "draining", "paused"}:
+        raise SchedulerError("schedule preview requires an active, draining, or paused existing goal")
+    dependencies = store.work_dependencies(goal_id, work_unit_id=work_unit_id, limit=1)
+    if not dependencies["units"][0]["ready"]:
+        raise SchedulerError("work unit prerequisites are incomplete")
 
     lease = {
         "action": "claim-exact-work-unit",

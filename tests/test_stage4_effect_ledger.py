@@ -10,6 +10,7 @@ from tasktra.providers import OperationDescriptor
 from tasktra.operations import operational_status
 from tasktra.state import SCHEMA_VERSION, StateError, StateStore, _now
 from tests.approval_helpers import v3_approval_kwargs
+from tests.runtime_schema_helpers import peel_schema13_interventions
 
 
 NOW = datetime(2031, 1, 1, tzinfo=timezone.utc)
@@ -80,6 +81,7 @@ class ProviderEffectLedgerTests(unittest.TestCase):
             )
             connection.execute("CREATE TRIGGER effect_receipt_events_no_update BEFORE UPDATE ON effect_receipt_events BEGIN SELECT RAISE(ABORT, 'effect receipt events are immutable'); END")
             connection.execute("ALTER TABLE effect_intents DROP COLUMN last_reconciliation_event_id")
+            peel_schema13_interventions(connection, target_version=7)
             connection.execute("PRAGMA user_version=7")
             StateStore._seal_current_state_in_transaction(connection, _now(), existing_only=True)
             connection.commit()

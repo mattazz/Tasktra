@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from tasktra.cli import _catalog_root, _catalog_source_trust, main
+from tasktra.config import load_project_config
 from tasktra.state import SCHEMA_VERSION
 
 
@@ -21,6 +22,41 @@ def run_cli(*arguments: str):
 
 
 class CliTests(unittest.TestCase):
+    def test_guide_is_plain_text_for_people_and_json_for_automation(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                self.assertEqual(main(("guide", "--root", str(root))), 0)
+            self.assertEqual(stderr.getvalue(), "")
+            self.assertIn("Tasktra guide", stdout.getvalue())
+            self.assertIn("tasktra init --preview", stdout.getvalue())
+            self.assertEqual(run_cli("init", "--root", str(root), "--apply")[0], 0)
+            code, payload = run_cli("guide", "--root", str(root), "--json")
+            self.assertEqual((code, payload["initialized"]), (0, True))
+            self.assertIn("tasktra packs recommend", [step["command"] for step in payload["steps"]])
+
+    def test_pack_list_and_preview_first_add_remove(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertEqual(run_cli("init", "--root", str(root), "--apply")[0], 0)
+            catalog_arguments = ("--catalog", str(REPOSITORY_ROOT / "catalog"), "--trust-catalog")
+            code, listed = run_cli("packs", "--root", str(root), "list", *catalog_arguments)
+            self.assertEqual((code, listed["enabled"]), (0, ["core"]))
+            self.assertIn("planning", [item["id"] for item in listed["available"]])
+            code, preview = run_cli("packs", "--root", str(root), "add", "planning", *catalog_arguments)
+            self.assertEqual((code, preview["action"], preview["mutation"]), (0, "pack-add-preview", "none"))
+            self.assertEqual(preview["requested_packs"], ["core", "planning"])
+            self.assertEqual(load_project_config(root).enabled_packs, ("core",))
+            code, applied = run_cli("packs", "--root", str(root), "add", "planning", *catalog_arguments, "--apply")
+            self.assertEqual((code, applied["action"], applied["mutation"]), (0, "pack-add", "project-profile-updated"))
+            self.assertEqual(load_project_config(root).enabled_packs, ("core", "planning"))
+            code, removed = run_cli("packs", "--root", str(root), "remove", "planning", *catalog_arguments, "--apply")
+            self.assertEqual((code, removed["action"], load_project_config(root).enabled_packs), (0, "pack-remove", ("core",)))
+            code, blocked = run_cli("packs", "--root", str(root), "remove", "core", *catalog_arguments)
+            self.assertEqual(code, 2)
+            self.assertIn("cannot be removed", blocked["error"])
+
     def test_editable_install_finds_its_source_catalog_outside_the_checkout(self):
         with TemporaryDirectory() as directory:
             catalog = _catalog_root(Path(directory), None)

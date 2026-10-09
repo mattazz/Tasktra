@@ -6,21 +6,24 @@ import unittest
 
 from tasktra.state import SCHEMA_VERSION, StateError, StateStore
 from tasktra.contracts import validate_named
+from tests.historical_clients import extract_client, run_client
+from tests.runtime_schema_helpers import peel_schema13_interventions
 
 
 class StateTests(unittest.TestCase):
     def test_v11_sealed_ledger_migrates_without_rewriting_legacy_policy(self):
-        with TemporaryDirectory() as directory:
+        with TemporaryDirectory() as fixture_directory, TemporaryDirectory() as directory:
             path = Path(directory) / "state.sqlite"
+            source = extract_client("remote11", Path(fixture_directory) / "remote11")
+            run_client(
+                source,
+                "from tasktra.state import StateStore; import sys; "
+                "store=StateStore(sys.argv[1]); "
+                "store.create_goal(title='Ship',description='Keep the legacy route',goal_id='g1'); "
+                "store.create_work_unit(goal_id='g1',work_unit_id='legacy-work',title='Implement')",
+                str(path),
+            )
             store = StateStore(path)
-            store.create_goal(title="Ship", description="Keep the legacy route", goal_id="g1")
-            store.create_work_unit(goal_id="g1", work_unit_id="legacy-work", title="Implement")
-            connection = sqlite3.connect(path)
-            try:
-                connection.execute("PRAGMA user_version = 11")
-                connection.commit()
-            finally:
-                connection.close()
 
             evidence = store.migrate_with_evidence()
 
@@ -144,6 +147,8 @@ class StateTests(unittest.TestCase):
             StateStore(path).migrate()
             connection = sqlite3.connect(path)
             try:
+                connection.execute("DROP TABLE schedule_resume_idempotency")
+                peel_schema13_interventions(connection, target_version=9)
                 connection.execute("PRAGMA user_version = 9")
                 connection.commit()
             finally:

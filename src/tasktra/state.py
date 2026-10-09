@@ -8,22 +8,23 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from itertools import zip_longest
 import json
 import os
 import hashlib
 from pathlib import Path
 import re
 import sqlite3
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping, Sequence
 from urllib.parse import parse_qsl, urlparse
 from uuid import uuid4
 
 from .identifiers import IdentifierError, require_identifier, require_optional_identifier
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 15
 # The broader lifecycle belongs to the Stage 3 goal engine. Retaining only
 # planned state prevents an incomplete authority envelope from authorizing work.
-GOAL_STATUSES = {"planned", "active", "paused", "blocked", "complete", "stopped"}
+GOAL_STATUSES = {"planned", "active", "draining", "paused", "blocked", "complete", "stopped"}
 WORK_UNIT_STATUSES = {"planned", "eligible", "leased", "retry-wait", "blocked", "approval-required", "failed", "exhausted", "complete", "paused", "stopped"}
 VERIFICATION_POLICIES = {
     "implementation-review", "implementation-deterministic-review", "research-review", "documentation-review", "deterministic-direct",
@@ -48,6 +49,7 @@ _AUTHORITATIVE_TABLE_KEYS: dict[str, tuple[str, ...]] = {
     "goals": ("id",),
     "budgets": ("goal_id",),
     "work_units": ("id",),
+    "work_unit_dependencies": ("work_unit_id", "prerequisite_id"),
     "work_attempts": ("id",),
     "schedule_resume_idempotency": ("idempotency_key",),
     "workflow_evidence": ("work_unit_id",),
@@ -60,6 +62,13 @@ _AUTHORITATIVE_TABLE_KEYS: dict[str, tuple[str, ...]] = {
     "goal_contracts": ("goal_id",),
     "transition_approvals": ("id",),
     "goal_checkpoints": ("goal_id", "checkpoint_id"),
+    "intervention_requests": ("id",),
+    "intervention_responses": ("id",),
+    "intervention_response_heads": ("request_id",),
+    "intervention_closures": ("id",),
+    "codex_run_preparations": ("id",),
+    "codex_run_starts": ("run_id",),
+    "codex_run_finishes": ("run_id",),
 }
 _STATE_MANIFEST_TABLE = "tasktra.current-state"
 _STATE_MANIFEST_ID = "all-authoritative-rows"
@@ -184,6 +193,15 @@ def _authority_row_hash(table: str, row: sqlite3.Row | dict[str, Any]) -> str:
     """Hash all persisted authority-bearing columns, excluding no mutable fields."""
     values = dict(row)
     return hashlib.sha256(_encode({"table": table, "row": values}).encode("utf-8")).hexdigest()
+
+
+def _attempt_binding_sha256(row: sqlite3.Row | dict[str, Any] | None) -> str:
+    if row is None:
+        return "missing"
+    values = dict(row)
+    keys = ("id", "work_unit_id", "attempt_no", "owner_id", "lease_generation", "lease_token_hash",
+            "repository", "revision", "branch", "workspace", "acquired_at")
+    return hashlib.sha256(_encode({key: values[key] for key in keys}).encode("utf-8")).hexdigest()
 
 
 def _decode(value: str | None, default: Any) -> Any:
@@ -317,8 +335,13 @@ class StateStore:
     @contextmanager
     def _connection(self, *, write: bool = True) -> Iterator[sqlite3.Connection]:
         """Open one explicit transaction, serializing writers including migration."""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(self.path, isolation_level=None)
+        if write:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            connection = sqlite3.connect(self.path, isolation_level=None)
+        else:
+            connection = sqlite3.connect(
+                self.path.resolve().as_uri() + "?mode=ro", uri=True, isolation_level=None,
+            )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 5000")
@@ -348,6 +371,8 @@ class StateStore:
         current = int(connection.execute("PRAGMA user_version").fetchone()[0])
         if current > SCHEMA_VERSION:
             raise StateError(f"Database schema {current} is newer than supported {SCHEMA_VERSION}")
+        if 0 < current < SCHEMA_VERSION:
+            StateStore._assert_known_pre15_lineage_in_transaction(connection, current)
         if create_backup and 0 < current < SCHEMA_VERSION:
             StateStore._backup_before_migration(connection, current)
         if current < 1:
@@ -732,6 +757,253 @@ class StateStore:
             connection.execute("PRAGMA user_version = 10")
             current = 10
         if current < 11:
+            existing = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='work_unit_dependencies'"
+            ).fetchone()
+            if existing is None:
+                connection.execute(
+                    "CREATE TABLE work_unit_dependencies ("
+                    "work_unit_id TEXT NOT NULL REFERENCES work_units(id), "
+                    "prerequisite_id TEXT NOT NULL REFERENCES work_units(id), "
+                    "PRIMARY KEY(work_unit_id,prerequisite_id))"
+                )
+            else:
+                if connection.execute("SELECT 1 FROM work_unit_dependencies LIMIT 1").fetchone() is not None:
+                    raise StateError("cannot migrate a pre-existing nonempty work unit dependencies table")
+                columns = connection.execute("PRAGMA table_info(work_unit_dependencies)").fetchall()
+                expected = (
+                    ("work_unit_id", "TEXT", 1, 1),
+                    ("prerequisite_id", "TEXT", 1, 2),
+                )
+                actual = tuple((str(row[1]), str(row[2]).upper(), int(row[3]), int(row[5])) for row in columns)
+                foreign_keys = {
+                    (str(row[3]), str(row[2]), str(row[4]), str(row[5]), str(row[6]), str(row[7]))
+                    for row in connection.execute("PRAGMA foreign_key_list(work_unit_dependencies)")
+                }
+                if actual != expected or foreign_keys != {
+                    ("work_unit_id", "work_units", "id", "NO ACTION", "NO ACTION", "NONE"),
+                    ("prerequisite_id", "work_units", "id", "NO ACTION", "NO ACTION", "NONE"),
+                }:
+                    raise StateError("cannot migrate invalid work unit dependencies table")
+            invalid = connection.execute(
+                "SELECT id,status FROM goals WHERE status NOT IN ('planned','active','paused','blocked','complete','stopped') LIMIT 1"
+            ).fetchone()
+            if invalid is not None:
+                raise StateError(f"cannot migrate invalid schema11 goal status: {invalid['id']}")
+            connection.execute("PRAGMA user_version = 11")
+            current = 11
+        if current < 12:
+            invalid = connection.execute(
+                "SELECT id,status FROM goals WHERE status NOT IN ('planned','active','paused','blocked','complete','stopped') LIMIT 1"
+            ).fetchone()
+            if invalid is not None:
+                raise StateError(f"cannot migrate invalid schema11 goal status: {invalid['id']}")
+            connection.execute("PRAGMA user_version = 12")
+            current = 12
+        if current < 13:
+            # Every v13 object is new. A lower user_version that already
+            # carries one is a malformed/shadow schema, never a partially
+            # upgraded ledger that migration may silently adopt.
+            intervention_tables = (
+                "intervention_requests", "intervention_responses",
+                "intervention_response_heads", "intervention_closures",
+            )
+            intervention_indexes = (
+                "intervention_requests_goal_created", "intervention_requests_unit_created",
+                "work_units_current_intervention", "intervention_responses_request_created",
+                "intervention_response_heads_response", "intervention_closures_closed_at",
+                "intervention_closures_closed_request", "intervention_responses_predecessor_once",
+                "work_unit_dependencies_prerequisite",
+            )
+            intervention_triggers = (
+                "intervention_requests_no_update", "intervention_requests_no_delete",
+                "intervention_responses_no_update", "intervention_responses_no_delete",
+                "intervention_closures_no_update", "intervention_closures_no_delete",
+                "intervention_response_heads_no_delete",
+            )
+            # Remote schema 12 legitimately predates local dependency edges.
+            # Create that independent lineage step before its v13 index is
+            # installed; the sealed pre-migration shape is checked by the
+            # lineage guard in migrate_with_evidence.
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='work_unit_dependencies'"
+            ).fetchone() is None:
+                connection.execute(
+                    "CREATE TABLE work_unit_dependencies ("
+                    "work_unit_id TEXT NOT NULL REFERENCES work_units(id), "
+                    "prerequisite_id TEXT NOT NULL REFERENCES work_units(id), "
+                    "PRIMARY KEY(work_unit_id,prerequisite_id))"
+                )
+            for object_type, names in (("table", intervention_tables), ("index", intervention_indexes), ("trigger", intervention_triggers)):
+                placeholders = ",".join("?" for _ in names)
+                shadow = connection.execute(
+                    f"SELECT name FROM sqlite_master WHERE type=? AND name IN ({placeholders}) ORDER BY name LIMIT 1",
+                    (object_type, *names),
+                ).fetchone()
+                if shadow is not None:
+                    raise StateError(f"cannot migrate schema12 database with pre-existing intervention {object_type}: {shadow[0]}")
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(work_units)")}
+            if "current_intervention_id" in columns:
+                raise StateError("cannot migrate schema12 database with pre-existing current intervention pointer")
+            connection.execute(
+                """CREATE TABLE intervention_requests (
+                    id TEXT PRIMARY KEY,
+                    version INTEGER NOT NULL,
+                    goal_id TEXT NOT NULL REFERENCES goals(id),
+                    work_unit_id TEXT NOT NULL REFERENCES work_units(id),
+                    attempt_id TEXT NOT NULL UNIQUE REFERENCES work_attempts(id),
+                    producer_id TEXT NOT NULL,
+                    outcome_class TEXT NOT NULL CHECK(outcome_class IN ('blocked','approval-required')),
+                    request_json TEXT NOT NULL,
+                    request_sha256 TEXT NOT NULL UNIQUE,
+                    yield_tokens_consumed INTEGER NOT NULL,
+                    yield_elapsed_input_mode TEXT NOT NULL CHECK(yield_elapsed_input_mode IN ('explicit','measured')),
+                    yield_elapsed_input_ms INTEGER,
+                    yield_accounted_elapsed_ms INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    CHECK((yield_elapsed_input_mode='explicit') = (yield_elapsed_input_ms IS NOT NULL))
+                )"""
+            )
+            connection.execute(
+                """CREATE TABLE intervention_responses (
+                    id TEXT PRIMARY KEY,
+                    version INTEGER NOT NULL,
+                    request_id TEXT NOT NULL REFERENCES intervention_requests(id),
+                    request_sha256 TEXT NOT NULL,
+                    revision_no INTEGER NOT NULL CHECK(revision_no >= 1),
+                    previous_response_id TEXT REFERENCES intervention_responses(id),
+                    expected_previous_sha256 TEXT,
+                    responder_kind TEXT NOT NULL CHECK(responder_kind IN ('human','steward')),
+                    responder_id TEXT NOT NULL,
+                    disposition TEXT NOT NULL CHECK(disposition IN ('answered','declined','cancelled')),
+                    response_json TEXT NOT NULL,
+                    response_sha256 TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(request_id,revision_no),
+                    CHECK((revision_no=1 AND previous_response_id IS NULL AND expected_previous_sha256 IS NULL) OR
+                          (revision_no>1 AND previous_response_id IS NOT NULL AND expected_previous_sha256 IS NOT NULL))
+                )"""
+            )
+            connection.execute(
+                """CREATE TABLE intervention_response_heads (
+                    request_id TEXT PRIMARY KEY REFERENCES intervention_requests(id),
+                    current_response_id TEXT NOT NULL UNIQUE REFERENCES intervention_responses(id),
+                    current_response_sha256 TEXT NOT NULL UNIQUE,
+                    revision_no INTEGER NOT NULL CHECK(revision_no >= 1),
+                    updated_at TEXT NOT NULL
+                )"""
+            )
+            connection.execute(
+                """CREATE TABLE intervention_closures (
+                    id TEXT PRIMARY KEY,
+                    request_id TEXT NOT NULL UNIQUE REFERENCES intervention_requests(id),
+                    response_id TEXT NOT NULL UNIQUE REFERENCES intervention_responses(id),
+                    response_sha256 TEXT NOT NULL,
+                    closure_kind TEXT NOT NULL CHECK(closure_kind='requeued'),
+                    requeue_evidence_sha256 TEXT NOT NULL,
+                    envelope_sha256 TEXT NOT NULL,
+                    closed_by TEXT NOT NULL,
+                    closed_at TEXT NOT NULL
+                )"""
+            )
+            connection.execute("ALTER TABLE work_units ADD COLUMN current_intervention_id TEXT REFERENCES intervention_requests(id)")
+            for statement in (
+                "CREATE INDEX intervention_requests_goal_created ON intervention_requests(goal_id,created_at,id)",
+                "CREATE INDEX intervention_requests_unit_created ON intervention_requests(work_unit_id,created_at,id)",
+                "CREATE INDEX work_units_current_intervention ON work_units(current_intervention_id)",
+                "CREATE INDEX intervention_responses_request_created ON intervention_responses(request_id,created_at,id)",
+                "CREATE INDEX intervention_response_heads_response ON intervention_response_heads(current_response_id)",
+                "CREATE INDEX intervention_closures_closed_at ON intervention_closures(closed_at,id)",
+                "CREATE INDEX intervention_closures_closed_request ON intervention_closures(closed_at,request_id)",
+                "CREATE INDEX work_unit_dependencies_prerequisite ON work_unit_dependencies(prerequisite_id,work_unit_id)",
+                "CREATE UNIQUE INDEX intervention_responses_predecessor_once ON intervention_responses(previous_response_id) WHERE previous_response_id IS NOT NULL",
+                "CREATE TRIGGER intervention_requests_no_update BEFORE UPDATE ON intervention_requests BEGIN SELECT RAISE(ABORT, 'intervention requests are immutable'); END",
+                "CREATE TRIGGER intervention_requests_no_delete BEFORE DELETE ON intervention_requests BEGIN SELECT RAISE(ABORT, 'intervention requests are immutable'); END",
+                "CREATE TRIGGER intervention_responses_no_update BEFORE UPDATE ON intervention_responses BEGIN SELECT RAISE(ABORT, 'intervention responses are immutable'); END",
+                "CREATE TRIGGER intervention_responses_no_delete BEFORE DELETE ON intervention_responses BEGIN SELECT RAISE(ABORT, 'intervention responses are immutable'); END",
+                "CREATE TRIGGER intervention_closures_no_update BEFORE UPDATE ON intervention_closures BEGIN SELECT RAISE(ABORT, 'intervention closures are immutable'); END",
+                "CREATE TRIGGER intervention_closures_no_delete BEFORE DELETE ON intervention_closures BEGIN SELECT RAISE(ABORT, 'intervention closures are immutable'); END",
+                "CREATE TRIGGER intervention_response_heads_no_delete BEFORE DELETE ON intervention_response_heads BEGIN SELECT RAISE(ABORT, 'intervention response heads are immutable except for compare-and-swap updates'); END",
+            ):
+                connection.execute(statement)
+            connection.execute("PRAGMA user_version = 13")
+            current = 13
+        if current < 14:
+            # Schema 14 is intentionally fail-closed: a v13 ledger which
+            # already has any execution receipt object cannot be safely
+            # distinguished from a partial or attacker-created migration.
+            receipt_tables = ("codex_run_preparations", "codex_run_starts", "codex_run_finishes")
+            receipt_indexes = (
+                "codex_run_preparations_attempt_run", "codex_run_preparations_goal_created",
+                "codex_run_starts_agent", "codex_run_finishes_recorded",
+            )
+            receipt_triggers = (
+                "codex_run_preparations_no_update", "codex_run_preparations_no_delete",
+                "codex_run_starts_no_update", "codex_run_starts_no_delete",
+                "codex_run_finishes_no_update", "codex_run_finishes_no_delete",
+            )
+            for object_type, names in (("table", receipt_tables), ("index", receipt_indexes), ("trigger", receipt_triggers)):
+                placeholders = ",".join("?" for _ in names)
+                shadow = connection.execute(
+                    f"SELECT name FROM sqlite_master WHERE type=? AND name IN ({placeholders}) ORDER BY name LIMIT 1",
+                    (object_type, *names),
+                ).fetchone()
+                if shadow is not None:
+                    raise StateError(f"cannot migrate schema13 database with pre-existing codex run {object_type}: {shadow[0]}")
+            attempt_columns = {row[1] for row in connection.execute("PRAGMA table_info(work_attempts)")}
+            if "token_accounting_source" in attempt_columns:
+                raise StateError("cannot migrate schema13 database with pre-existing token accounting source")
+            connection.execute(
+                "ALTER TABLE work_attempts ADD COLUMN token_accounting_source TEXT NOT NULL "
+                "DEFAULT 'legacy-unspecified' CHECK(token_accounting_source IN "
+                "('legacy-unspecified','pending','host-measured','caller-declared','unavailable'))"
+            )
+            connection.execute(
+                """CREATE TABLE codex_run_preparations (
+                    id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL REFERENCES work_attempts(id),
+                    run_no INTEGER NOT NULL CHECK(run_no>=1), idempotency_key TEXT NOT NULL UNIQUE,
+                    prepared_by TEXT NOT NULL, goal_id TEXT NOT NULL REFERENCES goals(id),
+                    work_unit_id TEXT NOT NULL REFERENCES work_units(id), lease_generation INTEGER NOT NULL,
+                    envelope_sha256 TEXT NOT NULL, repository TEXT, revision TEXT, branch TEXT, workspace TEXT,
+                    role TEXT NOT NULL, requested_model TEXT, requested_reasoning_effort TEXT,
+                    sandbox_mode TEXT NOT NULL, request_sha256 TEXT NOT NULL, handoff_sha256 TEXT,
+                    plan_sha256 TEXT NOT NULL, brief_sha256 TEXT NOT NULL,
+                    requested_task_name TEXT NOT NULL UNIQUE, prepared_at TEXT NOT NULL,
+                    lease_token_char_length INTEGER NOT NULL CHECK(lease_token_char_length BETWEEN 32 AND 512),
+                    UNIQUE(attempt_id,run_no))"""
+            )
+            connection.execute(
+                """CREATE TABLE codex_run_starts (
+                    run_id TEXT PRIMARY KEY REFERENCES codex_run_preparations(id),
+                    host_canonical_name TEXT NOT NULL UNIQUE, host_agent_id TEXT UNIQUE,
+                    observed_by TEXT NOT NULL, recorded_at TEXT NOT NULL)"""
+            )
+            connection.execute(
+                """CREATE TABLE codex_run_finishes (
+                    run_id TEXT PRIMARY KEY REFERENCES codex_run_starts(run_id),
+                    outcome TEXT NOT NULL CHECK(outcome IN ('completed','failed','interrupted','needs-attention')),
+                    result_status TEXT NOT NULL CHECK(result_status IN ('observed','unavailable')),
+                    result_sha256 TEXT, usage_status TEXT NOT NULL CHECK(usage_status IN ('measured','unavailable')),
+                    input_tokens INTEGER, output_tokens INTEGER, observed_by TEXT NOT NULL, recorded_at TEXT NOT NULL,
+                    CHECK((result_status='observed' AND result_sha256 IS NOT NULL) OR (result_status='unavailable' AND result_sha256 IS NULL)),
+                    CHECK((usage_status='measured' AND input_tokens IS NOT NULL AND output_tokens IS NOT NULL AND input_tokens>=0 AND output_tokens>=0) OR (usage_status='unavailable' AND input_tokens IS NULL AND output_tokens IS NULL)))"""
+            )
+            for statement in (
+                "CREATE INDEX codex_run_preparations_attempt_run ON codex_run_preparations(attempt_id,run_no)",
+                "CREATE INDEX codex_run_preparations_goal_created ON codex_run_preparations(goal_id,prepared_at,id)",
+                "CREATE UNIQUE INDEX codex_run_starts_agent ON codex_run_starts(host_agent_id) WHERE host_agent_id IS NOT NULL",
+                "CREATE INDEX codex_run_finishes_recorded ON codex_run_finishes(recorded_at,run_id)",
+                "CREATE TRIGGER codex_run_preparations_no_update BEFORE UPDATE ON codex_run_preparations BEGIN SELECT RAISE(ABORT, 'codex run preparations are immutable'); END",
+                "CREATE TRIGGER codex_run_preparations_no_delete BEFORE DELETE ON codex_run_preparations BEGIN SELECT RAISE(ABORT, 'codex run preparations are immutable'); END",
+                "CREATE TRIGGER codex_run_starts_no_update BEFORE UPDATE ON codex_run_starts BEGIN SELECT RAISE(ABORT, 'codex run starts are immutable'); END",
+                "CREATE TRIGGER codex_run_starts_no_delete BEFORE DELETE ON codex_run_starts BEGIN SELECT RAISE(ABORT, 'codex run starts are immutable'); END",
+                "CREATE TRIGGER codex_run_finishes_no_update BEFORE UPDATE ON codex_run_finishes BEGIN SELECT RAISE(ABORT, 'codex run finishes are immutable'); END",
+                "CREATE TRIGGER codex_run_finishes_no_delete BEFORE DELETE ON codex_run_finishes BEGIN SELECT RAISE(ABORT, 'codex run finishes are immutable'); END",
+            ):
+                connection.execute(statement)
+            connection.execute("PRAGMA user_version = 14")
+            current = 14
+        if current < 15:
             columns = {row[1] for row in connection.execute("PRAGMA table_info(work_units)")}
             if "verification_policy" not in columns:
                 # A legacy row always retains the published Stage 2 path.  Do
@@ -741,13 +1013,12 @@ class StateStore:
                 )
             invalid = connection.execute(
                 "SELECT id FROM work_units WHERE verification_policy NOT IN "
-                "('implementation-review','research-review','documentation-review','deterministic-direct') LIMIT 1"
+                "('implementation-review','implementation-deterministic-review',"
+                "'research-review','documentation-review','deterministic-direct') LIMIT 1"
             ).fetchone()
             if invalid is not None:
                 raise StateError(f"cannot migrate invalid work-unit verification policy: {invalid['id']}")
-            connection.execute("PRAGMA user_version = 11")
-            current = 11
-        if current < 12:
+        if current < 15:
             # Version 12 adds an explicit, shorter implementation route only
             # for work units whose authority names it.  Existing rows retain
             # their recorded policy; no title, outcome, or missing tester is
@@ -767,9 +1038,65 @@ class StateStore:
             ).fetchone()
             if invalid is not None:
                 raise StateError(f"cannot migrate invalid work-unit verification policy: {invalid['id']}")
-            connection.execute("PRAGMA user_version = 12")
-            current = 12
+            connection.execute("PRAGMA user_version = 15")
+            current = 15
         return SCHEMA_VERSION
+
+    @staticmethod
+    def _assert_known_pre15_lineage_in_transaction(connection: sqlite3.Connection, version: int) -> None:
+        """Reject colliding historical versions that are not complete known lineages."""
+        if 10 <= version < 15:
+            from .schema_history import KNOWN_SCHEMAS, schema_signature
+
+            if schema_signature(connection) not in KNOWN_SCHEMAS.get(version, ()):
+                raise StateError(f"schema{version} does not match a complete known lineage structure")
+        tables = {str(row[0]) for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )}
+        work_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(work_units)")}
+        evidence_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(workflow_evidence)")}
+        local_dependencies = "work_unit_dependencies" in tables
+        remote_policy = "verification_policy" in work_columns
+        remote_evidence = "acceptance_checks" in work_columns and "completion_evidence_json" in evidence_columns
+        intervention_names = {
+            "intervention_requests", "intervention_responses", "intervention_response_heads", "intervention_closures",
+        }
+        receipt_names = {"codex_run_preparations", "codex_run_starts", "codex_run_finishes"}
+        local_interventions = intervention_names <= tables and "current_intervention_id" in work_columns
+        local_receipts = receipt_names <= tables and "token_accounting_source" in {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(work_attempts)")
+        }
+        has_later_artifact = (
+            local_dependencies or remote_policy or remote_evidence
+            or bool(intervention_names & tables) or "current_intervention_id" in work_columns
+            or bool(receipt_names & tables) or "token_accounting_source" in {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(work_attempts)")
+            }
+        )
+        if version < 11:
+            if has_later_artifact:
+                raise StateError("pre-schema11 database contains a later-lineage artifact")
+            return
+        if version == 11:
+            local = local_dependencies and not remote_policy and not remote_evidence and not local_interventions and not local_receipts
+            remote = not local_dependencies and remote_policy and not remote_evidence and not local_interventions and not local_receipts
+            if not (local or remote):
+                raise StateError("schema11 database does not match exactly one known lineage")
+            return
+        if version == 12:
+            local = local_dependencies and not remote_policy and not remote_evidence and not local_interventions and not local_receipts
+            remote = not local_dependencies and remote_policy and remote_evidence and not local_interventions and not local_receipts
+            if not (local or remote):
+                raise StateError("schema12 database does not match a complete known lineage")
+            return
+        if version == 13:
+            if not (local_dependencies and local_interventions and not local_receipts and not remote_policy and not remote_evidence):
+                raise StateError("schema13 database does not match the local published lineage")
+            return
+        if version == 14 and not (
+            local_dependencies and local_interventions and local_receipts and not remote_policy and not remote_evidence
+        ):
+            raise StateError("schema14 database does not match the local published lineage")
 
     @staticmethod
     def _backup_before_migration(connection: sqlite3.Connection, version: int) -> Path:
@@ -818,6 +1145,7 @@ class StateStore:
                 self._assert_current_state_integrity_in_transaction(
                     connection, existing_only=True,
                 )
+                self._assert_known_pre15_lineage_in_transaction(connection, version)
                 verified_sealed_state = True
             backup: Path | None = None
             if 0 < version < SCHEMA_VERSION:
@@ -958,22 +1286,32 @@ class StateStore:
             str(row[0])
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
         } if existing_only else set(_AUTHORITATIVE_TABLE_KEYS)
-        for table in _AUTHORITATIVE_TABLE_KEYS:
+        for table in sorted(_AUTHORITATIVE_TABLE_KEYS):
             if table not in existing:
                 continue
-            for row in connection.execute(f"SELECT * FROM {table}"):
+            keys = _AUTHORITATIVE_TABLE_KEYS[table]
+            order = ",".join(keys)
+            for row in connection.execute(f"SELECT * FROM {table} ORDER BY {order}"):
                 yield table, StateStore._authoritative_row_id(table, row), row
 
     @staticmethod
     def _state_manifest_hash(connection: sqlite3.Connection, *, existing_only: bool = False) -> str:
-        rows = [
-            {"table": table, "row_id": row_id, "row_hash": _authority_row_hash(table, row)}
-            for table, row_id, row in StateStore._iter_authoritative_rows(
-                connection, existing_only=existing_only,
-            )
-        ]
-        rows.sort(key=lambda item: (item["table"], item["row_id"]))
-        return hashlib.sha256(_encode(rows).encode("utf-8")).hexdigest()
+        # This produces the exact bytes of the former materialized
+        # ``_encode(sorted(rows))`` algorithm without retaining every sealed
+        # row in memory.  Table and primary-key order is the canonical
+        # (table,row_id) order used by the previous sort.
+        digest = hashlib.sha256()
+        digest.update(b"[")
+        first = True
+        for table, row_id, row in StateStore._iter_authoritative_rows(
+            connection, existing_only=existing_only,
+        ):
+            if not first:
+                digest.update(b",")
+            digest.update(_encode({"table": table, "row_id": row_id, "row_hash": _authority_row_hash(table, row)}).encode("utf-8"))
+            first = False
+        digest.update(b"]")
+        return digest.hexdigest()
 
     @staticmethod
     def _latest_seal_hash(connection: sqlite3.Connection, table: str, row_id: str) -> str | None:
@@ -989,16 +1327,360 @@ class StateStore:
     ) -> None:
         """Fail closed before a normal mutation can ratify direct SQL tampering."""
         try:
-            rows = list(StateStore._iter_authoritative_rows(connection, existing_only=existing_only))
-        except sqlite3.OperationalError as error:
+            for table, row_id, row in StateStore._iter_authoritative_rows(connection, existing_only=existing_only):
+                if StateStore._latest_seal_hash(connection, table, row_id) != _authority_row_hash(table, row):
+                    raise StateError(f"authoritative state is unsealed or tampered ({table}:{row_id})")
+            manifest = StateStore._latest_seal_hash(connection, _STATE_MANIFEST_TABLE, _STATE_MANIFEST_ID)
+            if manifest != StateStore._state_manifest_hash(connection, existing_only=existing_only):
+                raise StateError("authoritative current-state manifest is unsealed or tampered")
+        except sqlite3.Error as error:
             raise StateError("runtime state is missing an authoritative table") from error
-        for table, row_id, row in rows:
-            if StateStore._latest_seal_hash(connection, table, row_id) != _authority_row_hash(table, row):
-                raise StateError(f"authoritative state is unsealed or tampered ({table}:{row_id})")
-        manifest = StateStore._latest_seal_hash(connection, _STATE_MANIFEST_TABLE, _STATE_MANIFEST_ID)
-        if manifest != StateStore._state_manifest_hash(connection, existing_only=existing_only):
-            raise StateError("authoritative current-state manifest is unsealed or tampered")
+        if int(connection.execute("PRAGMA user_version").fetchone()[0]) >= 13:
+            StateStore._assert_intervention_integrity_in_transaction(connection)
+        if int(connection.execute("PRAGMA user_version").fetchone()[0]) >= 14:
+            StateStore._assert_codex_run_integrity_in_transaction(connection)
 
+    @staticmethod
+    def _assert_intervention_integrity_in_transaction(connection: sqlite3.Connection) -> None:
+        """Validate the relational facts that hashes and foreign keys cannot express."""
+        try:
+            from .interventions import (
+                InterventionError,
+                canonical_intervention_request,
+                canonical_intervention_response,
+                intervention_request_sha256,
+                intervention_response_sha256,
+            )
+        except ImportError as error:  # pragma: no cover - package must be complete
+            raise StateError("intervention validation is unavailable") from error
+        try:
+            for request in connection.execute("SELECT * FROM intervention_requests ORDER BY id"):
+                request_id = str(request["id"])
+                payload = _decode(request["request_json"], {})
+                if (
+                    canonical_intervention_request(payload) != request["request_json"]
+                    or intervention_request_sha256(payload) != request["request_sha256"]
+                    or payload["request_id"] != request_id or payload["version"] != request["version"]
+                    or payload["source"] != {
+                        "goal_id": request["goal_id"], "work_unit_id": request["work_unit_id"], "attempt_id": request["attempt_id"],
+                    }
+                    or payload["producer"]["actor_id"] != request["producer_id"]
+                    or payload["outcome_class"] != request["outcome_class"]
+                ):
+                    raise ValueError("request identity does not match its immutable row")
+                attempt = connection.execute(
+                    """SELECT a.*,u.goal_id,u.id AS unit_id FROM work_attempts a
+                       JOIN work_units u ON u.id=a.work_unit_id WHERE a.id=?""", (request["attempt_id"],)
+                ).fetchone()
+                if (
+                    attempt is None or attempt["status"] != "finished" or attempt["goal_id"] != request["goal_id"]
+                    or attempt["unit_id"] != request["work_unit_id"] or attempt["owner_id"] != request["producer_id"]
+                    or attempt["outcome_class"] != request["outcome_class"] or attempt["tokens_consumed"] != request["yield_tokens_consumed"]
+                    or attempt["elapsed_ms"] != request["yield_accounted_elapsed_ms"]
+                    or attempt["ended_at"] != request["created_at"]
+                    or _decode(attempt["outcome_json"], {}) != {
+                        "intervention_request_id": request_id, "request_sha256": request["request_sha256"],
+                        "tokens_consumed": request["yield_tokens_consumed"], "elapsed_input_mode": request["yield_elapsed_input_mode"],
+                        "elapsed_input_ms": request["yield_elapsed_input_ms"], "accounted_elapsed_ms": request["yield_accounted_elapsed_ms"],
+                    }
+                ):
+                    raise ValueError("request is not bound to its finished attempt")
+                explicit = request["yield_elapsed_input_mode"] == "explicit"
+                if explicit != (request["yield_elapsed_input_ms"] is not None):
+                    raise ValueError("request elapsed input mode is invalid")
+                previous_response = None
+                latest_response = None
+                for index, response in enumerate(connection.execute(
+                    "SELECT * FROM intervention_responses WHERE request_id=? ORDER BY revision_no", (request_id,)
+                ), start=1):
+                    payload = _decode(response["response_json"], {})
+                    expected_previous = previous_response
+                    if (
+                        int(response["revision_no"]) != index
+                        or canonical_intervention_response(payload) != response["response_json"]
+                        or intervention_response_sha256(payload) != response["response_sha256"]
+                        or payload["response_id"] != response["id"] or payload["version"] != response["version"]
+                        or payload["request"] != {"request_id": request_id, "request_sha256": request["request_sha256"]}
+                        or payload["responder"] != {"kind": response["responder_kind"], "actor_id": response["responder_id"]}
+                        or payload["disposition"] != response["disposition"]
+                        or response["request_sha256"] != request["request_sha256"]
+                        or (expected_previous is None and (response["previous_response_id"] is not None or response["expected_previous_sha256"] is not None))
+                        or (expected_previous is None and payload["expected_current_response"] is not None)
+                        or (expected_previous is not None and (
+                            response["previous_response_id"] != expected_previous["id"]
+                            or response["expected_previous_sha256"] != expected_previous["response_sha256"]
+                            or payload["expected_current_response"] != {
+                                "response_id": expected_previous["id"],
+                                "response_sha256": expected_previous["response_sha256"],
+                            }
+                        ))
+                        or (request["outcome_class"] == "approval-required" and response["responder_kind"] != "human")
+                    ):
+                        raise ValueError("response chain is invalid")
+                    previous_response = response
+                    latest_response = response
+                head = connection.execute(
+                    "SELECT * FROM intervention_response_heads WHERE request_id=?", (request_id,)
+                ).fetchone()
+                if latest_response is None:
+                    if head is not None:
+                        raise ValueError("empty response history has a head")
+                elif (
+                    head is None or head["current_response_id"] != latest_response["id"]
+                    or head["current_response_sha256"] != latest_response["response_sha256"]
+                    or int(head["revision_no"]) != int(latest_response["revision_no"])
+                ):
+                    raise ValueError("response head does not match latest revision")
+                closure = connection.execute("SELECT * FROM intervention_closures WHERE request_id=?", (request_id,)).fetchone()
+                unit = connection.execute("SELECT * FROM work_units WHERE id=?", (request["work_unit_id"],)).fetchone()
+                if unit is None:
+                    raise ValueError("request work unit is absent")
+                if closure is None:
+                    if (
+                        unit["current_intervention_id"] != request_id
+                        or unit["status"] != request["outcome_class"]
+                    ):
+                        raise ValueError("unclosed request is not the current unit intervention")
+                else:
+                    response = connection.execute("SELECT * FROM intervention_responses WHERE id=?", (closure["response_id"],)).fetchone()
+                    if (
+                        response is None or head is None or head["current_response_id"] != closure["response_id"]
+                        or response["request_id"] != request_id or response["response_sha256"] != closure["response_sha256"]
+                        or response["disposition"] != "answered" or unit["current_intervention_id"] == request_id
+                    ):
+                        raise ValueError("closure is not bound to the answered current response")
+            for unit in connection.execute(
+                """SELECT u.id,u.goal_id,r.work_unit_id,r.goal_id AS request_goal_id,c.id AS closure_id
+                   FROM work_units u JOIN intervention_requests r ON r.id=u.current_intervention_id
+                   LEFT JOIN intervention_closures c ON c.request_id=r.id
+                   WHERE u.current_intervention_id IS NOT NULL ORDER BY u.id"""
+            ):
+                if (
+                    unit["work_unit_id"] != unit["id"] or unit["request_goal_id"] != unit["goal_id"]
+                    or unit["closure_id"] is not None
+                ):
+                    raise ValueError("work unit points to an unrelated or closed intervention")
+            StateStore._assert_intervention_audit_bindings_in_transaction(connection)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError, sqlite3.Error, InterventionError) as error:
+            raise StateError(f"intervention integrity verification failed: {error}") from error
+
+    @staticmethod
+    def _assert_intervention_audit_bindings_in_transaction(connection: sqlite3.Connection) -> None:
+        """Stream exact event-to-row bindings without retaining audit or history rows."""
+        def paired(expected_sql: str, audit_sql: str, check: Any) -> None:
+            expected_rows = connection.execute(expected_sql)
+            audit_rows = connection.execute(audit_sql)
+            for expected, event in zip_longest(expected_rows, audit_rows):
+                if expected is None or event is None:
+                    raise ValueError("intervention audit event count does not match immutable rows")
+                payload = _decode(event["payload"], {})
+                if not check(expected, event, payload):
+                    raise ValueError("intervention audit event does not match its immutable row")
+
+        paired(
+            "SELECT * FROM intervention_requests ORDER BY id",
+            "SELECT * FROM audit_events WHERE event_type='intervention.requested' ORDER BY json_extract(payload,'$.request_id'),sequence",
+            lambda row, event, payload: event["goal_id"] == row["goal_id"] and event["work_unit_id"] == row["work_unit_id"] and payload == {
+                "request_id": row["id"], "request_sha256": row["request_sha256"], "attempt_id": row["attempt_id"],
+                "producer_id": row["producer_id"], "outcome_class": row["outcome_class"],
+                "requires_human_approval": row["outcome_class"] == "approval-required",
+                "timestamp": row["created_at"],
+            },
+        )
+        paired(
+            "SELECT * FROM intervention_requests ORDER BY id",
+            """SELECT * FROM audit_events WHERE event_type='work.finished'
+               AND json_type(payload,'$.request_id')='text' ORDER BY json_extract(payload,'$.request_id'),sequence""",
+            lambda row, event, payload: event["goal_id"] == row["goal_id"] and event["work_unit_id"] == row["work_unit_id"] and payload == {
+                "attempt_id": row["attempt_id"], "outcome": row["outcome_class"],
+                "request_id": row["id"], "request_sha256": row["request_sha256"], "timestamp": row["created_at"],
+            },
+        )
+        paired(
+            """SELECT s.*,r.goal_id,r.work_unit_id FROM intervention_responses s
+               JOIN intervention_requests r ON r.id=s.request_id ORDER BY s.id""",
+            "SELECT * FROM audit_events WHERE event_type='intervention.responded' ORDER BY json_extract(payload,'$.response_id'),sequence",
+            lambda row, event, payload: event["goal_id"] == row["goal_id"] and event["work_unit_id"] == row["work_unit_id"]
+            and payload == {
+                "request_id": row["request_id"], "request_sha256": row["request_sha256"], "response_id": row["id"],
+                "response_sha256": row["response_sha256"], "revision_no": row["revision_no"],
+                "previous_response_id": row["previous_response_id"], "previous_response_sha256": row["expected_previous_sha256"],
+                "responder_id": row["responder_id"], "responder_kind": row["responder_kind"], "disposition": row["disposition"],
+                "timestamp": row["created_at"],
+            },
+        )
+        paired(
+            """SELECT c.*,r.goal_id,r.work_unit_id,r.request_sha256,r.outcome_class,s.revision_no FROM intervention_closures c
+               JOIN intervention_requests r ON r.id=c.request_id
+               JOIN intervention_responses s ON s.id=c.response_id ORDER BY c.request_id""",
+            """SELECT * FROM audit_events WHERE event_type='work.requeued'
+               AND json_type(payload,'$.request_id')='text' ORDER BY json_extract(payload,'$.request_id'),sequence""",
+            lambda row, event, payload: event["goal_id"] == row["goal_id"] and event["work_unit_id"] == row["work_unit_id"] and payload == {
+                "performer_id": row["closed_by"], "previous_status": row["outcome_class"],
+                "request_id": row["request_id"], "request_sha256": row["request_sha256"],
+                "response_id": row["response_id"], "response_sha256": row["response_sha256"], "response_revision_no": row["revision_no"],
+                "closure_id": row["id"], "envelope_sha256": row["envelope_sha256"],
+                "evidence_sha256": row["requeue_evidence_sha256"], "timestamp": row["closed_at"],
+            },
+        )
+
+    @staticmethod
+    def _assert_codex_run_integrity_in_transaction(connection: sqlite3.Connection) -> None:
+        """Bind every immutable execution receipt to its minimal audit event."""
+        def contains_attempt_token(value: str | None, token_hash: str, token_length: int) -> bool:
+            if not isinstance(value, str):
+                return False
+            candidates = [value]
+            candidates.extend(value[index:index + token_length] for index in range(max(0, len(value) - token_length + 1)))
+            return any(hashlib.sha256(candidate.encode("utf-8")).hexdigest() == token_hash for candidate in candidates)
+        def canonical_timestamp(value: Any) -> bool:
+            if not isinstance(value, str):
+                return False
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+            except (TypeError, ValueError):
+                return False
+            return parsed.isoformat(timespec="seconds").replace("+00:00", "Z") == value
+
+        def canonical_identifier(value: Any) -> bool:
+            try:
+                require_identifier(value)
+            except IdentifierError:
+                return False
+            return True
+
+        def canonical_host_name(value: Any, requested_task_name: Any) -> bool:
+            return (isinstance(value, str) and len(value) <= 256
+                    and re.fullmatch(r"(?:/[a-z][a-z0-9_]*(?:/[a-z][a-z0-9_]*)*|[a-z][a-z0-9_]*)", value) is not None
+                    and value.rsplit("/", 1)[-1] == requested_task_name)
+
+        def bounded_profile(value: Any, *, required: bool) -> bool:
+            if value is None:
+                return not required
+            return isinstance(value, str) and bool(value) and len(value) <= 200 and not any(ord(char) < 32 for char in value)
+        def paired(expected_sql: str, audit_sql: str, check: Any) -> None:
+            expected_rows = connection.execute(expected_sql)
+            audit_rows = connection.execute(audit_sql)
+            for expected, event in zip_longest(expected_rows, audit_rows):
+                if expected is None or event is None:
+                    raise StateError("codex run audit event count does not match immutable rows")
+                if not check(expected, event, _decode(event["payload"], {})):
+                    raise StateError("codex run audit event does not match immutable row")
+
+        for table in ("codex_run_starts", "codex_run_finishes"):
+            orphan = connection.execute(
+                f"SELECT receipt.run_id FROM {table} AS receipt WHERE NOT EXISTS "
+                "(SELECT 1 FROM codex_run_preparations AS preparation "
+                "WHERE preparation.id = receipt.run_id) LIMIT 1"
+            ).fetchone()
+            if orphan is not None:
+                raise StateError("Codex receipt is not bound to a preparation")
+        paired(
+            "SELECT * FROM codex_run_preparations ORDER BY id",
+            "SELECT * FROM audit_events WHERE event_type='codex_run.prepared' ORDER BY json_extract(payload,'$.run_id'),sequence",
+            lambda row, event, payload: event["goal_id"] == row["goal_id"] and event["work_unit_id"] == row["work_unit_id"] and payload == {
+                "run_id": row["id"], "attempt_id": row["attempt_id"], "run_no": row["run_no"],
+                "idempotency_key": row["idempotency_key"], "requested_task_name": row["requested_task_name"],
+                "request_sha256": row["request_sha256"], "handoff_sha256": row["handoff_sha256"],
+                "plan_sha256": row["plan_sha256"], "brief_sha256": row["brief_sha256"], "prepared_at": row["prepared_at"],
+                "preparation_row_sha256": _authority_row_hash("codex_run_preparations", row),
+                "attempt_binding_sha256": _attempt_binding_sha256(connection.execute("SELECT * FROM work_attempts WHERE id=?", (row["attempt_id"],)).fetchone()),
+            },
+        )
+        for prep in connection.execute("SELECT * FROM codex_run_preparations ORDER BY attempt_id,run_no"):
+            attempt = connection.execute("SELECT * FROM work_attempts WHERE id=?", (prep["attempt_id"],)).fetchone()
+            unit = None if attempt is None else connection.execute("SELECT goal_id FROM work_units WHERE id=?", (attempt["work_unit_id"],)).fetchone()
+            if attempt is None or unit is None or prep["goal_id"] != unit["goal_id"] or prep["prepared_by"] != attempt["owner_id"] or any(prep[key] != attempt[key] for key in ("work_unit_id", "lease_generation", "repository", "revision", "branch", "workspace")):
+                raise StateError("Codex preparation is not bound to its originating attempt")
+            expected_name = re.sub(r"[^a-z0-9_]+", "_", f"codex_{hashlib.sha256(prep['attempt_id'].encode('utf-8')).hexdigest()[:16]}_{prep['run_no']}_{prep['role']}".lower()).strip("_")
+            digests = (prep["envelope_sha256"], prep["request_sha256"], prep["plan_sha256"], prep["brief_sha256"])
+            metadata_values = tuple(value for value in dict(prep).values() if isinstance(value, str))
+            attempt_token_hash = attempt["lease_token_hash"]
+            if any(contains_attempt_token(value, attempt_token_hash, prep["lease_token_char_length"]) for value in metadata_values):
+                raise StateError("Codex preparation contains a lease token")
+            if (not isinstance(prep["lease_token_char_length"], int) or not 32 <= prep["lease_token_char_length"] <= 512
+                    or prep["requested_task_name"] != expected_name or not canonical_timestamp(prep["prepared_at"])
+                    or not all(canonical_identifier(prep[key]) for key in ("id", "attempt_id", "idempotency_key", "prepared_by", "goal_id", "work_unit_id"))
+                    or not all(bounded_profile(prep[key], required=key in {"role", "sandbox_mode"}) for key in ("role", "requested_model", "requested_reasoning_effort", "sandbox_mode"))
+                    or any(value is not None and (not isinstance(value, str) or len(value) > 4096 or any(ord(char) < 32 for char in value)) for value in (prep["repository"], prep["revision"], prep["branch"], prep["workspace"]))
+                    or any(not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None for value in digests)
+                    or (prep["handoff_sha256"] is not None and re.fullmatch(r"[0-9a-f]{64}", prep["handoff_sha256"]) is None)):
+                raise StateError("Codex preparation has invalid immutable metadata")
+            prior = connection.execute("SELECT id FROM codex_run_preparations WHERE attempt_id=? AND run_no=?", (prep["attempt_id"], int(prep["run_no"]) - 1)).fetchone()
+            if int(prep["run_no"]) < 1 or (int(prep["run_no"]) > 1 and prior is None) or (prior is not None and connection.execute("SELECT 1 FROM codex_run_finishes WHERE run_id=?", (prior["id"],)).fetchone() is None):
+                raise StateError("Codex preparation sequence is invalid")
+            event = connection.execute("SELECT sequence FROM audit_events WHERE event_type='codex_run.prepared' AND json_extract(payload,'$.run_id')=?", (prep["id"],)).fetchone()
+            contract = None if event is None else connection.execute("SELECT payload FROM audit_events WHERE goal_id=? AND event_type='goal.contract_defined' AND sequence<? ORDER BY sequence DESC LIMIT 1", (prep["goal_id"], event["sequence"])).fetchone()
+            if contract is None or _decode(contract["payload"], {}).get("envelope_sha256") != prep["envelope_sha256"]:
+                raise StateError("Codex preparation envelope does not match preceding contract")
+        for receipt in connection.execute(
+            """SELECT s.host_canonical_name,s.host_agent_id,s.observed_by,a.lease_token_hash,p.lease_token_char_length
+               FROM codex_run_starts s JOIN codex_run_preparations p ON p.id=s.run_id
+               JOIN work_attempts a ON a.id=p.attempt_id"""
+        ):
+            if any(contains_attempt_token(receipt[key], receipt["lease_token_hash"], receipt["lease_token_char_length"])
+                   for key in ("host_canonical_name", "host_agent_id", "observed_by")):
+                raise StateError("Codex start receipt contains a lease token")
+        for receipt in connection.execute(
+            """SELECT f.observed_by,a.lease_token_hash,p.lease_token_char_length FROM codex_run_finishes f
+               JOIN codex_run_preparations p ON p.id=f.run_id JOIN work_attempts a ON a.id=p.attempt_id"""
+        ):
+            if contains_attempt_token(receipt["observed_by"], receipt["lease_token_hash"], receipt["lease_token_char_length"]):
+                raise StateError("Codex finish receipt contains a lease token")
+        for receipt in connection.execute(
+            "SELECT s.*,p.requested_task_name FROM codex_run_starts s JOIN codex_run_preparations p ON p.id=s.run_id"
+        ):
+            if (not canonical_identifier(receipt["run_id"]) or not canonical_identifier(receipt["observed_by"])
+                    or (receipt["host_agent_id"] is not None and not canonical_identifier(receipt["host_agent_id"]))
+                    or not canonical_host_name(receipt["host_canonical_name"], receipt["requested_task_name"])
+                    or not canonical_timestamp(receipt["recorded_at"])):
+                raise StateError("Codex start receipt has invalid persisted metadata")
+        for receipt in connection.execute("SELECT * FROM codex_run_finishes"):
+            try:
+                from .codex_runs import CodexRunError, validate_finish
+                validate_finish(outcome=receipt["outcome"], result_status=receipt["result_status"], result_sha256=receipt["result_sha256"], usage_status=receipt["usage_status"], input_tokens=receipt["input_tokens"], output_tokens=receipt["output_tokens"])
+            except (CodexRunError, ValueError, TypeError) as error:
+                raise StateError("Codex finish receipt has invalid persisted metadata") from error
+            if (not canonical_identifier(receipt["run_id"]) or not canonical_identifier(receipt["observed_by"])
+                    or not canonical_timestamp(receipt["recorded_at"])):
+                raise StateError("Codex finish receipt has invalid persisted metadata")
+        paired(
+            "SELECT s.*,p.goal_id,p.work_unit_id FROM codex_run_starts s JOIN codex_run_preparations p ON p.id=s.run_id ORDER BY s.run_id",
+            "SELECT * FROM audit_events WHERE event_type='codex_run.started' ORDER BY json_extract(payload,'$.run_id'),sequence",
+            lambda row, event, payload: event["goal_id"] == row["goal_id"] and event["work_unit_id"] == row["work_unit_id"] and payload == {
+                "run_id": row["run_id"], "host_canonical_name": row["host_canonical_name"],
+                "host_agent_id": row["host_agent_id"], "observed_by": row["observed_by"], "recorded_at": row["recorded_at"],
+            },
+        )
+        paired(
+            "SELECT f.*,p.goal_id,p.work_unit_id FROM codex_run_finishes f JOIN codex_run_preparations p ON p.id=f.run_id ORDER BY f.run_id",
+            "SELECT * FROM audit_events WHERE event_type='codex_run.finished' ORDER BY json_extract(payload,'$.run_id'),sequence",
+            lambda row, event, payload: event["goal_id"] == row["goal_id"] and event["work_unit_id"] == row["work_unit_id"] and payload == {
+                "run_id": row["run_id"], "outcome": row["outcome"], "result_status": row["result_status"],
+                "result_sha256": row["result_sha256"], "usage_status": row["usage_status"],
+                "input_tokens": row["input_tokens"], "output_tokens": row["output_tokens"],
+                "observed_by": row["observed_by"], "recorded_at": row["recorded_at"],
+            },
+        )
+        event_sequences = {
+            (row["event_type"], _decode(row["payload"], {}).get("run_id")): int(row["sequence"])
+            for row in connection.execute("SELECT sequence,event_type,payload FROM audit_events WHERE event_type IN ('codex_run.prepared','codex_run.started','codex_run.finished')")
+        }
+        for prep in connection.execute("SELECT id,attempt_id,run_no FROM codex_run_preparations"):
+            prepared_sequence = event_sequences.get(("codex_run.prepared", prep["id"]))
+            started_sequence = event_sequences.get(("codex_run.started", prep["id"]))
+            finished_sequence = event_sequences.get(("codex_run.finished", prep["id"]))
+            if prepared_sequence is None:
+                raise StateError("Codex preparation lacks an audit event")
+            if started_sequence is not None and prepared_sequence >= started_sequence:
+                raise StateError("Codex start audit event precedes preparation")
+            if finished_sequence is not None and (started_sequence is None or started_sequence >= finished_sequence):
+                raise StateError("Codex finish audit event precedes start")
+            if int(prep["run_no"]) > 1:
+                prior = connection.execute("SELECT id FROM codex_run_preparations WHERE attempt_id=? AND run_no=?", (prep["attempt_id"], int(prep["run_no"]) - 1)).fetchone()
+                prior_finished = None if prior is None else event_sequences.get(("codex_run.finished", prior["id"]))
+                if prior_finished is None or prior_finished >= prepared_sequence:
+                    raise StateError("Codex preparation precedes prior finish")
     @staticmethod
     def _seal_current_state_in_transaction(
         connection: sqlite3.Connection, timestamp: str, *, existing_only: bool = False,
@@ -1144,15 +1826,570 @@ class StateStore:
             self._append_event_in_transaction(connection, "goal.status_changed", goal_id=goal_id, payload={"status": status})
         return self.get_goal(goal_id) or {}
 
+    @staticmethod
+    def _work_dependency_checkpoint_positions_in_transaction(
+        connection: sqlite3.Connection, goal_id: str, *, require_seals: bool = True,
+    ) -> dict[str, int]:
+        """Return the immutable checkpoint order, or an empty order for plain goals."""
+        contract_row = connection.execute(
+            "SELECT contract FROM goal_contracts WHERE goal_id=?", (goal_id,)
+        ).fetchone()
+        if contract_row is None:
+            return {}
+        try:
+            from .authority import validate_authority_envelope
+            contract = validate_authority_envelope(_decode(contract_row["contract"], {}))
+        except ValueError as error:
+            raise StateError(f"stored authority envelope is invalid: {error}") from error
+        checkpoints = list(contract["checkpoints"])
+        if checkpoints and require_seals:
+            StateStore._verify_goal_checkpoints_in_transaction(connection, goal_id, contract)
+        return {checkpoint_id: position for position, checkpoint_id in enumerate(checkpoints)}
+
+    @staticmethod
+    def _assert_work_dependency_checkpoint_relation(
+        dependent: sqlite3.Row | dict[str, Any], prerequisite: sqlite3.Row | dict[str, Any],
+        checkpoint_positions: dict[str, int],
+    ) -> None:
+        dependent_checkpoint = dict(dependent)["checkpoint_id"]
+        prerequisite_checkpoint = dict(prerequisite)["checkpoint_id"]
+        if not checkpoint_positions:
+            if dependent_checkpoint is not None or prerequisite_checkpoint is not None:
+                raise StateError("noncheckpoint work unit dependencies require null checkpoint ids")
+            return
+        if (
+            dependent_checkpoint not in checkpoint_positions
+            or prerequisite_checkpoint not in checkpoint_positions
+        ):
+            raise StateError("work unit dependency has an invalid checkpoint id")
+        if checkpoint_positions[prerequisite_checkpoint] > checkpoint_positions[dependent_checkpoint]:
+            raise StateError("work unit prerequisite cannot be in a later checkpoint")
+
+    @staticmethod
+    def _assert_work_unit_checkpoint_binding(
+        unit: sqlite3.Row | dict[str, Any], checkpoint_positions: dict[str, int],
+    ) -> None:
+        checkpoint_id = dict(unit)["checkpoint_id"]
+        if not checkpoint_positions and checkpoint_id is not None:
+            raise StateError("noncheckpoint work unit has a checkpoint id")
+        if checkpoint_positions and checkpoint_id not in checkpoint_positions:
+            raise StateError("work unit has an invalid checkpoint id")
+
+    @staticmethod
+    def _work_prerequisite_state_in_transaction(
+        connection: sqlite3.Connection, work_unit_id: str,
+    ) -> dict[str, Any]:
+        """Read one unit's direct readiness while proving its ancestry is sound.
+
+        This helper deliberately checks only the requested unit's prerequisite
+        ancestry. Callers that need a whole-goal report use the one-pass graph
+        validator below.
+        """
+        work_unit_id = _identifier(work_unit_id, label="work_unit_id")
+        try:
+            root = connection.execute(
+                "SELECT id,goal_id,status,checkpoint_id FROM work_units WHERE id=?", (work_unit_id,)
+            ).fetchone()
+            if root is None:
+                raise StateError(f"Unknown work unit: {work_unit_id}")
+            goal_id = _persisted_identifier(root["goal_id"], label="goal_id")
+            checkpoint_positions = StateStore._work_dependency_checkpoint_positions_in_transaction(
+                connection, goal_id,
+            )
+            colors: dict[str, int] = {}
+            root_prerequisites: list[dict[str, Any]] = []
+            stack: list[tuple[sqlite3.Row | dict[str, Any], bool]] = [(root, False)]
+            while stack:
+                unit, exiting = stack.pop()
+                identifier = _persisted_identifier(unit["id"], label="work_unit_id")
+                if exiting:
+                    colors[identifier] = 2
+                    continue
+                if unit["goal_id"] != goal_id:
+                    raise StateError("work unit dependency crosses goals")
+                if unit["status"] not in WORK_UNIT_STATUSES:
+                    raise StateError("work unit dependency has an invalid status")
+                StateStore._assert_work_unit_checkpoint_binding(unit, checkpoint_positions)
+                if colors.get(identifier) == 1:
+                    raise StateError("work unit dependency graph contains a cycle")
+                if colors.get(identifier) == 2:
+                    continue
+                colors[identifier] = 1
+                dependencies = connection.execute(
+                    "SELECT d.prerequisite_id,p.id,p.goal_id,p.status,p.checkpoint_id "
+                    "FROM work_unit_dependencies d "
+                    "LEFT JOIN work_units p ON p.id=d.prerequisite_id "
+                    "WHERE d.work_unit_id=? ORDER BY d.prerequisite_id",
+                    (identifier,),
+                ).fetchall()
+                if len(dependencies) > 64:
+                    raise StateError("work unit has more than 64 prerequisites")
+                for dependency in dependencies:
+                    if dependency["id"] is None:
+                        raise StateError("work unit dependency references a missing prerequisite")
+                    prerequisite = {
+                        "id": dependency["id"], "goal_id": dependency["goal_id"],
+                        "status": dependency["status"], "checkpoint_id": dependency["checkpoint_id"],
+                    }
+                    StateStore._assert_work_dependency_checkpoint_relation(
+                        unit, prerequisite, checkpoint_positions,
+                    )
+                    if identifier == work_unit_id:
+                        root_prerequisites.append({
+                            "id": _persisted_identifier(dependency["id"], label="work_unit_id"),
+                            "status": dependency["status"],
+                            "checkpoint_id": dependency["checkpoint_id"],
+                        })
+                stack.append((unit, True))
+                for dependency in reversed(dependencies):
+                    stack.append(({
+                        "id": dependency["id"], "goal_id": dependency["goal_id"],
+                        "status": dependency["status"], "checkpoint_id": dependency["checkpoint_id"],
+                    }, False))
+        except sqlite3.OperationalError as error:
+            raise StateError("runtime state is missing work unit dependencies") from error
+        return {
+            "work_unit_id": work_unit_id,
+            "prerequisites": root_prerequisites,
+            "ready": all(item["status"] == "complete" for item in root_prerequisites),
+        }
+
+    @staticmethod
+    def _work_dependency_graph_in_transaction(
+        connection: sqlite3.Connection, goal_id: str, *, require_checkpoint_seals: bool = True,
+    ) -> dict[str, dict[str, Any]]:
+        """Validate a goal graph in one pass and return report-ready unit data."""
+        try:
+            checkpoint_positions = StateStore._work_dependency_checkpoint_positions_in_transaction(
+                connection, goal_id, require_seals=require_checkpoint_seals,
+            )
+            units = connection.execute(
+                "SELECT id,goal_id,status,checkpoint_id FROM work_units WHERE goal_id=? ORDER BY id",
+                (goal_id,),
+            ).fetchall()
+            graph: dict[str, dict[str, Any]] = {}
+            for unit in units:
+                identifier = _persisted_identifier(unit["id"], label="work_unit_id")
+                if unit["status"] not in WORK_UNIT_STATUSES:
+                    raise StateError("work unit dependency has an invalid status")
+                StateStore._assert_work_unit_checkpoint_binding(unit, checkpoint_positions)
+                graph[identifier] = {
+                    "work_unit_id": identifier, "status": unit["status"],
+                    "checkpoint_id": unit["checkpoint_id"], "prerequisites": [],
+                }
+            edges = connection.execute(
+                "SELECT d.work_unit_id,d.prerequisite_id,p.id,p.goal_id,p.status,p.checkpoint_id "
+                "FROM work_unit_dependencies d "
+                "JOIN work_units u ON u.id=d.work_unit_id "
+                "LEFT JOIN work_units p ON p.id=d.prerequisite_id "
+                "WHERE u.goal_id=? ORDER BY d.work_unit_id,d.prerequisite_id",
+                (goal_id,),
+            ).fetchall()
+            for edge in edges:
+                dependent_id = _persisted_identifier(edge["work_unit_id"], label="work_unit_id")
+                if dependent_id not in graph or edge["id"] is None:
+                    raise StateError("work unit dependency references a missing prerequisite")
+                prerequisite_id = _persisted_identifier(edge["id"], label="work_unit_id")
+                if edge["goal_id"] != goal_id:
+                    raise StateError("work unit dependency crosses goals")
+                prerequisite = {
+                    "id": prerequisite_id, "goal_id": edge["goal_id"], "status": edge["status"],
+                    "checkpoint_id": edge["checkpoint_id"],
+                }
+                StateStore._assert_work_dependency_checkpoint_relation(
+                    graph[dependent_id], prerequisite, checkpoint_positions,
+                )
+                graph[dependent_id]["prerequisites"].append({
+                    "id": prerequisite_id, "status": edge["status"],
+                    "checkpoint_id": edge["checkpoint_id"],
+                })
+                if len(graph[dependent_id]["prerequisites"]) > 64:
+                    raise StateError("work unit has more than 64 prerequisites")
+            colors: dict[str, int] = {}
+            for identifier in graph:
+                if colors.get(identifier) == 2:
+                    continue
+                stack: list[tuple[str, bool]] = [(identifier, False)]
+                while stack:
+                    current, exiting = stack.pop()
+                    if exiting:
+                        colors[current] = 2
+                        continue
+                    if colors.get(current) == 1:
+                        raise StateError("work unit dependency graph contains a cycle")
+                    if colors.get(current) == 2:
+                        continue
+                    colors[current] = 1
+                    stack.append((current, True))
+                    for prerequisite in reversed(graph[current]["prerequisites"]):
+                        stack.append((prerequisite["id"], False))
+        except sqlite3.OperationalError as error:
+            raise StateError("runtime state is missing work unit dependencies") from error
+        for value in graph.values():
+            value["ready"] = all(item["status"] == "complete" for item in value["prerequisites"])
+        return graph
+
+    def work_dependencies(self, goal_id: str, work_unit_id: str | None = None, *,
+                          limit: int = 20, offset: int = 0) -> dict[str, Any]:
+        """Return a sealed, read-only dependency/readiness snapshot for one goal."""
+        goal_id = _identifier(goal_id, label="goal_id")
+        work_unit_id = _optional_identifier(work_unit_id, label="work_unit_id")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise StateError("limit must be an integer from 1 to 100")
+        if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= 1_000_000:
+            raise StateError("offset must be an integer from 0 to 1000000")
+        if not self.path.is_file():
+            raise StateError(f"Runtime database does not exist: {self.path}")
+        try:
+            with self._connection(write=False) as connection:
+                version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+                if version != SCHEMA_VERSION:
+                    raise StateError(f"runtime schema {version} requires migration to {SCHEMA_VERSION}")
+                self._assert_audit_chain_in_transaction(connection)
+                self._assert_current_state_integrity_in_transaction(connection)
+                if connection.execute("SELECT 1 FROM goals WHERE id=?", (goal_id,)).fetchone() is None:
+                    raise StateError(f"Unknown goal: {goal_id}")
+                if work_unit_id is not None:
+                    unit = connection.execute("SELECT goal_id FROM work_units WHERE id=?", (work_unit_id,)).fetchone()
+                    if unit is None or unit["goal_id"] != goal_id:
+                        raise StateError("work unit belongs to a different or unknown goal")
+                graph = self._work_dependency_graph_in_transaction(connection, goal_id)
+        except sqlite3.Error as error:
+            raise StateError("unable to read work unit dependency state") from error
+        entries = [graph[work_unit_id]] if work_unit_id is not None else list(graph.values())
+        total = len(entries)
+        page = entries[offset:offset + limit]
+        return {
+            "goal_id": goal_id, "read_only": True,
+            "notice": "Ready means only that every direct prerequisite is complete; it does not authorize lifecycle transitions.",
+            "units": page, "total": total, "limit": limit, "offset": offset,
+            "next_offset": offset + len(page) if offset + len(page) < total else None,
+        }
+
+    @staticmethod
+    def _work_plan_digest(value: Any) -> str:
+        return hashlib.sha256(_encode(value).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _validate_work_definition_graph(definitions: dict[str, dict[str, Any]],
+                                        checkpoint_positions: dict[str, int]) -> None:
+        """Validate one combined immutable definition graph without database I/O."""
+        for identifier, unit in definitions.items():
+            prerequisites = unit.get("prerequisite_ids", ())
+            if len(prerequisites) > 64:
+                raise StateError("work unit has more than 64 prerequisites")
+            for prerequisite_id in prerequisites:
+                prerequisite = definitions.get(prerequisite_id)
+                if prerequisite is None:
+                    raise StateError("work unit dependency references a missing prerequisite")
+                StateStore._assert_work_dependency_checkpoint_relation(unit, prerequisite, checkpoint_positions)
+        colors: dict[str, int] = {}
+        for root in sorted(definitions):
+            if colors.get(root) == 2:
+                continue
+            stack: list[tuple[str, bool]] = [(root, False)]
+            while stack:
+                current, exiting = stack.pop()
+                if exiting:
+                    colors[current] = 2
+                    continue
+                if colors.get(current) == 1:
+                    raise StateError("work unit dependency graph contains a cycle")
+                if colors.get(current) == 2:
+                    continue
+                colors[current] = 1
+                stack.append((current, True))
+                stack.extend((child, False) for child in reversed(definitions[current].get("prerequisite_ids", ())))
+
+    @staticmethod
+    def _insert_work_definitions_in_transaction(connection: sqlite3.Connection, goal_id: str,
+                                                definitions: Sequence[dict[str, Any]]) -> None:
+        """Insert canonical definitions, edges, and attributable immutable evidence."""
+        timestamp = _now()
+        for unit in sorted(definitions, key=lambda value: value["id"]):
+            connection.execute(
+                "INSERT INTO work_units (id,goal_id,title,status,scope,checkpoint_id,created_at,updated_at) VALUES(?,?,?,'planned',?,?,?,?)",
+                (unit["id"], goal_id, unit["title"], _encode(unit["scope"]), unit["checkpoint_id"], timestamp, timestamp),
+            )
+        for unit in sorted(definitions, key=lambda value: value["id"]):
+            for prerequisite_id in unit["prerequisite_ids"]:
+                connection.execute(
+                    "INSERT INTO work_unit_dependencies(work_unit_id,prerequisite_id) VALUES(?,?)",
+                    (unit["id"], prerequisite_id),
+                )
+        for unit in sorted(definitions, key=lambda value: value["id"]):
+            StateStore._append_event_in_transaction(
+                connection, "work_unit.created", goal_id=goal_id, work_unit_id=unit["id"],
+                payload={"title": unit["title"], "checkpoint_id": unit["checkpoint_id"]},
+            )
+            if unit["prerequisite_ids"]:
+                StateStore._append_event_in_transaction(
+                    connection, "work_unit.dependencies_defined", goal_id=goal_id, work_unit_id=unit["id"],
+                    payload={"prerequisite_ids": list(unit["prerequisite_ids"])},
+                )
+
+    @staticmethod
+    def _validate_work_definition_contract_in_transaction(
+        connection: sqlite3.Connection, goal_id: str, scope: dict[str, Any] | None,
+        checkpoint_id: str | None, *, require_contract: bool, allow_reached_checkpoint: bool,
+    ) -> tuple[dict[str, Any] | None, dict[str, int]]:
+        """Apply the shared contract/scope/checkpoint gate for one definition."""
+        contract_row = connection.execute("SELECT contract FROM goal_contracts WHERE goal_id=?", (goal_id,)).fetchone()
+        if contract_row is None:
+            if require_contract:
+                raise StateError("work-plan loading requires a stored goal contract")
+            if checkpoint_id is not None:
+                raise StateError("work unit checkpoint_id requires an authority envelope")
+            return None, {}
+        try:
+            from .authority import validate_authority_envelope
+            contract = validate_authority_envelope(_decode(contract_row["contract"], {}))
+        except ValueError as error:
+            raise StateError(f"stored authority envelope or work unit scope is invalid: {error}") from error
+        if not isinstance(scope, dict) or set(scope) != {"paths", "exclusions"}:
+            raise StateError("contracted work units require an explicit closed scope")
+        try:
+            from .authority import validate_project_scope
+            validate_project_scope(scope, label="contracted work unit scope")
+        except ValueError as error:
+            raise StateError(f"stored authority envelope or work unit scope is invalid: {error}") from error
+        if not StateStore._scope_within_contract(scope or {}, contract["scope"]):
+            raise StateError("work unit scope is outside the authority envelope")
+        checkpoints = contract["checkpoints"]
+        positions = {value: position for position, value in enumerate(checkpoints)}
+        if checkpoints and checkpoint_id is None:
+            raise StateError("checkpointed goals require an explicit checkpoint_id for every work unit")
+        if not checkpoints and checkpoint_id is not None or checkpoint_id is not None and checkpoint_id not in positions:
+            raise StateError("work unit checkpoint_id is not in this authority envelope")
+        if checkpoint_id is not None:
+            rows = StateStore._verify_goal_checkpoints_in_transaction(connection, goal_id, contract)
+            selected = next(row for row in rows if row["checkpoint_id"] == checkpoint_id)
+            if selected["status"] != "pending" and not allow_reached_checkpoint:
+                raise StateError("work units cannot be added to a reached checkpoint")
+        return contract, positions
+
+    def _evaluate_work_plan_in_transaction(self, connection: sqlite3.Connection,
+                                           manifest: dict[str, Any]) -> dict[str, Any]:
+        """Validate one normalized batch against one sealed ledger snapshot."""
+        from .authority import validate_authority_envelope, validate_project_scope
+        from .workplans import WorkPlanError, normalize_work_plan, work_plan_sha256
+
+        try:
+            manifest = normalize_work_plan(manifest)
+        except WorkPlanError:
+            raise
+        goal_id = manifest["goal_id"]
+        goal = connection.execute("SELECT status FROM goals WHERE id=?", (goal_id,)).fetchone()
+        if goal is None:
+            raise WorkPlanError("invalid_manifest", f"unknown goal: {goal_id}", details={"goal_id": goal_id})
+        contract_row = connection.execute(
+            "SELECT version,envelope_sha256,contract FROM goal_contracts WHERE goal_id=?", (goal_id,)
+        ).fetchone()
+        if contract_row is None:
+            raise WorkPlanError("contract_required", "work-plan loading requires a stored goal contract", details={"goal_id": goal_id})
+        try:
+            contract = validate_authority_envelope(_decode(contract_row["contract"], {}))
+        except ValueError as error:
+            raise WorkPlanError("stored_contract_invalid", f"stored authority envelope is invalid: {error}") from error
+        if contract["goal_id"] != goal_id:
+            raise WorkPlanError("stored_contract_invalid", "stored authority envelope is bound to another goal")
+        if contract_row["version"] != f"v{contract['version']}":
+            raise WorkPlanError("stored_contract_invalid", "stored authority envelope has an unsupported persisted version")
+        checkpoints = list(contract["checkpoints"])
+        checkpoint_positions = {identifier: position for position, identifier in enumerate(checkpoints)}
+        try:
+            checkpoint_rows = self._verify_goal_checkpoints_in_transaction(connection, goal_id, contract)
+        except StateError as error:
+            raise WorkPlanError("stored_contract_invalid", str(error)) from error
+        checkpoint_statuses = {row["checkpoint_id"]: row["status"] for row in checkpoint_rows}
+        stored_units = connection.execute(
+            "SELECT id,goal_id,title,scope,checkpoint_id FROM work_units WHERE goal_id=? ORDER BY id", (goal_id,)
+        ).fetchall()
+        stored_edges: dict[str, list[str]] = {row["id"]: [] for row in stored_units}
+        for row in connection.execute(
+            "SELECT d.work_unit_id,d.prerequisite_id FROM work_unit_dependencies d "
+            "JOIN work_units u ON u.id=d.work_unit_id WHERE u.goal_id=? ORDER BY d.work_unit_id,d.prerequisite_id", (goal_id,)
+        ):
+            stored_edges[row["work_unit_id"]].append(row["prerequisite_id"])
+        stored_definitions: dict[str, dict[str, Any]] = {}
+        for row in stored_units:
+            # Bind every immutable definition without applying manifest-only
+            # limits to unrelated legacy rows. Exact requested rows receive a
+            # narrower canonical comparison below.
+            stored_definitions[row["id"]] = {
+                "id": row["id"], "title": row["title"], "scope": _decode(row["scope"], {}),
+                "checkpoint_id": row["checkpoint_id"], "prerequisite_ids": sorted(stored_edges[row["id"]]),
+            }
+        proposed = {unit["id"]: unit for unit in manifest["units"]}
+        create_ids: list[str] = []
+        unchanged_ids: list[str] = []
+        for identifier, unit in proposed.items():
+            existing = stored_definitions.get(identifier)
+            if existing is None:
+                elsewhere = connection.execute("SELECT goal_id FROM work_units WHERE id=?", (identifier,)).fetchone()
+                if elsewhere is not None:
+                    raise WorkPlanError("conflict", f"work unit id belongs to another goal: {identifier}", details={"unit_id": identifier})
+                create_ids.append(identifier)
+            else:
+                try:
+                    raw_scope = existing["scope"]
+                    validate_project_scope(raw_scope, label=f"stored work unit {identifier} scope")
+                    comparable = {
+                        "id": existing["id"], "title": existing["title"],
+                        "scope": {"paths": sorted(raw_scope["paths"], key=str.casefold), "exclusions": sorted(raw_scope["exclusions"], key=str.casefold)},
+                        "checkpoint_id": existing["checkpoint_id"], "prerequisite_ids": sorted(existing["prerequisite_ids"]),
+                    }
+                except (ValueError, TypeError) as error:
+                    raise WorkPlanError("existing_definition_invalid", f"stored work unit {identifier} is invalid: {error}") from error
+                if comparable == unit:
+                    unchanged_ids.append(identifier)
+                    continue
+                differing = sorted(key for key in ("title", "scope", "checkpoint_id", "prerequisite_ids") if comparable[key] != unit[key])
+                raise WorkPlanError("conflict", f"existing work unit conflicts with manifest: {identifier}", details={"unit_id": identifier, "fields": differing})
+        # Reuse the same contracted scope and checkpoint gate as the legacy
+        # single-unit API. Exact existing entries may remain after a checkpoint
+        # was reached because this operation is not adding work at that gate.
+        for identifier, unit in proposed.items():
+            try:
+                self._validate_work_definition_contract_in_transaction(
+                    connection, goal_id, unit["scope"], unit["checkpoint_id"], require_contract=True,
+                    allow_reached_checkpoint=identifier in unchanged_ids,
+                )
+            except StateError as error:
+                message = str(error)
+                code = "scope_outside_envelope" if "scope is outside" in message else (
+                    "checkpoint_reached" if "reached checkpoint" in message else "checkpoint_invalid"
+                )
+                raise WorkPlanError(code, message, details={"unit_id": identifier}) from error
+        if create_ids and goal["status"] not in {"planned", "active"}:
+            raise WorkPlanError("goal_not_accepting_work", "goal is not accepting new work", details={"status": goal["status"]})
+        for identifier in create_ids:
+            checkpoint_id = proposed[identifier]["checkpoint_id"]
+            if checkpoint_id is not None and checkpoint_statuses[checkpoint_id] != "pending":
+                raise WorkPlanError("checkpoint_reached", f"work unit checkpoint has already been reached: {checkpoint_id}", details={"unit_id": identifier, "checkpoint_id": checkpoint_id})
+        all_units = {**stored_definitions, **proposed}
+        for identifier in proposed:
+            for prerequisite_id in proposed[identifier]["prerequisite_ids"]:
+                prerequisite = all_units.get(prerequisite_id)
+                if prerequisite is None:
+                    other = connection.execute("SELECT goal_id FROM work_units WHERE id=?", (prerequisite_id,)).fetchone()
+                    if other is not None and other["goal_id"] != goal_id:
+                        raise WorkPlanError("cross_goal_prerequisite", f"prerequisite belongs to another goal: {prerequisite_id}")
+                    raise WorkPlanError("missing_prerequisite", f"unknown prerequisite work unit: {prerequisite_id}")
+                try:
+                    self._assert_work_dependency_checkpoint_relation(proposed[identifier], prerequisite, checkpoint_positions)
+                except StateError as error:
+                    raise WorkPlanError("checkpoint_invalid", str(error), details={"unit_id": identifier, "prerequisite_id": prerequisite_id}) from error
+        try:
+            self._validate_work_definition_graph(all_units, checkpoint_positions)
+        except StateError as error:
+            code = "cycle" if "cycle" in str(error) else "checkpoint_invalid"
+            raise WorkPlanError(code, str(error)) from error
+        pending = set(proposed)
+        waves: list[list[str]] = []
+        while pending:
+            wave = sorted(identifier for identifier in pending if not (set(proposed[identifier]["prerequisite_ids"]) & pending))
+            if not wave:  # Covered above; retained as a defensive totality check.
+                raise WorkPlanError("cycle", "work-plan dependency graph contains a cycle")
+            waves.append(wave)
+            pending.difference_update(wave)
+        external_prerequisites = sorted({prerequisite for unit in proposed.values() for prerequisite in unit["prerequisite_ids"] if prerequisite not in proposed})
+        definition_graph = {
+            "units": [stored_definitions[key] for key in sorted(stored_definitions)],
+            "edges": [[identifier, prerequisite] for identifier in sorted(stored_edges) for prerequisite in stored_edges[identifier]],
+        }
+        manifest_sha256 = work_plan_sha256(manifest)
+        runtime_binding_sha256 = self._work_plan_digest({"database": str(self.path.resolve()), "schema_version": SCHEMA_VERSION})
+        contract_binding = {"version": contract_row["version"], "envelope_sha256": contract_row["envelope_sha256"]}
+        gate = {"required": bool(create_ids)}
+        if create_ids:
+            gate.update({"goal_accepts_new_work": goal["status"] in {"planned", "active"}, "checkpoints": {identifier: checkpoint_statuses[identifier] for identifier in sorted({proposed[item]["checkpoint_id"] for item in create_ids if proposed[item]["checkpoint_id"] is not None})}})
+        preview_sha256 = self._work_plan_digest({"kind": "tasktra.work-plan-preview", "version": 1, "manifest_sha256": manifest_sha256, "runtime_binding_sha256": runtime_binding_sha256, "contract_binding": contract_binding, "existing_definition_graph_sha256": self._work_plan_digest(definition_graph), "creation_gate_sha256": self._work_plan_digest(gate)})
+        return {"manifest": manifest, "manifest_sha256": manifest_sha256, "preview_sha256": preview_sha256,
+                "runtime_binding_sha256": runtime_binding_sha256, "contract_binding": contract_binding,
+                "create_ids": create_ids, "unchanged_ids": unchanged_ids, "dependency_waves": waves,
+                "external_prerequisite_ids": external_prerequisites,
+                "counts": {"units": len(proposed), "edges": sum(len(unit["prerequisite_ids"]) for unit in proposed.values()), "create": len(create_ids), "unchanged": len(unchanged_ids), "conflict": 0}}
+
+    @staticmethod
+    def _work_plan_report(evaluation: dict[str, Any], *, read_only: bool) -> dict[str, Any]:
+        return {"kind": "tasktra.work-plan-preview", "version": 1, "goal_id": evaluation["manifest"]["goal_id"], "read_only": read_only,
+                "manifest_sha256": evaluation["manifest_sha256"], "preview_sha256": evaluation["preview_sha256"],
+                "runtime_binding_sha256": evaluation["runtime_binding_sha256"], "contract_binding": evaluation["contract_binding"],
+                "normalized_units": evaluation["manifest"]["units"], "dependency_waves": evaluation["dependency_waves"],
+                "external_prerequisite_ids": evaluation["external_prerequisite_ids"], "counts": evaluation["counts"],
+                "notice": "Dependency waves are structural only. Loading a plan grants no authority and does not make a unit claimable."}
+
+    def preview_work_plan(self, manifest: dict[str, Any]) -> dict[str, Any]:
+        """Validate a plan against one verified read-only SQLite snapshot."""
+        from .workplans import WorkPlanError, normalize_work_plan
+        manifest = normalize_work_plan(manifest)
+        if not self.path.is_file():
+            raise WorkPlanError("runtime_mismatch", f"runtime database does not exist: {self.path}")
+        try:
+            with self._connection(write=False) as connection:
+                version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+                if version != SCHEMA_VERSION:
+                    raise WorkPlanError("runtime_mismatch", f"runtime schema {version} requires migration to {SCHEMA_VERSION}")
+                self._assert_audit_chain_in_transaction(connection)
+                self._assert_current_state_integrity_in_transaction(connection)
+                evaluation = self._evaluate_work_plan_in_transaction(connection, manifest)
+        except WorkPlanError:
+            raise
+        except StateError as error:
+            raise WorkPlanError("ledger_integrity", str(error)) from error
+        except sqlite3.Error as error:
+            raise WorkPlanError("runtime_mismatch", "unable to read work-plan runtime state") from error
+        return self._work_plan_report(evaluation, read_only=True)
+
+    def apply_work_plan(self, manifest: dict[str, Any], *, expected_preview_sha256: str) -> dict[str, Any]:
+        """Atomically insert every new immutable definition after exact revalidation."""
+        from .workplans import WorkPlanError, normalize_work_plan
+        manifest = normalize_work_plan(manifest)
+        if not isinstance(expected_preview_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_preview_sha256):
+            raise WorkPlanError("invalid_manifest", "expected_preview_sha256 must be a lowercase SHA-256 digest")
+        if not self.path.is_file():
+            raise WorkPlanError("runtime_mismatch", f"runtime database does not exist: {self.path}")
+        try:
+            with self._connection() as connection:
+                self._prepare_write(connection)
+                evaluation = self._evaluate_work_plan_in_transaction(connection, manifest)
+                if evaluation["preview_sha256"] != expected_preview_sha256:
+                    raise WorkPlanError("stale_preview", "work-plan preview no longer matches current runtime state", details={"expected_preview_sha256": expected_preview_sha256, "actual_preview_sha256": evaluation["preview_sha256"]})
+                create_ids = set(evaluation["create_ids"])
+                new_definitions = [unit for unit in evaluation["manifest"]["units"] if unit["id"] in create_ids]
+                self._insert_work_definitions_in_transaction(connection, evaluation["manifest"]["goal_id"], new_definitions)
+                if evaluation["create_ids"]:
+                    self._work_dependency_graph_in_transaction(connection, evaluation["manifest"]["goal_id"])
+                    self._append_event_in_transaction(connection, "work_plan.applied", goal_id=evaluation["manifest"]["goal_id"], payload={"manifest_sha256": evaluation["manifest_sha256"], "preview_sha256": evaluation["preview_sha256"], "created": len(evaluation["create_ids"]), "unchanged": len(evaluation["unchanged_ids"]), "units": evaluation["counts"]["units"], "edges": evaluation["counts"]["edges"], "created_ids_sha256": self._work_plan_digest(evaluation["create_ids"])})
+        except WorkPlanError:
+            raise
+        except StateError as error:
+            raise WorkPlanError("ledger_integrity", str(error)) from error
+        except sqlite3.Error as error:
+            raise WorkPlanError("ledger_failure", "unable to apply work-plan runtime state") from error
+        return self._work_plan_report(evaluation, read_only=False)
+
     def create_work_unit(self, *, goal_id: str, title: str, scope: dict[str, Any] | None = None,
                          work_unit_id: str | None = None, checkpoint_id: str | None = None,
+                         prerequisite_ids: Sequence[str] = (),
                          verification_policy: str = "implementation-review",
                          acceptance_checks: list[list[str]] | None = None) -> dict[str, Any]:
         if not title.strip():
             raise StateError("Work unit title must be non-empty")
+        if isinstance(prerequisite_ids, (str, bytes)) or not isinstance(prerequisite_ids, Sequence):
+            raise StateError("prerequisite_ids must be a sequence of work unit ids")
         goal_id = _identifier(goal_id, label="goal_id")
         identifier, timestamp = _identifier(work_unit_id or f"work-{uuid4().hex[:12]}", label="work_unit_id"), _now()
         checkpoint_id = _optional_identifier(checkpoint_id, label="checkpoint_id")
+        prerequisites = [_identifier(value, label="prerequisite_id") for value in prerequisite_ids]
+        if len(prerequisites) > 64:
+            raise StateError("work unit may have at most 64 prerequisites")
+        if len(set(prerequisites)) != len(prerequisites):
+            raise StateError("work unit prerequisites must not contain duplicates")
+        prerequisites.sort()
+        if identifier in prerequisites:
+            raise StateError("work unit cannot depend on itself")
         if verification_policy not in VERIFICATION_POLICIES:
             raise StateError("work-unit verification_policy is not supported")
         normalized_checks = _acceptance_checks(
@@ -1168,33 +2405,14 @@ class StateStore:
                 raise StateError("work units may only be created for planned or active goals")
             contract_row = connection.execute("SELECT contract FROM goal_contracts WHERE goal_id=?", (goal_id,)).fetchone()
             persisted_scope = scope or {}
+            checkpoint_positions: dict[str, int] = {}
             if contract_row is not None:
-                try:
-                    from .authority import validate_authority_envelope
-                    contract = validate_authority_envelope(_decode(contract_row["contract"], {}))
-                except ValueError as error:
-                    raise StateError(f"stored authority envelope is invalid: {error}") from error
-                if not isinstance(scope, dict) or set(scope) != {"paths", "exclusions"}:
-                    raise StateError("contracted work units require an explicit closed scope")
-                if not isinstance(scope["paths"], list) or not scope["paths"] or not all(isinstance(path, str) and path for path in scope["paths"]):
-                    raise StateError("contracted work units require a nonempty safe scope")
-                if not isinstance(scope["exclusions"], list) or not all(isinstance(path, str) and path for path in scope["exclusions"]):
-                    raise StateError("contracted work unit exclusions must be a closed list of paths")
-                if not self._scope_within_contract(scope, contract["scope"]):
-                    raise StateError("work unit scope is outside the authority envelope")
-                checkpoints = contract["checkpoints"]
-                if checkpoints and checkpoint_id is None:
-                    raise StateError("checkpointed goals require an explicit checkpoint_id for every work unit")
-                if not checkpoints and checkpoint_id is not None:
-                    raise StateError("work unit checkpoint_id is not in this authority envelope")
-                if checkpoint_id is not None and checkpoint_id not in checkpoints:
-                    raise StateError("work unit checkpoint_id is not in this authority envelope")
-                if checkpoint_id is not None:
-                    checkpoint_rows = self._verify_goal_checkpoints_in_transaction(connection, goal_id, contract)
-                    selected_checkpoint = next(row for row in checkpoint_rows if row["checkpoint_id"] == checkpoint_id)
-                    if selected_checkpoint["status"] != "pending":
-                        raise StateError("work units cannot be added to a reached checkpoint")
+                _, checkpoint_positions = self._validate_work_definition_contract_in_transaction(
+                    connection, goal_id, scope, checkpoint_id, require_contract=False,
+                    allow_reached_checkpoint=False,
+                )
                 if verification_policy != "implementation-review":
+                    contract = _decode(contract_row["contract"], {})
                     from .authority import verification_policy_allowed
                     if not verification_policy_allowed(contract, verification_policy):
                         raise StateError("authority envelope does not explicitly permit this verification policy")
@@ -1203,11 +2421,38 @@ class StateStore:
             elif checkpoint_id is not None:
                 raise StateError("work unit checkpoint_id requires an authority envelope")
             try:
+                prerequisite_rows: list[sqlite3.Row] = []
+                for prerequisite_id in prerequisites:
+                    prerequisite = connection.execute(
+                        "SELECT id,goal_id,status,checkpoint_id FROM work_units WHERE id=?",
+                        (prerequisite_id,),
+                    ).fetchone()
+                    if prerequisite is None:
+                        raise StateError(f"Unknown prerequisite work unit: {prerequisite_id}")
+                    if prerequisite["goal_id"] != goal_id:
+                        raise StateError("work unit prerequisite belongs to a different goal")
+                    if prerequisite["status"] not in WORK_UNIT_STATUSES:
+                        raise StateError("work unit prerequisite has an invalid status")
+                    prerequisite_rows.append(prerequisite)
+                definitions = {
+                    row["id"]: {"checkpoint_id": row["checkpoint_id"], "prerequisite_ids": []}
+                    for row in connection.execute("SELECT id,checkpoint_id FROM work_units WHERE goal_id=?", (goal_id,))
+                }
+                for edge in connection.execute(
+                    "SELECT d.work_unit_id,d.prerequisite_id FROM work_unit_dependencies d JOIN work_units u ON u.id=d.work_unit_id WHERE u.goal_id=?",
+                    (goal_id,),
+                ):
+                    definitions[edge["work_unit_id"]]["prerequisite_ids"].append(edge["prerequisite_id"])
+                definitions[identifier] = {"checkpoint_id": checkpoint_id, "prerequisite_ids": prerequisites}
+                self._validate_work_definition_graph(definitions, checkpoint_positions)
+                self._insert_work_definitions_in_transaction(connection, goal_id, [{
+                    "id": identifier, "title": title, "scope": persisted_scope,
+                    "checkpoint_id": checkpoint_id, "prerequisite_ids": prerequisites,
+                }])
                 connection.execute(
-                    "INSERT INTO work_units (id,goal_id,title,status,scope,checkpoint_id,verification_policy,acceptance_checks,created_at,updated_at) VALUES(?,?,?,'planned',?,?,?,?,?,?)",
-                    (identifier, goal_id, title, _encode(persisted_scope), checkpoint_id, verification_policy, _encode(normalized_checks), timestamp, timestamp),
+                    "UPDATE work_units SET verification_policy=?,acceptance_checks=? WHERE id=?",
+                    (verification_policy, _encode(normalized_checks), identifier),
                 )
-                self._append_event_in_transaction(connection, "work_unit.created", goal_id=goal_id, work_unit_id=identifier, payload={"title": title, "checkpoint_id": checkpoint_id, "verification_policy": verification_policy})
             except sqlite3.IntegrityError as error:
                 raise StateError(f"Cannot create work unit {identifier}; verify its id and goal") from error
         return self.get_work_unit(identifier) or {}
@@ -1220,6 +2465,11 @@ class StateStore:
         if result is not None:
             _persisted_identifier(result["id"], label="work_unit_id")
             _persisted_identifier(result["goal_id"], label="goal_id")
+            # The structured-intervention pointer is internal ledger state.
+            # Operator projections use the sealed relation directly; keeping
+            # it out of this longstanding public work-unit shape preserves
+            # the closed work-unit contract for existing callers.
+            result.pop("current_intervention_id", None)
         return result
 
     def get_attempt(self, attempt_id: str) -> dict[str, Any] | None:
@@ -1537,6 +2787,8 @@ class StateStore:
                 raise StateError(f"cannot attest invalid authority contract {row['goal_id']}: {error}") from error
             if envelope["goal_id"] != row["goal_id"] or authority_envelope_sha256(envelope) != row["envelope_sha256"]:
                 raise StateError(f"cannot attest authority contract with mismatched identity or hash: {row['goal_id']}")
+            if row["version"] != f"v{envelope['version']}":
+                raise StateError(f"cannot attest authority contract with mismatched version: {row['goal_id']}")
             envelopes[str(row["goal_id"])] = envelope
         for goal_id, envelope in envelopes.items():
             checkpoint_rows = connection.execute(
@@ -1626,29 +2878,40 @@ class StateStore:
         """Validate migrated lifecycle facts before the complete ledger is sealed."""
         if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
             raise StateError("cannot attest state with foreign-key violations")
+        if int(connection.execute("PRAGMA user_version").fetchone()[0]) >= 14:
+            StateStore._assert_codex_run_integrity_in_transaction(connection)
         previous, expected_sequence = _GENESIS_HASH, 1
         for event in connection.execute("SELECT * FROM audit_events ORDER BY sequence"):
             digest = _audit_hash(previous, event["sequence"], event["event_type"], event["goal_id"], event["work_unit_id"], event["payload"], event["created_at"])
             if event["sequence"] != expected_sequence or event["previous_hash"] != previous or event["event_hash"] != digest:
                 raise StateError("cannot attest state with an invalid audit chain")
             previous, expected_sequence = event["event_hash"], expected_sequence + 1
+        last_emergency_stop = connection.execute(
+            "SELECT COALESCE(max(sequence),0) FROM audit_events "
+            "WHERE event_type='runtime.emergency_stop_set' AND goal_id IS NULL"
+        ).fetchone()[0]
         for goal in connection.execute("SELECT * FROM goals"):
             if goal["status"] not in GOAL_STATUSES:
                 raise StateError(f"cannot attest invalid goal status: {goal['id']}")
             lifecycle = connection.execute(
-                """SELECT event_type,payload FROM audit_events WHERE goal_id=? AND event_type IN
-                   ('goal.created','goal.status_changed','goal.active','goal.paused','goal.stopped','goal.completed')
+                """SELECT sequence,event_type,payload FROM audit_events WHERE goal_id=? AND event_type IN
+                   ('goal.created','goal.status_changed','goal.active','goal.draining','goal.paused','goal.stopped','goal.completed')
                    ORDER BY sequence DESC LIMIT 1""",
                 (goal["id"],),
             ).fetchone()
             if lifecycle is None:
                 raise StateError(f"cannot attest goal without lifecycle evidence: {goal['id']}")
             expected_status = {
-                "goal.created": "planned", "goal.active": "active", "goal.paused": "paused",
+                "goal.created": "planned", "goal.active": "active", "goal.draining": "draining", "goal.paused": "paused",
                 "goal.stopped": "stopped", "goal.completed": "complete",
             }.get(lifecycle["event_type"])
             if lifecycle["event_type"] == "goal.status_changed":
                 expected_status = _decode(lifecycle["payload"], {}).get("status")
+            # A global emergency stop pauses only goals active at that point.
+            # Clearing the runtime stop does not resume them; a later goal
+            # lifecycle event supersedes the global event for that goal.
+            if expected_status in {"active", "draining"} and last_emergency_stop > lifecycle["sequence"]:
+                expected_status = "paused"
             if goal["status"] != expected_status:
                 raise StateError(f"cannot attest goal status without matching lifecycle evidence: {goal['id']}")
             budget = connection.execute("SELECT * FROM budgets WHERE goal_id=?", (goal["id"],)).fetchone()
@@ -1719,6 +2982,11 @@ class StateStore:
                     raise StateError(f"cannot attest completed goal with pending checkpoints: {goal['id']}")
                 if connection.execute("SELECT 1 FROM effect_intents WHERE goal_id=? AND ((protocol_version=1 AND status!='received') OR (protocol_version=2 AND status NOT IN ('succeeded','reconciled'))) LIMIT 1", (goal["id"],)).fetchone():
                     raise StateError(f"cannot attest completed goal with unresolved effects: {goal['id']}")
+            if goal["status"] == "draining" and connection.execute(
+                "SELECT 1 FROM work_attempts a JOIN work_units u ON u.id=a.work_unit_id "
+                "WHERE u.goal_id=? AND a.status IN ('leased','active') LIMIT 1", (goal["id"],)
+            ).fetchone() is None:
+                raise StateError(f"cannot attest draining goal without a stored lease: {goal['id']}")
         for unit in connection.execute("SELECT * FROM work_units"):
             if unit["status"] not in WORK_UNIT_STATUSES:
                 raise StateError(f"cannot attest invalid work-unit status: {unit['id']}")
@@ -1764,6 +3032,12 @@ class StateStore:
                 raise StateError(f"cannot attest stale lease fields on work unit: {unit['id']}")
             if unit["status"] == "complete" and connection.execute("SELECT 1 FROM workflow_evidence WHERE work_unit_id=?", (unit["id"],)).fetchone() is None:
                 raise StateError(f"cannot attest completed work without workflow evidence: {unit['id']}")
+        # Dependency rows are authority-bearing: validate every goal graph
+        # before an explicit attestation can seal a migrated/unsealed state.
+        for goal in connection.execute("SELECT id FROM goals"):
+            StateStore._work_dependency_graph_in_transaction(
+                connection, goal["id"], require_checkpoint_seals=False,
+            )
         try:
             from .workflow import load_workflow, validate_workflow_completion_token
         except ImportError as error:  # pragma: no cover
@@ -2133,6 +3407,18 @@ class StateStore:
                 if intent["status"] == "received":
                     if outcome in {"applied", "success", "failed-before-effect"}:
                         pass
+                    elif (
+                        outcome == "failed" and intent["operation"] == "local-effect"
+                        and intent["effect_class"] == "local-reversible-write"
+                        and set(payload) == {"action", "plan_sha256"}
+                        and payload["action"] == "upgrade-apply"
+                        and isinstance(payload["plan_sha256"], str)
+                        and re.fullmatch(r"[0-9a-f]{64}", payload["plan_sha256"])
+                        and receipt["before_sha256"] is None and receipt["after_sha256"] is None
+                    ):
+                        # Preserve the exact pre-15 failed-upgrade bridge
+                        # record. Current clients cannot create this outcome.
+                        pass
                     elif outcome in {"indeterminate", "recovery-required"}:
                         recovery_events = connection.execute(
                             """SELECT * FROM events WHERE event_type='effect.recovery_resolved'
@@ -2272,6 +3558,8 @@ class StateStore:
         control = connection.execute("SELECT * FROM runtime_control WHERE id=1").fetchone()
         if control is None or (control["emergency_stopped"] and (not control["reason"] or not control["set_by"] or not control["set_at"])):
             raise StateError("cannot attest invalid runtime control state")
+        if int(connection.execute("PRAGMA user_version").fetchone()[0]) >= 13:
+            StateStore._assert_intervention_integrity_in_transaction(connection)
 
     def repair_unsealed_transition_approval(
         self,
@@ -2608,12 +3896,121 @@ class StateStore:
                 envelope_sha256=envelope_sha256, performer_id=performer_id, scope=scope,
                 effect=effect, timestamp=timestamp)
 
+    @staticmethod
+    def _goal_drain_observation_in_transaction(connection: sqlite3.Connection, goal_id: str,
+                                                *, limit: int, offset: int, timestamp: str,
+                                                status_before: str, status_after: str,
+                                                read_only: bool) -> dict[str, Any]:
+        rows = connection.execute(
+            "SELECT a.id,a.work_unit_id,a.expires_at,a.status FROM work_attempts a "
+            "JOIN work_units u ON u.id=a.work_unit_id "
+            "WHERE u.goal_id=? AND a.status IN ('leased','active') ORDER BY a.id", (goal_id,)
+        ).fetchall()
+        attempt_ids = [str(row["id"]) for row in rows]
+        lease_hash = hashlib.sha256(_encode(attempt_ids).encode("utf-8")).hexdigest()
+        entries = [{"attempt_id": row["id"], "work_unit_id": row["work_unit_id"],
+                    "expires_at": row["expires_at"],
+                    "state": "expired" if row["expires_at"] <= timestamp else "live"}
+                   for row in rows]
+        total = len(entries)
+        return {
+            "goal_id": goal_id, "status_before": status_before, "status_after": status_after,
+            "stored_leases": total, "live_leases": sum(item["state"] == "live" for item in entries),
+            "expired_leases": sum(item["state"] == "expired" for item in entries),
+            "attempts": entries[offset:offset + limit], "total": total, "limit": limit,
+            "offset": offset, "next_offset": offset + len(entries[offset:offset + limit]) if offset + len(entries[offset:offset + limit]) < total else None,
+            "lease_set_sha256": lease_hash, "read_only": read_only,
+        }
+
+    @staticmethod
+    def _finalize_drain_if_empty_in_transaction(connection: sqlite3.Connection, goal_id: str,
+                                                 *, timestamp: str, actor_id: str) -> bool:
+        goal = connection.execute("SELECT status FROM goals WHERE id=?", (goal_id,)).fetchone()
+        if goal is None or goal["status"] != "draining":
+            return False
+        if connection.execute(
+            "SELECT 1 FROM work_attempts a JOIN work_units u ON u.id=a.work_unit_id "
+            "WHERE u.goal_id=? AND a.status IN ('leased','active') LIMIT 1", (goal_id,)
+        ).fetchone() is not None:
+            return False
+        connection.execute("UPDATE goals SET status='paused',updated_at=? WHERE id=?", (timestamp, goal_id))
+        StateStore._append_event_in_transaction(
+            connection, "goal.paused", goal_id=goal_id,
+            payload={"actor_id": actor_id, "reason": "drain_completed"},
+        )
+        return True
+
+    @staticmethod
+    def _drain_pagination(limit: int, offset: int) -> None:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise StateError("limit must be an integer from 1 to 100")
+        if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= 1_000_000:
+            raise StateError("offset must be an integer from 0 to 1000000")
+
+    def preview_goal_drain(self, goal_id: str, *, limit: int = 20, offset: int = 0,
+                           at: str | datetime | None = None) -> dict[str, Any]:
+        goal_id = _identifier(goal_id, label="goal_id")
+        self._drain_pagination(limit, offset)
+        timestamp = _timestamp(at)
+        self._ensure()
+        with self._connection(write=False) as connection:
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if version != SCHEMA_VERSION:
+                raise StateError(f"runtime schema {version} requires migration to {SCHEMA_VERSION}")
+            self._assert_audit_chain_in_transaction(connection)
+            self._assert_current_state_integrity_in_transaction(connection)
+            row = connection.execute("SELECT status FROM goals WHERE id=?", (goal_id,)).fetchone()
+            if row is None:
+                raise StateError(f"Unknown goal: {goal_id}")
+            report = self._goal_drain_observation_in_transaction(
+                connection, goal_id, limit=limit, offset=offset, timestamp=timestamp,
+                status_before=row["status"], status_after=row["status"],
+                read_only=True,
+            )
+            if row["status"] == "active":
+                report["status_after"] = "draining" if report["stored_leases"] else "paused"
+            elif row["status"] == "draining" and not report["stored_leases"]:
+                report["status_after"] = "paused"
+            return report
+
+    def drain_goal(self, goal_id: str, *, actor_id: str, limit: int = 20, offset: int = 0,
+                   at: str | datetime | None = None) -> dict[str, Any]:
+        goal_id = _identifier(goal_id, label="goal_id")
+        actor_id = _identifier(actor_id, label="actor_id")
+        self._drain_pagination(limit, offset)
+        timestamp = _timestamp(at)
+        with self._connection() as connection:
+            self._prepare_write(connection)
+            row = connection.execute("SELECT status FROM goals WHERE id=?", (goal_id,)).fetchone()
+            if row is None:
+                raise StateError(f"Unknown goal: {goal_id}")
+            before = row["status"]
+            if before not in {"active", "draining", "paused"}:
+                raise StateError(f"Cannot drain goal from {before}")
+            if before == "paused":
+                report = self._goal_drain_observation_in_transaction(
+                    connection, goal_id, limit=limit, offset=offset, timestamp=timestamp,
+                    status_before=before, status_after="paused", read_only=False,
+                )
+                if report["stored_leases"]:
+                    raise StateError("paused goal holds a stored lease")
+                return report
+            if before == "active":
+                connection.execute("UPDATE goals SET status='draining',updated_at=? WHERE id=?", (timestamp, goal_id))
+                self._append_event_in_transaction(connection, "goal.draining", goal_id=goal_id, payload={"actor_id": actor_id})
+            self._finalize_drain_if_empty_in_transaction(connection, goal_id, timestamp=timestamp, actor_id=actor_id)
+            after = connection.execute("SELECT status FROM goals WHERE id=?", (goal_id,)).fetchone()["status"]
+            return self._goal_drain_observation_in_transaction(
+                connection, goal_id, limit=limit, offset=offset, timestamp=timestamp,
+                status_before=before, status_after=after, read_only=False,
+            )
+
     def _lifecycle(self, goal_id: str, target: str, *, actor_id: str,
                    envelope_sha256: str | None = None, at: str | datetime | None = None) -> dict[str, Any]:
         goal_id = _identifier(goal_id, label="goal_id")
         actor_id = _identifier(actor_id, label="actor_id")
         timestamp = _timestamp(at)
-        allowed = {"active": {"planned", "paused"}, "paused": {"active"}, "stopped": {"planned", "active", "paused"}}
+        allowed = {"active": {"planned", "paused", "draining"}, "paused": {"active", "draining"}, "stopped": {"planned", "active", "draining", "paused"}}
         with self._connection() as connection:
             self._prepare_write(connection)
             row = connection.execute("SELECT status,acceptance FROM goals WHERE id=?", (goal_id,)).fetchone()
@@ -2629,7 +4026,7 @@ class StateStore:
                     contract_value = validate_authority_envelope(_decode(contract_row["contract"], {}))
                 except ValueError as error:
                     raise StateError(f"stored authority envelope is invalid: {error}") from error
-                action = "goal-resume" if row["status"] == "paused" else "goal-activate"
+                action = "goal-resume" if row["status"] in {"paused", "draining"} else "goal-activate"
                 self._check_authorization_in_transaction(connection, goal_id=goal_id, action=action,
                     envelope_sha256=exact, performer_id=actor_id, scope=contract_value["scope"],
                     effect="local-reversible-write", timestamp=timestamp)
@@ -2657,7 +4054,7 @@ class StateStore:
                         )
                     connection.execute(
                         """UPDATE work_attempts SET status=?,ended_at=?,outcome_class=?,outcome_json=?,
-                           tokens_consumed=tokens_consumed+? WHERE id=?""",
+                           tokens_consumed=tokens_consumed+?,token_accounting_source='unavailable' WHERE id=?""",
                         (attempt_status, timestamp, attempt_status, _encode(outcome_evidence), charge, attempt["id"]),
                     )
                 connection.execute("UPDATE work_units SET status=?,current_attempt_id=NULL,lease_holder=NULL,lease_expires_at=NULL,updated_at=? WHERE goal_id=? AND status='leased'", (target, timestamp, goal_id))
@@ -2701,11 +4098,13 @@ class StateStore:
                     )
                 connection.execute(
                     """UPDATE work_attempts SET elapsed_ms=elapsed_ms+min(max(0,CAST((julianday(?) - julianday(acquired_at))*86400000 AS INTEGER)),max(0,CAST((julianday(expires_at) - julianday(acquired_at))*86400000 AS INTEGER))),
-                       status='paused',ended_at=?,outcome_class='paused',outcome_json=?,tokens_consumed=tokens_consumed+? WHERE id=?""",
+                       status='paused',ended_at=?,outcome_class='paused',outcome_json=?,tokens_consumed=tokens_consumed+?,
+                       token_accounting_source='unavailable' WHERE id=?""",
                     (timestamp, timestamp, _encode(outcome_evidence), charge, attempt["id"]),
                 )
             connection.execute("UPDATE work_units SET status='paused',current_attempt_id=NULL,lease_holder=NULL,lease_expires_at=NULL,updated_at=? WHERE status='leased'", (timestamp,))
-            connection.execute("UPDATE goals SET status='paused',updated_at=? WHERE status='active'", (timestamp,))
+            connection.execute("UPDATE goals SET status='paused',updated_at=? WHERE status IN ('active','draining')", (timestamp,))
+            connection.execute("UPDATE budgets SET reserved_tokens=0,updated_at=? WHERE reserved_tokens > 0", (timestamp,))
             self._append_event_in_transaction(connection, "runtime.emergency_stop_set", payload={"actor_id": actor_id, "reason": reason})
         return True
 
@@ -2754,6 +4153,16 @@ class StateStore:
                     issues.append("unsealed authoritative current-state manifest")
                 elif manifest != self._state_manifest_hash(connection):
                     issues.append("authoritative current-state manifest tampered")
+            if len(issues) < limit and int(connection.execute("PRAGMA user_version").fetchone()[0]) >= 13:
+                try:
+                    self._assert_intervention_integrity_in_transaction(connection)
+                except StateError as error:
+                    issues.append(str(error))
+            if len(issues) < limit and int(connection.execute("PRAGMA user_version").fetchone()[0]) >= 14:
+                try:
+                    self._assert_codex_run_integrity_in_transaction(connection)
+                except StateError as error:
+                    issues.append(str(error))
             if len(issues) < limit:
                 try:
                     # Hashes establish provenance; this second pass verifies

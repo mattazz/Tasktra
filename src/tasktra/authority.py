@@ -224,6 +224,17 @@ def _validate_scope(value: Mapping[str, Any], *, label: str = "scope") -> None:
             seen_paths.add(key)
 
 
+def validate_project_scope(value: Mapping[str, Any], *, label: str = "scope") -> None:
+    """Validate one closed portable project scope for other bounded inputs."""
+    if not isinstance(value, Mapping) or set(value) != {"paths", "exclusions"}:
+        raise AuthorityError(f"{label} must contain exactly paths and exclusions")
+    if not isinstance(value["paths"], list) or not value["paths"]:
+        raise AuthorityError(f"{label}.paths must be a nonempty list")
+    if not isinstance(value["exclusions"], list):
+        raise AuthorityError(f"{label}.exclusions must be a list")
+    _validate_scope(value, label=label)
+
+
 def _validate_resource_scope_string(value: Any, *, label: str) -> str:
     """Require a small, non-secret-bearing scope component.
 
@@ -306,7 +317,7 @@ def _validate_envelope_semantics(value: dict[str, Any]) -> None:
             raise AuthorityError(f"Duplicate acceptance criterion id: {identifier!r}")
         criteria_ids.add(identifier)
 
-    _validate_scope(value["scope"])
+    validate_project_scope(value["scope"])
 
     allowed_actions = set(value["allowed_actions"])
     prohibited_actions = set(value["prohibited_actions"])
@@ -452,7 +463,7 @@ def _validate_transition_semantics(value: dict[str, Any]) -> None:
     _optional_identifier(value["work_unit_id"], label="work_unit_id")
     _identifier(value["action"], label="action")
     _identifier(value["performer_id"], label="performer_id")
-    _validate_scope(value["scope"], label="approval scope")
+    validate_project_scope(value["scope"], label="approval scope")
     approver = value["approver"]
     if approver["kind"] not in APPROVER_KINDS:
         raise AuthorityError("approver.kind must be human or steward")

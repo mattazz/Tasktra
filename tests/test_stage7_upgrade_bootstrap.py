@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
@@ -11,6 +12,7 @@ import unittest
 from tasktra.authority import authority_envelope_sha256
 from tasktra.autonomy import AutonomyError, AutonomyStore, LOCAL_REVERSIBLE_WRITE
 from tasktra.state import SCHEMA_VERSION, StateError, StateStore, _now
+from tests.runtime_schema_helpers import peel_schema13_interventions
 
 
 def envelope() -> dict:
@@ -50,7 +52,47 @@ class UpgradeBootstrapTests(unittest.TestCase):
         try:
             connection.execute("DROP TABLE schedule_resume_idempotency")
             connection.execute("ALTER TABLE transition_approvals DROP COLUMN provenance")
+            connection.execute("DROP TABLE IF EXISTS work_unit_dependencies")
+            peel_schema13_interventions(connection, target_version=8)
             connection.execute("PRAGMA user_version = 8")
+            StateStore._seal_current_state_in_transaction(
+                connection, _now(), existing_only=True,
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        return store, digest
+
+    def _schema_ten_store(self, root: Path, *, with_work_unit: bool = False) -> tuple[AutonomyStore, str]:
+        store = AutonomyStore(root / "tasktra.sqlite")
+        store.migrate()
+        store.create_goal(
+            goal_id="upgrade-goal", title="Upgrade", description="Upgrade",
+            acceptance=["Upgraded."],
+        )
+        contract = envelope()
+        digest = authority_envelope_sha256(contract)
+        now = datetime.now(timezone.utc)
+        store.define_goal_contract("upgrade-goal", contract, actor_id="owner", at=now)
+        store.record_transition_approval(
+            goal_id="upgrade-goal", action="goal-activate", effect=LOCAL_REVERSIBLE_WRITE,
+            envelope_sha256=digest, approver_id="human", performer_id="owner",
+            valid_until=now + timedelta(hours=1), at=now,
+        )
+        store.activate_goal("upgrade-goal", actor_id="owner", envelope_sha256=digest, at=now)
+        if with_work_unit:
+            store.create_work_unit(
+                goal_id="upgrade-goal", work_unit_id="upgrade-unit", title="Apply upgrade",
+                scope={"paths": ["."], "exclusions": []},
+            )
+        connection = sqlite3.connect(store.path)
+        connection.row_factory = sqlite3.Row
+        try:
+            # A real schema-10 ledger has no dependency table.  Seal only the
+            # tables that existed at that historical schema before migration.
+            connection.execute("DROP TABLE IF EXISTS work_unit_dependencies")
+            peel_schema13_interventions(connection, target_version=10)
+            connection.execute("PRAGMA user_version = 10")
             StateStore._seal_current_state_in_transaction(
                 connection, _now(), existing_only=True,
             )
@@ -79,9 +121,9 @@ class UpgradeBootstrapTests(unittest.TestCase):
         connection = sqlite3.connect(store.path)
         connection.row_factory = sqlite3.Row
         try:
-            connection.execute("BEGIN IMMEDIATE")
-            connection.execute("ALTER TABLE work_units DROP COLUMN acceptance_checks")
-            connection.execute("ALTER TABLE workflow_evidence DROP COLUMN completion_evidence_json")
+            # Schema 11 already owns the immutable dependency table.  Its
+            # semantic schema-12 migration preserves this exact table.
+            peel_schema13_interventions(connection, target_version=11)
             connection.execute("PRAGMA user_version = 11")
             StateStore._seal_current_state_in_transaction(
                 connection, _now(), existing_only=True,
@@ -90,6 +132,39 @@ class UpgradeBootstrapTests(unittest.TestCase):
         finally:
             connection.close()
         return store, digest
+
+    def _schema_ten_upgrade_effect(self, root: Path, *, work_unit_id: str | None = None) -> tuple[AutonomyStore, str]:
+        store, digest = self._schema_ten_store(root, with_work_unit=work_unit_id is not None)
+        store.record_transition_approval(
+            goal_id="upgrade-goal", work_unit_id=work_unit_id, action="local-effect", effect=LOCAL_REVERSIBLE_WRITE,
+            envelope_sha256=digest, approver_id="goal-steward",
+            performer_id="coordinator", approver_kind="steward",
+            authority_clause="exact reviewed upgrade plan",
+            evidence=["upgrade-plan-reviewed"],
+            valid_until=datetime.now(timezone.utc) + timedelta(hours=1),
+            approval_id="upgrade-receipt-approval",
+        )
+        store.prepare_effect(
+            idempotency_key="upgrade-receipt", goal_id="upgrade-goal", work_unit_id=work_unit_id,
+            effect_class=LOCAL_REVERSIBLE_WRITE, operation="local-effect",
+            request={"action": "upgrade-apply", "plan_sha256": "e" * 64},
+            envelope_sha256=digest, performer_id="coordinator",
+        )
+        return store, "upgrade-receipt"
+
+    @staticmethod
+    def _receipt_state(store: AutonomyStore, idempotency_key: str) -> tuple[str, int, int]:
+        connection = sqlite3.connect(store.path)
+        try:
+            return (
+                str(connection.execute(
+                    "SELECT status FROM effect_intents WHERE idempotency_key=?", (idempotency_key,),
+                ).fetchone()[0]),
+                int(connection.execute("SELECT count(*) FROM effect_receipts").fetchone()[0]),
+                int(connection.execute("SELECT count(*) FROM audit_events").fetchone()[0]),
+            )
+        finally:
+            connection.close()
 
     def test_exact_steward_approval_and_effect_can_bootstrap_schema_eight(self) -> None:
         with TemporaryDirectory() as directory:
@@ -118,6 +193,200 @@ class UpgradeBootstrapTests(unittest.TestCase):
             self.assertTrue(Path(str(migration["backup_path"])).is_file())
             self.assertTrue(store.verify_audit()["ok"])
 
+    def test_exact_steward_approval_and_effect_can_bootstrap_schema_ten(self) -> None:
+        with TemporaryDirectory() as directory:
+            store, digest = self._schema_ten_store(Path(directory))
+            approval = store.record_transition_approval(
+                goal_id="upgrade-goal", action="local-effect", effect=LOCAL_REVERSIBLE_WRITE,
+                envelope_sha256=digest, approver_id="goal-steward",
+                performer_id="coordinator", approver_kind="steward",
+                authority_clause="exact reviewed upgrade plan",
+                evidence=["upgrade-plan-reviewed"],
+                valid_until=datetime.now(timezone.utc) + timedelta(hours=1),
+                approval_id="upgrade-local-effect-schema-ten",
+            )
+            self.assertEqual(approval["id"], "upgrade-local-effect-schema-ten")
+            intent = store.prepare_effect(
+                idempotency_key="upgrade-once-schema-ten", goal_id="upgrade-goal", work_unit_id=None,
+                effect_class=LOCAL_REVERSIBLE_WRITE, operation="local-effect",
+                request={"action": "upgrade-apply", "plan_sha256": "c" * 64},
+                envelope_sha256=digest, performer_id="coordinator",
+            )
+            self.assertEqual(intent["status"], "pending")
+
+            migration = store.migrate_with_evidence()
+
+            self.assertEqual((migration["before_schema"], migration["after_schema"]), (10, SCHEMA_VERSION))
+            self.assertTrue(Path(str(migration["backup_path"])).is_file())
+            self.assertTrue(store.verify_audit()["ok"])
+
+    def test_exact_steward_approval_effect_and_failed_receipt_can_bootstrap_schema_eleven(self) -> None:
+        with TemporaryDirectory() as directory:
+            store, digest = self._schema_eleven_store(Path(directory))
+            store.record_transition_approval(
+                goal_id="upgrade-goal", action="local-effect", effect=LOCAL_REVERSIBLE_WRITE,
+                envelope_sha256=digest, approver_id="goal-steward",
+                performer_id="coordinator", approver_kind="steward",
+                authority_clause="exact reviewed upgrade plan",
+                evidence=["upgrade-plan-reviewed"],
+                valid_until=datetime.now(timezone.utc) + timedelta(hours=1),
+                approval_id="upgrade-local-effect-schema-eleven",
+            )
+            store.prepare_effect(
+                idempotency_key="upgrade-once-schema-eleven", goal_id="upgrade-goal", work_unit_id=None,
+                effect_class=LOCAL_REVERSIBLE_WRITE, operation="local-effect",
+                request={"action": "upgrade-apply", "plan_sha256": "a" * 64},
+                envelope_sha256=digest, performer_id="coordinator",
+            )
+            receipt = store.record_effect_receipt(
+                idempotency_key="upgrade-once-schema-eleven", outcome="failed",
+                evidence={"reason": "validation failure"}, performer_id="coordinator",
+            )
+
+            migration = store.migrate_with_evidence()
+
+            self.assertEqual(receipt["outcome"], "failed")
+            self.assertEqual((migration["before_schema"], migration["after_schema"]), (11, SCHEMA_VERSION))
+            self.assertTrue(Path(str(migration["backup_path"])).is_file())
+            self.assertTrue(store.verify_audit()["ok"])
+
+    def test_schema_ten_bridge_rejects_ordinary_claims_and_remote_effects(self) -> None:
+        with TemporaryDirectory() as directory:
+            store, digest = self._schema_ten_store(Path(directory))
+            with self.assertRaisesRegex(StateError, "only permits"):
+                store.record_transition_approval(
+                    goal_id="upgrade-goal", action="work-claim", effect=LOCAL_REVERSIBLE_WRITE,
+                    envelope_sha256=digest, approver_id="goal-steward",
+                    performer_id="coordinator", approver_kind="steward",
+                    valid_until=datetime.now(timezone.utc) + timedelta(hours=1),
+                )
+            with self.assertRaisesRegex(AutonomyError, "only permits"):
+                store.prepare_effect(
+                    idempotency_key="remote-denied", goal_id="upgrade-goal", work_unit_id=None,
+                    effect_class="remote-mutation", operation="remote-effect",
+                    request={"action": "upgrade-apply", "plan_sha256": "d" * 64},
+                    envelope_sha256=digest, performer_id="coordinator",
+                )
+
+    def test_schema_ten_receipt_bridge_records_only_a_failed_exact_upgrade(self) -> None:
+        with TemporaryDirectory() as directory:
+            store, key = self._schema_ten_upgrade_effect(Path(directory))
+
+            receipt = store.record_effect_receipt(
+                idempotency_key=key, outcome="failed", evidence={"reason": "validation failed"},
+                performer_id="coordinator",
+            )
+            replay = store.record_effect_receipt(
+                idempotency_key=key, outcome="failed", evidence={"reason": "validation failed"},
+                performer_id="coordinator",
+            )
+
+            self.assertEqual((receipt["outcome"], receipt["id"]), ("failed", replay["id"]))
+            self.assertEqual(self._receipt_state(store, key)[:2], ("received", 1))
+            before = self._receipt_state(store, key)
+            with self.assertRaisesRegex(AutonomyError, "conflicts"):
+                store.record_effect_receipt(
+                    idempotency_key=key, outcome="failed", evidence={"reason": "different"},
+                    performer_id="coordinator",
+                )
+            self.assertEqual(self._receipt_state(store, key), before)
+
+    def test_schema_ten_receipt_bridge_allows_a_unit_bound_failed_upgrade(self) -> None:
+        with TemporaryDirectory() as directory:
+            store, key = self._schema_ten_upgrade_effect(
+                Path(directory), work_unit_id="upgrade-unit",
+            )
+
+            receipt = store.record_effect_receipt(
+                idempotency_key=key, outcome="failed", evidence={"reason": "validation failed"},
+                performer_id="coordinator",
+            )
+
+            self.assertEqual(receipt["outcome"], "failed")
+            self.assertEqual(self._receipt_state(store, key)[:2], ("received", 1))
+
+    def test_schema_ten_receipt_bridge_denies_wrong_performer_success_remote_and_tampering(self) -> None:
+        with self.subTest(case="wrong performer"), TemporaryDirectory() as directory:
+            store, key = self._schema_ten_upgrade_effect(Path(directory))
+            before = self._receipt_state(store, key)
+            with self.assertRaisesRegex(AutonomyError, "authorized intent performer"):
+                store.record_effect_receipt(
+                    idempotency_key=key, outcome="failed", evidence={"reason": "failed"},
+                    performer_id="intruder",
+                )
+            self.assertEqual(self._receipt_state(store, key), before)
+
+        with self.subTest(case="success"), TemporaryDirectory() as directory:
+            store, key = self._schema_ten_upgrade_effect(Path(directory))
+            before = self._receipt_state(store, key)
+            with self.assertRaisesRegex(AutonomyError, "only permits"):
+                store.record_effect_receipt(
+                    idempotency_key=key, outcome="success", evidence={"reason": "wrong outcome"},
+                    performer_id="coordinator",
+                )
+            self.assertEqual(self._receipt_state(store, key), before)
+
+        with self.subTest(case="remote effect"), TemporaryDirectory() as directory:
+            store, key = self._schema_ten_upgrade_effect(Path(directory))
+            connection = sqlite3.connect(store.path)
+            connection.row_factory = sqlite3.Row
+            try:
+                connection.execute(
+                    "UPDATE effect_intents SET effect_class='remote-mutation', operation='remote-effect' "
+                    "WHERE idempotency_key=?", (key,),
+                )
+                StateStore._seal_current_state_in_transaction(connection, _now(), existing_only=True)
+                connection.commit()
+            finally:
+                connection.close()
+            before = self._receipt_state(store, key)
+            with self.assertRaisesRegex(AutonomyError, "only permits"):
+                store.record_effect_receipt(
+                    idempotency_key=key, outcome="failed", evidence={"reason": "wrong effect"},
+                    performer_id="coordinator",
+                )
+            self.assertEqual(self._receipt_state(store, key), before)
+
+        with self.subTest(case="tampered intent"), TemporaryDirectory() as directory:
+            store, key = self._schema_ten_upgrade_effect(Path(directory))
+            connection = sqlite3.connect(store.path)
+            try:
+                connection.execute("UPDATE effect_intents SET request_json='{}' WHERE idempotency_key=?", (key,))
+                connection.commit()
+            finally:
+                connection.close()
+            before = self._receipt_state(store, key)
+            with self.assertRaisesRegex(StateError, "unsealed or tampered"):
+                store.record_effect_receipt(
+                    idempotency_key=key, outcome="failed", evidence={"reason": "tampered"},
+                    performer_id="coordinator",
+                )
+            self.assertEqual(self._receipt_state(store, key), before)
+
+        with self.subTest(case="resealed request digest mismatch"), TemporaryDirectory() as directory:
+            store, key = self._schema_ten_upgrade_effect(Path(directory))
+            connection = sqlite3.connect(store.path)
+            connection.row_factory = sqlite3.Row
+            try:
+                connection.execute(
+                    "UPDATE effect_intents SET request_json=? WHERE idempotency_key=?",
+                    (json.dumps({
+                        "authorized_performer_id": "coordinator",
+                        "request": {"action": "upgrade-apply", "plan_sha256": "f" * 64},
+                    }, separators=(",", ":")), key),
+                )
+                StateStore._seal_current_state_in_transaction(connection, _now(), existing_only=True)
+                connection.commit()
+            finally:
+                connection.close()
+            before = self._receipt_state(store, key)
+            with self.assertRaisesRegex(AutonomyError, "only permits"):
+                store.record_effect_receipt(
+                    idempotency_key=key, outcome="failed", evidence={"reason": "digest mismatch"},
+                    performer_id="coordinator",
+                )
+            self.assertEqual(self._receipt_state(store, key), before)
+
     def test_schema_eleven_bridge_records_only_bound_upgrade_failure_receipt(self) -> None:
         with TemporaryDirectory() as directory:
             store, digest = self._schema_eleven_store(Path(directory))
@@ -141,12 +410,12 @@ class UpgradeBootstrapTests(unittest.TestCase):
                 "action": "upgrade-apply", "plan_sha256": plan_sha256,
                 "error": "migration failed before schema change",
             }
-            with self.assertRaisesRegex(AutonomyError, "only permits a bound upgrade terminal failure"):
+            with self.assertRaisesRegex(AutonomyError, "only permits a failed exact local upgrade effect"):
                 store.record_effect_receipt(
                     idempotency_key="upgrade-schema-eleven-failure", outcome="success",
                     evidence=evidence, performer_id="coordinator",
                 )
-            with self.assertRaisesRegex(AutonomyError, "only permits a bound upgrade terminal failure"):
+            with self.assertRaisesRegex(AutonomyError, "requires bound upgrade failure evidence"):
                 store.record_effect_receipt(
                     idempotency_key="upgrade-schema-eleven-failure", outcome="indeterminate",
                     evidence={**evidence, "plan_sha256": "d" * 64}, performer_id="coordinator",

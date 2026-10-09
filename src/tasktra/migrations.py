@@ -283,7 +283,12 @@ def rollback_migration(
 
 def _normalize_preview(preview: Mapping[str, object]) -> dict[str, object]:
     base_fields = {"ok", "changes", "blockers", "mutation"}
-    if not isinstance(preview, Mapping) or set(preview) not in (base_fields, base_fields | {"snapshot_paths"}):
+    optional_fields = {"snapshot_paths", "upgrade_plan_sha256"}
+    if (
+        not isinstance(preview, Mapping)
+        or not base_fields.issubset(preview)
+        or not set(preview).issubset(base_fields | optional_fields)
+    ):
         raise MigrationError("migration preview has missing or unknown fields")
     if preview.get("ok") is not True or preview.get("mutation") != "none" or preview.get("blockers") != []:
         raise MigrationError("only an unblocked read-only migration preview may be applied")
@@ -321,7 +326,14 @@ def _normalize_preview(preview: Mapping[str, object]) -> dict[str, object]:
         "snapshot_paths",
         maximum=MAX_MIGRATION_FILES,
     )
-    return {"schema_version": 1, "changes": normalized, "snapshot_paths": list(snapshot_paths)}
+    result: dict[str, object] = {
+        "schema_version": 1, "changes": normalized, "snapshot_paths": list(snapshot_paths),
+    }
+    if "upgrade_plan_sha256" in preview:
+        parent = preview["upgrade_plan_sha256"]
+        _require_sha256(parent, "upgrade_plan_sha256")
+        result["upgrade_plan_sha256"] = parent
+    return result
 
 
 def _write_paths(normalized: Mapping[str, object]) -> tuple[str, ...]:

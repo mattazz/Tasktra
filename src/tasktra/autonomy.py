@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import hmac
@@ -10,12 +11,13 @@ import json
 from pathlib import PurePosixPath
 import re
 import secrets
+import sqlite3
 from typing import Any
 from urllib.parse import parse_qsl, urlparse
 from uuid import uuid4
 
 from .state import (
-    StateError, StateStore, _decode, _encode, _identifier, _optional_identifier,
+    SCHEMA_VERSION, StateError, StateStore, _attempt_binding_sha256, _authority_row_hash, _decode, _encode, _identifier, _optional_identifier,
     _row, _timestamp, unmeasured_usage_evidence, validate_deterministic_review_completion_evidence,
     validate_observed_usage_evidence,
 )
@@ -27,6 +29,17 @@ from .workflow import (
     validate_workflow_completion_token,
     workflow_completion_token,
 )
+from .interventions import (
+    InterventionError,
+    canonical_intervention_request,
+    canonical_intervention_response,
+    intervention_request_sha256,
+    intervention_response_sha256,
+    validate_intervention_request,
+    validate_intervention_response,
+)
+from .codex_runs import CodexRunError, contains_secret, require_digest, sha256_json, task_name, validate_finish
+from .delegation import DelegationError, delegation_plan
 
 
 WORK_CLAIM_ACTION = "work-claim"
@@ -51,6 +64,22 @@ ProviderOperationDescriptor = OperationDescriptor
 
 class AutonomyError(StateError):
     """Raised when an autonomous execution transition is not eligible."""
+
+
+class InterventionConflictError(AutonomyError):
+    """A bounded, retryable intervention compare-and-swap conflict."""
+
+    def __init__(self, code: str, *, details: Mapping[str, Any] | None = None):
+        self.code = code
+        self.details = dict(details or {})
+        super().__init__(code)
+
+
+def _response_head_changed(head: Any) -> InterventionConflictError:
+    return InterventionConflictError("response_head_changed", details={
+        "current_response_id": None if head is None else head["current_response_id"],
+        "current_response_sha256": None if head is None else head["current_response_sha256"],
+    })
 
 
 def _clock(value: str | datetime | None) -> tuple[str, datetime]:
@@ -87,6 +116,39 @@ def _json_hash(value: Mapping[str, Any]) -> tuple[str, str]:
     if len(encoded) > MAX_CANONICAL_JSON_BYTES:
         raise AutonomyError(f"canonical JSON exceeds the {MAX_CANONICAL_JSON_BYTES}-byte limit")
     return canonical, sha256(encoded).hexdigest()
+
+
+def _contains_supplied_lease_token(value: Any, lease_token: str) -> bool:
+    """A lease secret authorizes the transition but is never durable evidence."""
+    if not lease_token:
+        return False
+    if isinstance(value, str):
+        return lease_token in value
+    if isinstance(value, Mapping):
+        return any(_contains_supplied_lease_token(item, lease_token) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_supplied_lease_token(item, lease_token) for item in value)
+    return False
+
+
+def _contains_persisted_lease_token(value: Any, lease_token_hash: str, token_length: int | None = None) -> bool:
+    """Reject exact or embedded bounded token candidates without retaining plaintext."""
+    if isinstance(value, str):
+        candidates = [value]
+        if token_length is None:
+            for length in range(32, min(512, len(value)) + 1):
+                candidates.extend(value[index:index + length] for index in range(len(value) - length + 1))
+        elif len(value) >= token_length:
+            candidates.extend(value[index:index + token_length] for index in range(len(value) - token_length + 1))
+        for candidate in candidates:
+            if hmac.compare_digest(sha256(candidate.encode("utf-8")).hexdigest(), lease_token_hash):
+                return True
+        return False
+    if isinstance(value, Mapping):
+        return any(_contains_persisted_lease_token(item, lease_token_hash, token_length) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_persisted_lease_token(item, lease_token_hash, token_length) for item in value)
+    return False
 
 
 def _scope_paths(scope: Mapping[str, Any], *, label: str, permit_empty: bool) -> tuple[list[str], list[str]]:
@@ -346,6 +408,10 @@ class AutonomyStore(StateStore):
             approval = _row(row) or {}
             if approval["approver_id"] == performer_id:
                 continue
+            # An approval without an expiry is malformed legacy authority,
+            # never an indefinite permission to claim work.
+            if approval["valid_until"] is None:
+                continue
             if require_human and approval["approver_kind"] != "human":
                 continue
             if approval["valid_until"] is not None and approval["valid_until"] <= timestamp:
@@ -425,11 +491,11 @@ class AutonomyStore(StateStore):
             )
 
     @staticmethod
-    def _active_goal(connection: Any, goal_id: str) -> None:
+    def _active_goal(connection: Any, goal_id: str, *, allow_draining: bool = False) -> None:
         row = connection.execute("SELECT status FROM goals WHERE id=?", (goal_id,)).fetchone()
         if row is None:
             raise AutonomyError(f"Unknown goal: {goal_id}")
-        if row["status"] != "active":
+        if row["status"] not in ({"active", "draining"} if allow_draining else {"active"}):
             raise AutonomyError("goal is not active")
 
     @staticmethod
@@ -455,6 +521,34 @@ class AutonomyStore(StateStore):
         return max(0, int((expires - acquired).total_seconds() * 1000))
 
     @staticmethod
+    def _codex_accounting_in_transaction(connection: Any, *, attempt_id: str,
+                                         tokens_consumed: int | None, accounting_source: str | None) -> tuple[int, str]:
+        if tokens_consumed is not None and (not isinstance(tokens_consumed, int) or isinstance(tokens_consumed, bool) or tokens_consumed < 0):
+            raise AutonomyError("tokens_consumed must be a non-negative integer or null")
+        source = accounting_source or ("unavailable" if tokens_consumed is None else "caller-declared")
+        if source not in {"caller-declared", "host-measured", "unavailable"}:
+            raise AutonomyError("accounting_source must be caller-declared, host-measured, or unavailable")
+        if source == "unavailable":
+            if tokens_consumed is not None:
+                raise AutonomyError("unavailable accounting requires null tokens_consumed")
+            return 0, source
+        if tokens_consumed is None:
+            raise AutonomyError("declared accounting requires an explicit tokens_consumed value")
+        if source == "host-measured":
+            totals = connection.execute(
+                """SELECT count(p.id) AS prepared, count(f.run_id) AS finished,
+                    COALESCE(sum(CASE WHEN f.usage_status='measured' THEN f.input_tokens+f.output_tokens END),0) AS measured
+                   FROM codex_run_preparations p LEFT JOIN codex_run_finishes f ON f.run_id=p.id WHERE p.attempt_id=?""",
+                (attempt_id,),
+            ).fetchone()
+            if int(totals["prepared"]) == 0 or int(totals["prepared"]) != int(totals["finished"]) or connection.execute(
+                """SELECT 1 FROM codex_run_preparations p JOIN codex_run_finishes f ON f.run_id=p.id
+                   WHERE p.attempt_id=? AND f.usage_status!='measured' LIMIT 1""", (attempt_id,)
+            ).fetchone() is not None or int(totals["measured"]) != tokens_consumed:
+                raise AutonomyError("host-measured accounting requires complete measured terminal Codex runs with the exact token sum")
+        return tokens_consumed, source
+
+    @staticmethod
     def _live_reservation_ms(connection: Any, goal_id: str, *, excluding_attempt_id: str | None = None) -> int:
         query = """SELECT a.acquired_at,a.expires_at FROM work_attempts a
                    JOIN work_units u ON u.id=a.work_unit_id WHERE u.goal_id=? AND a.status='leased'"""
@@ -463,6 +557,245 @@ class AutonomyStore(StateStore):
             query += " AND a.id!=?"
             params.append(excluding_attempt_id)
         return sum(AutonomyStore._lease_reservation_ms(row) for row in connection.execute(query, params))
+
+    @contextmanager
+    def _readonly_connection(self) -> Any:
+        """Open one immutable SQLite snapshot without creating or repairing state."""
+        try:
+            uri = f"{self.path.resolve().as_uri()}?mode=ro"
+            connection = sqlite3.connect(uri, uri=True, isolation_level=None)
+        except (OSError, sqlite3.Error) as error:
+            raise StateError(f"runtime database cannot be opened read-only: {self.path}") from error
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA busy_timeout = 5000")
+            connection.execute("PRAGMA query_only = ON")
+            connection.execute("BEGIN")
+            yield connection
+            connection.rollback()
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _prepare_readonly(connection: Any) -> None:
+        """Verify a complete sealed ledger before a preview relies on it."""
+        try:
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if version != SCHEMA_VERSION:
+                raise StateError(f"runtime schema {version} requires migration to {SCHEMA_VERSION}")
+            StateStore._assert_audit_chain_in_transaction(connection)
+            StateStore._assert_current_state_integrity_in_transaction(connection)
+        except sqlite3.Error as error:
+            raise StateError("runtime state cannot be read or its integrity verified") from error
+
+    @staticmethod
+    def _selection_reason(error: AutonomyError) -> str:
+        """Expose a stable category without leaking approval or scope contents."""
+        message = str(error)
+        if "exact current envelope hash" in message:
+            return "authorization.envelope_mismatch"
+        if "does not allow this action" in message:
+            return "authorization.action_not_allowed"
+        if "does not allow this effect" in message:
+            return "authorization.effect_not_allowed"
+        if "scope is outside the authority envelope" in message:
+            return "authorization.scope_outside_envelope"
+        if "no current approval" in message:
+            return "approval.unavailable"
+        if "emergency-stopped" in message:
+            return "runtime.emergency_stopped"
+        return "authorization.unavailable"
+
+    def _select_next_work(self, connection: Any, *, goal_id: str, performer_id: str,
+                          envelope_sha256: str, lease_seconds: int,
+                          token_reservation: int, timestamp: str, now: datetime,
+                          mutate_exhausted: bool, explain: bool = False,
+                          candidate_filter: str | None = None,
+                          claim_filter: str | None = None,
+                          candidate_limit: int = 0, candidate_offset: int = 0) -> dict[str, Any]:
+        """Evaluate the queue once for both claim and explanation.
+
+        ``mutate_exhausted`` preserves the historic claim-side transition for a
+        unit which has consumed its per-unit attempt limit.  Preview leaves the
+        same unit visible and reports why it cannot be chosen.
+        """
+        budget = connection.execute("SELECT * FROM budgets WHERE goal_id=?", (goal_id,)).fetchone()
+        if budget is None:
+            if explain:
+                missing = ["goal.budgets_missing"]
+                if connection.execute("SELECT 1 FROM goal_contracts WHERE goal_id=?", (goal_id,)).fetchone() is None:
+                    missing.append("goal.contract_missing")
+                return self._empty_work_selection(connection, goal_id, missing, candidate_filter, candidate_limit, candidate_offset)
+            raise AutonomyError(f"Unknown goal: {goal_id}")
+        if budget["max_concurrency"] is None or budget["total_attempts"] is None:
+            if explain:
+                missing = ["goal.budgets_missing"]
+                if connection.execute("SELECT 1 FROM goal_contracts WHERE goal_id=?", (goal_id,)).fetchone() is None:
+                    missing.append("goal.contract_missing")
+                return self._empty_work_selection(connection, goal_id, missing, candidate_filter, candidate_limit, candidate_offset)
+            raise AutonomyError("goal lacks Stage 3 execution budgets")
+        contract_row = connection.execute("SELECT contract FROM goal_contracts WHERE goal_id=?", (goal_id,)).fetchone()
+        if contract_row is None:
+            if explain:
+                return self._empty_work_selection(connection, goal_id, "goal.contract_missing", candidate_filter, candidate_limit, candidate_offset)
+            raise AutonomyError("goal lacks an authority envelope")
+        try:
+            contract = load_authority_envelope(contract_row["contract"])
+        except ValueError as error:
+            raise AutonomyError(f"stored authority envelope is invalid: {error}") from error
+
+        goal_reasons: list[str] = []
+        dependency_error: StateError | None = None
+        try:
+            self._dependencies_complete_in_transaction(connection, goal_id)
+        except StateError as error:
+            dependency_error = error
+            goal_reasons.append("goal.dependencies_incomplete")
+        if mutate_exhausted and dependency_error is not None:
+            # Keep claim's established failure precedence: an incomplete
+            # dependency is observed before checkpoint or budget gates.
+            raise AutonomyError(str(dependency_error)) from dependency_error
+        checkpoints = self._verify_goal_checkpoints_in_transaction(connection, goal_id, contract)
+        next_checkpoint = next((row["checkpoint_id"] for row in checkpoints if row["status"] != "reached"), None)
+        if contract["checkpoints"] and next_checkpoint is None:
+            goal_reasons.append("goal.checkpoints_complete")
+
+        active = connection.execute(
+            """SELECT count(*) FROM work_attempts a JOIN work_units u ON u.id=a.work_unit_id
+               WHERE u.goal_id=? AND a.status='leased'""", (goal_id,)
+        ).fetchone()[0]
+        detached_runs = connection.execute(
+            """SELECT count(*) FROM codex_run_preparations p JOIN work_attempts a ON a.id=p.attempt_id
+               JOIN work_units u ON u.id=a.work_unit_id LEFT JOIN codex_run_finishes f ON f.run_id=p.id
+               WHERE u.goal_id=? AND a.status!='leased' AND f.run_id IS NULL""", (goal_id,)
+        ).fetchone()[0]
+        effective_occupancy = int(active) + int(detached_runs)
+        if effective_occupancy >= budget["max_concurrency"]:
+            goal_reasons.append("budget.concurrency_exhausted")
+            if mutate_exhausted:
+                return {
+                    "selected": None, "candidates": [], "candidate_total": 0,
+                    "goal_reason_codes": goal_reasons, "active_leases": int(active), "effective_occupancy": effective_occupancy,
+                    "max_concurrency": int(budget["max_concurrency"]), "lease_expires_at": None,
+                }
+        if budget["total_attempts"] is not None and budget["consumed_attempts"] >= budget["total_attempts"]:
+            goal_reasons.append("budget.attempts_exhausted")
+            if mutate_exhausted:
+                raise AutonomyError("attempt budget is exhausted")
+        if budget["total_tokens"] is not None and (
+            budget["consumed_tokens"] + budget["reserved_tokens"] + token_reservation > budget["total_tokens"]
+        ):
+            goal_reasons.append("budget.tokens_exhausted")
+            if mutate_exhausted:
+                raise AutonomyError("token budget would be exceeded")
+        live_reservation = self._live_reservation_ms(connection, goal_id)
+        remaining_elapsed = None if budget["total_elapsed_ms"] is None else (
+            int(budget["total_elapsed_ms"]) - int(budget["consumed_elapsed_ms"]) - live_reservation
+        )
+        try:
+            expiry, _ = self._lease_expiry(now, lease_seconds, remaining_elapsed)
+        except AutonomyError as error:
+            if str(error) == "elapsed budget is exhausted":
+                goal_reasons.append("budget.elapsed_exhausted")
+                expiry = None
+                if mutate_exhausted:
+                    raise
+            else:
+                raise
+
+        candidates: list[dict[str, Any]] = []
+        candidate_total = 0
+        selected: Any = None
+        global_ready = not goal_reasons
+        if mutate_exhausted and "goal.checkpoints_complete" in goal_reasons:
+            return {
+                    "selected": None, "candidates": [], "candidate_total": 0,
+                    "goal_reason_codes": goal_reasons, "active_leases": int(active), "effective_occupancy": effective_occupancy,
+                "max_concurrency": int(budget["max_concurrency"]), "lease_expires_at": expiry,
+            }
+        prerequisite_graph = self._work_dependency_graph_in_transaction(connection, goal_id)
+        for candidate in connection.execute(
+            "SELECT id,status,current_attempt_id,retry_at,checkpoint_id,attempt_count FROM work_units WHERE goal_id=? ORDER BY id",
+            (goal_id,),
+        ):
+            if claim_filter is not None and candidate["id"] != claim_filter:
+                continue
+            reasons: list[str] = []
+            claimable_status = candidate["status"] in {"eligible", "retry-wait", "planned"}
+            if candidate["current_attempt_id"] is not None or candidate["status"] == "leased":
+                reasons.append("candidate.lease_held")
+            elif not claimable_status:
+                reasons.append("candidate.status_not_claimable")
+            if candidate["retry_at"] is not None and candidate["retry_at"] > timestamp:
+                reasons.append("candidate.retry_wait")
+            if contract["checkpoints"] and candidate["checkpoint_id"] != next_checkpoint:
+                reasons.append("candidate.checkpoint_not_current")
+            if not contract["checkpoints"] and candidate["checkpoint_id"] is not None:
+                reasons.append("candidate.checkpoint_not_current")
+            if candidate["attempt_count"] >= budget["total_attempts"]:
+                reasons.append("candidate.attempts_exhausted")
+                if mutate_exhausted and global_ready and selected is None and not reasons[:-1]:
+                    connection.execute(
+                        "UPDATE work_units SET status='exhausted',last_outcome_class='exhausted',updated_at=? WHERE id=?",
+                        (timestamp, candidate["id"]),
+                    )
+            if not reasons and not prerequisite_graph[candidate["id"]]["ready"]:
+                reasons.append("candidate.prerequisites_incomplete")
+            locally_ready = not reasons
+            if locally_ready:
+                try:
+                    self._authorize(connection, goal_id=goal_id, work_unit_id=candidate["id"], action=WORK_CLAIM_ACTION,
+                                    envelope_sha256=envelope_sha256, performer_id=performer_id,
+                                    effect=LOCAL_REVERSIBLE_WRITE, timestamp=timestamp)
+                except AutonomyError as error:
+                    reasons.append(self._selection_reason(error))
+            if selected is None and global_ready and not reasons:
+                selected = candidate
+                if mutate_exhausted:
+                    # Claim only needs the first authorized candidate.  This
+                    # also preserves its historic exhaustion-prefix behavior.
+                    break
+            if candidate_filter is None or candidate["id"] == candidate_filter:
+                if candidate_total >= candidate_offset and len(candidates) < candidate_limit:
+                    candidates.append({"row": candidate, "eligible": global_ready and not reasons, "reason_codes": reasons})
+                candidate_total += 1
+
+        if explain and selected is None and not goal_reasons:
+            goal_reasons.append("queue.no_claimable_work")
+        return {
+            "selected": selected,
+            "candidates": candidates,
+            "candidate_total": candidate_total,
+            "goal_reason_codes": goal_reasons,
+            "active_leases": int(active),
+            "effective_occupancy": effective_occupancy,
+            "max_concurrency": int(budget["max_concurrency"]),
+            "lease_expires_at": expiry,
+        }
+
+    @staticmethod
+    def _empty_work_selection(connection: Any, goal_id: str, reasons: str | list[str],
+                              candidate_filter: str | None, candidate_limit: int,
+                              candidate_offset: int) -> dict[str, Any]:
+        """Return a bounded queue view when state lacks selection prerequisites."""
+        reason_codes = [reasons] if isinstance(reasons, str) else reasons
+        candidates: list[dict[str, Any]] = []
+        total = 0
+        for row in connection.execute("SELECT id FROM work_units WHERE goal_id=? ORDER BY id", (goal_id,)):
+            if candidate_filter is not None and row["id"] != candidate_filter:
+                continue
+            if total >= candidate_offset and len(candidates) < candidate_limit:
+                candidates.append({"row": row, "eligible": False, "reason_codes": reason_codes})
+            total += 1
+        return {
+            "selected": None, "candidates": candidates, "candidate_total": total,
+            "goal_reason_codes": reason_codes, "active_leases": 0, "effective_occupancy": 0,
+            "max_concurrency": 0, "lease_expires_at": None,
+        }
 
     def claim_next_work(self, *, goal_id: str, performer_id: str, envelope_sha256: str,
                         lease_seconds: int = 300, token_reservation: int = 0,
@@ -490,67 +823,22 @@ class AutonomyStore(StateStore):
             self._active_goal(connection, goal_id)
             if connection.execute("SELECT emergency_stopped FROM runtime_control WHERE id=1").fetchone()[0]:
                 raise AutonomyError("runtime is emergency-stopped")
-            budget = connection.execute("SELECT * FROM budgets WHERE goal_id=?", (goal_id,)).fetchone()
-            if budget is None:
-                raise AutonomyError(f"Unknown goal: {goal_id}")
-            if budget["max_concurrency"] is None or budget["total_attempts"] is None:
-                raise AutonomyError("goal lacks Stage 3 execution budgets")
             try:
-                contract_row = connection.execute("SELECT contract FROM goal_contracts WHERE goal_id=?", (goal_id,)).fetchone()
-                if contract_row is None:
-                    raise AutonomyError("goal lacks an authority envelope")
-                contract = load_authority_envelope(contract_row["contract"])
-                self._dependencies_complete_in_transaction(connection, goal_id)
-                checkpoints = self._verify_goal_checkpoints_in_transaction(connection, goal_id, contract)
+                selection = self._select_next_work(
+                    connection, goal_id=goal_id, performer_id=performer_id,
+                    envelope_sha256=envelope_sha256, lease_seconds=lease_seconds,
+                    token_reservation=token_reservation, timestamp=timestamp, now=now,
+                    mutate_exhausted=True, claim_filter=work_unit_id,
+                )
             except StateError as error:
                 raise AutonomyError(str(error)) from error
-            active = connection.execute(
-                """SELECT count(*) FROM work_attempts a JOIN work_units u ON u.id=a.work_unit_id
-                   WHERE u.goal_id=? AND a.status='leased'""", (goal_id,)
-            ).fetchone()[0]
-            if active >= budget["max_concurrency"]:
-                return None
-            if budget["total_attempts"] is not None and budget["consumed_attempts"] >= budget["total_attempts"]:
-                raise AutonomyError("attempt budget is exhausted")
-            if budget["total_tokens"] is not None and (
-                budget["consumed_tokens"] + budget["reserved_tokens"] + token_reservation > budget["total_tokens"]
-            ):
-                raise AutonomyError("token budget would be exceeded")
-            live_reservation = self._live_reservation_ms(connection, goal_id)
-            remaining_elapsed = None if budget["total_elapsed_ms"] is None else (
-                int(budget["total_elapsed_ms"]) - int(budget["consumed_elapsed_ms"]) - live_reservation
-            )
-            expiry, _ = self._lease_expiry(now, lease_seconds, remaining_elapsed)
-            next_checkpoint = next((row["checkpoint_id"] for row in checkpoints if row["status"] != "reached"), None)
-            if contract["checkpoints"] and next_checkpoint is None:
-                return None
-            query = """SELECT * FROM work_units WHERE goal_id=? AND current_attempt_id IS NULL
-                   AND status IN ('eligible','retry-wait','planned') AND (retry_at IS NULL OR retry_at<=?)"""
-            params: list[Any] = [goal_id, timestamp]
-            if work_unit_id is not None:
-                query += " AND id=?"
-                params.append(work_unit_id)
-            if contract["checkpoints"]:
-                query += " AND checkpoint_id=?"
-                params.append(next_checkpoint)
-            else:
-                query += " AND checkpoint_id IS NULL"
-            candidates = connection.execute(query + " ORDER BY id", params).fetchall()
-            selected = None
-            for candidate in candidates:
-                if candidate["attempt_count"] >= budget["total_attempts"]:
-                    connection.execute("UPDATE work_units SET status='exhausted',last_outcome_class='exhausted',updated_at=? WHERE id=?", (timestamp, candidate["id"]))
-                    continue
-                try:
-                    self._authorize(connection, goal_id=goal_id, work_unit_id=candidate["id"], action=WORK_CLAIM_ACTION,
-                                    envelope_sha256=envelope_sha256, performer_id=performer_id,
-                                    effect=LOCAL_REVERSIBLE_WRITE, timestamp=timestamp)
-                except AutonomyError:
-                    continue
-                selected = candidate
-                break
+            selected = selection["selected"]
             if selected is None:
                 return None
+            selected = connection.execute("SELECT * FROM work_units WHERE id=?", (selected["id"],)).fetchone()
+            assert selected is not None
+            expiry = selection["lease_expires_at"]
+            assert isinstance(expiry, str)
             attempt_id = _identifier(f"attempt-{uuid4().hex}", label="attempt_id")
             token = lease_token if caller_supplied_token else secrets.token_urlsafe(32)
             assert token is not None
@@ -558,8 +846,8 @@ class AutonomyStore(StateStore):
             attempt_no = int(selected["attempt_count"]) + 1
             connection.execute(
                 """INSERT INTO work_attempts(id,work_unit_id,attempt_no,owner_id,lease_generation,lease_token_hash,repository,revision,branch,workspace,
-                    acquired_at,heartbeat_at,expires_at,status,tokens_reserved)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'leased',?)""",
+                    acquired_at,heartbeat_at,expires_at,status,tokens_reserved,token_accounting_source)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'leased',?,'pending')""",
                 (attempt_id, selected["id"], attempt_no, performer_id, attempt_no, token_hash,
                  repository, revision, branch, workspace, timestamp, timestamp, expiry, token_reservation),
             )
@@ -583,6 +871,91 @@ class AutonomyStore(StateStore):
         if not caller_supplied_token:
             result["lease_token"] = token
         return result
+
+    def explain_next_work(self, *, goal_id: str, performer_id: str, envelope_sha256: str,
+                          lease_seconds: int = 300, token_reservation: int = 0,
+                          limit: int = 20, offset: int = 0,
+                          work_unit_id: str | None = None,
+                          at: str | datetime | None = None) -> dict[str, Any]:
+        """Explain the same deterministic queue decision as ``claim_next_work``.
+
+        This is intentionally a read-only, single-snapshot operation.  It does
+        not recover leases, mark exhausted units, mint a lease token, or expose
+        titles, scopes, approval records, or other user-controlled payloads.
+        """
+        goal_id = _identifier(goal_id, label="goal_id")
+        performer_id = _identifier(performer_id, label="performer_id")
+        work_unit_id = _optional_identifier(work_unit_id, label="work_unit_id")
+        if not isinstance(token_reservation, int) or isinstance(token_reservation, bool) or token_reservation < 0:
+            raise AutonomyError("token_reservation must be a non-negative integer")
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise AutonomyError("limit must be an integer between 1 and 100")
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0 or offset > 1_000_000:
+            raise AutonomyError("offset must be a non-negative integer no greater than 1000000")
+        # Match claim's lease validation even when the queue is currently empty.
+        if not isinstance(lease_seconds, int) or isinstance(lease_seconds, bool) or not 1 <= lease_seconds <= MAX_LEASE_SECONDS:
+            raise AutonomyError(f"lease_seconds must be between 1 and {MAX_LEASE_SECONDS}")
+        timestamp, now = _clock(at)
+        with self._readonly_connection() as connection:
+            self._prepare_readonly(connection)
+            goal = connection.execute("SELECT status FROM goals WHERE id=?", (goal_id,)).fetchone()
+            if goal is None:
+                raise AutonomyError(f"Unknown goal: {goal_id}")
+            if work_unit_id is not None:
+                unit = connection.execute("SELECT goal_id FROM work_units WHERE id=?", (work_unit_id,)).fetchone()
+                if unit is None or unit["goal_id"] != goal_id:
+                    raise AutonomyError("unknown work unit for goal")
+
+            goal_reasons: list[str] = []
+            if goal["status"] == "draining":
+                goal_reasons.append("goal.intake_draining")
+            elif goal["status"] != "active":
+                goal_reasons.append("goal.lifecycle_not_active")
+            if connection.execute("SELECT emergency_stopped FROM runtime_control WHERE id=1").fetchone()[0]:
+                goal_reasons.append("runtime.emergency_stopped")
+            selection = self._select_next_work(
+                connection, goal_id=goal_id, performer_id=performer_id,
+                envelope_sha256=envelope_sha256, lease_seconds=lease_seconds,
+                token_reservation=token_reservation, timestamp=timestamp, now=now,
+                mutate_exhausted=False, explain=True,
+                candidate_filter=work_unit_id, candidate_limit=limit,
+                candidate_offset=offset,
+            )
+            all_goal_reasons = goal_reasons + selection["goal_reason_codes"]
+            # Lifecycle and emergency gates are deliberate explanation results,
+            # so neither may leave a selected unit in the preview.
+            selected = selection["selected"] if not goal_reasons else None
+            page = selection["candidates"]
+            total = selection["candidate_total"]
+            return {
+                "goal_id": goal_id,
+                "performer_id": performer_id,
+                "evaluated_at": timestamp,
+                "selected_work_unit_id": None if selected is None else selected["id"],
+                "goal": {
+                    "eligible": not all_goal_reasons,
+                    "reason_codes": all_goal_reasons,
+                    "active_leases": selection["active_leases"],
+                    "effective_occupancy": selection["effective_occupancy"],
+                    "max_concurrency": selection["max_concurrency"],
+                },
+                "candidates": [
+                    {
+                        "work_unit_id": entry["row"]["id"],
+                        "eligible": bool(entry["eligible"] and not goal_reasons),
+                        "reason_codes": entry["reason_codes"] + [
+                            reason for reason in all_goal_reasons if reason not in entry["reason_codes"]
+                        ],
+                    }
+                    for entry in page
+                ],
+                "total": total,
+                "next_offset": offset + len(page) if offset + len(page) < total else None,
+                "limit": limit,
+                "offset": offset,
+                "read_only": True,
+                "notice": "Preview only; a claim rechecks state and requires current authorization.",
+            }
 
     def claim_scheduled_work(self, *, invocation: Mapping[str, Any], lease_token: str,
                              at: str | datetime | None = None) -> dict[str, Any]:
@@ -613,6 +986,7 @@ class AutonomyStore(StateStore):
         digest = sha256(_canonical(invocation).encode("utf-8")).hexdigest()
         timestamp, now = _clock(at)
         recovered: list[str] = []
+        recovery_only = False
         with self._connection() as connection:
             self._prepare_write(connection)
             if connection.execute("SELECT 1 FROM schedule_resume_idempotency WHERE idempotency_key=?", (key,)).fetchone() is not None:
@@ -631,6 +1005,8 @@ class AutonomyStore(StateStore):
             expected_budget = {"sha256": sha256(_canonical(reference).encode("utf-8")).hexdigest(), "snapshot": reference}
             if invocation.get("budget_reference") != expected_budget:
                 raise AutonomyError("schedule invocation budget reference is stale")
+            if not self._work_prerequisite_state_in_transaction(connection, work_unit_id)["ready"]:
+                raise AutonomyError("work unit prerequisites are incomplete")
             expired_attempts = connection.execute(
                 """SELECT a.*,u.goal_id FROM work_attempts a
                    JOIN work_units u ON u.id=a.work_unit_id
@@ -650,14 +1026,22 @@ class AutonomyStore(StateStore):
                         and attempt_budget["consumed_elapsed_ms"] + elapsed >= attempt_budget["total_elapsed_ms"]
                     )
                 ) else "retry"
-                recovery_evidence: dict[str, Any] = {"recovered": True}
+                if connection.execute("SELECT 1 FROM codex_run_preparations WHERE attempt_id=? LIMIT 1", (attempt["id"],)).fetchone() is not None:
+                    terminal = "blocked"
+                recovery_outcome = {"recovered": True}
+                if terminal == "blocked":
+                    recovery_outcome["reason"] = "host-execution-requires-review"
+                    # Prepared host work needs a durable review block before any
+                    # subsequent claim rejection can unwind this recovery.
+                    recovery_only = True
+                recovery_evidence: dict[str, Any] = recovery_outcome
                 if int(attempt["tokens_reserved"]):
                     recovery_evidence["unmeasured_usage"] = unmeasured_usage_evidence(
                         charged_tokens=int(attempt["tokens_reserved"]), reason="lease-expired",
                     )
                 connection.execute(
                     """UPDATE work_attempts SET status='expired',outcome_class=?,outcome_json=?,ended_at=?,elapsed_ms=?,
-                       tokens_consumed=tokens_consumed+? WHERE id=?""",
+                       tokens_consumed=tokens_consumed+?,token_accounting_source='unavailable' WHERE id=?""",
                     (terminal, _encode(recovery_evidence), timestamp, elapsed, attempt["tokens_reserved"], attempt["id"]),
                 )
                 connection.execute(
@@ -684,38 +1068,51 @@ class AutonomyStore(StateStore):
                     payload={"attempt_id": attempt["id"], "outcome": terminal},
                 )
                 recovered.append(attempt["id"])
-            unit = connection.execute("SELECT * FROM work_units WHERE id=?", (work_unit_id,)).fetchone()
-            budget = connection.execute("SELECT * FROM budgets WHERE goal_id=?", (goal_id,)).fetchone()
-            if unit["current_attempt_id"] is not None or unit["status"] not in {"planned", "eligible", "retry-wait"}:
-                if unit["current_attempt_id"] is not None:
-                    raise AutonomyError("schedule invocation work unit has an active lease")
-                raise AutonomyError("schedule invocation work unit is no longer claimable")
-            contract = load_authority_envelope(contract_row["contract"])
-            self._dependencies_complete_in_transaction(connection, goal_id)
-            checkpoints = self._verify_goal_checkpoints_in_transaction(connection, goal_id, contract)
-            next_checkpoint = next((row["checkpoint_id"] for row in checkpoints if row["status"] != "reached"), None)
-            if (contract["checkpoints"] and next_checkpoint != checkpoint_id) or (not contract["checkpoints"] and checkpoint_id is not None):
-                raise AutonomyError("schedule invocation checkpoint is not eligible")
-            active = connection.execute("SELECT count(*) FROM work_attempts a JOIN work_units u ON u.id=a.work_unit_id WHERE u.goal_id=? AND a.status='leased'", (goal_id,)).fetchone()[0]
-            if budget["max_concurrency"] is None or budget["total_attempts"] is None:
-                raise AutonomyError("execution budget requires max_concurrency and total_attempts")
-            if active >= budget["max_concurrency"] or budget["consumed_attempts"] >= budget["total_attempts"]:
-                raise AutonomyError("schedule invocation budget is exhausted")
-            if int(unit["attempt_count"]) >= budget["total_attempts"]:
-                raise AutonomyError("schedule invocation work unit exhausted its attempt allowance")
-            if budget["total_tokens"] is not None and budget["consumed_tokens"] + budget["reserved_tokens"] + token_reservation > budget["total_tokens"]:
-                raise AutonomyError("token budget would be exceeded")
-            remaining = None if budget["total_elapsed_ms"] is None else budget["total_elapsed_ms"] - budget["consumed_elapsed_ms"] - self._live_reservation_ms(connection, goal_id)
-            expiry, _ = self._lease_expiry(now, lease_seconds, remaining)
-            self._authorize(connection, goal_id=goal_id, work_unit_id=work_unit_id, action=WORK_CLAIM_ACTION, envelope_sha256=envelope_sha256, performer_id=performer_id, effect=LOCAL_REVERSIBLE_WRITE, timestamp=timestamp)
-            attempt_id = _identifier(f"attempt-{uuid4().hex}", label="attempt_id")
-            attempt_no = int(unit["attempt_count"]) + 1
-            connection.execute("INSERT INTO work_attempts(id,work_unit_id,attempt_no,owner_id,lease_generation,lease_token_hash,repository,revision,branch,workspace,acquired_at,heartbeat_at,expires_at,status,tokens_reserved) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'leased',?)", (attempt_id, work_unit_id, attempt_no, performer_id, attempt_no, sha256(lease_token.encode("utf-8")).hexdigest(), repository, revision, branch, workspace, timestamp, timestamp, expiry, token_reservation))
-            if connection.execute("UPDATE work_units SET status='leased',lease_holder=?,lease_expires_at=?,current_attempt_id=?,attempt_count=?,retry_at=NULL,updated_at=? WHERE id=? AND current_attempt_id IS NULL", (performer_id, expiry, attempt_id, attempt_no, timestamp, work_unit_id)).rowcount != 1:
-                raise AutonomyError("work unit was claimed concurrently")
-            connection.execute("UPDATE budgets SET consumed_attempts=consumed_attempts+1,reserved_tokens=reserved_tokens+?,updated_at=? WHERE goal_id=?", (token_reservation, timestamp, goal_id))
-            connection.execute("INSERT INTO schedule_resume_idempotency VALUES(?,?,?, ?,'consumed',?,?)", (key, digest, goal_id, work_unit_id, timestamp, attempt_id))
-            self._append(connection, "schedule.resume_consumed", goal_id=goal_id, work_unit_id=work_unit_id, payload={"idempotency_key": key, "attempt_id": attempt_id})
+            if recovery_only:
+                # Persist the host-execution review block before evaluating any
+                # subsequent claim rejection. Ordinary lease recovery retains the
+                # existing atomic recover-and-claim behavior below.
+                pass
+            else:
+                unit = connection.execute("SELECT * FROM work_units WHERE id=?", (work_unit_id,)).fetchone()
+                budget = connection.execute("SELECT * FROM budgets WHERE goal_id=?", (goal_id,)).fetchone()
+                if unit["current_attempt_id"] is not None or unit["status"] not in {"planned", "eligible", "retry-wait"}:
+                    if unit["current_attempt_id"] is not None:
+                        raise AutonomyError("schedule invocation work unit has an active lease")
+                    raise AutonomyError("schedule invocation work unit is no longer claimable")
+                contract = load_authority_envelope(contract_row["contract"])
+                self._dependencies_complete_in_transaction(connection, goal_id)
+                checkpoints = self._verify_goal_checkpoints_in_transaction(connection, goal_id, contract)
+                next_checkpoint = next((row["checkpoint_id"] for row in checkpoints if row["status"] != "reached"), None)
+                if (contract["checkpoints"] and next_checkpoint != checkpoint_id) or (not contract["checkpoints"] and checkpoint_id is not None):
+                    raise AutonomyError("schedule invocation checkpoint is not eligible")
+                active = connection.execute("SELECT count(*) FROM work_attempts a JOIN work_units u ON u.id=a.work_unit_id WHERE u.goal_id=? AND a.status='leased'", (goal_id,)).fetchone()[0]
+                detached = connection.execute(
+                    """SELECT count(*) FROM codex_run_preparations p JOIN work_attempts a ON a.id=p.attempt_id
+                       JOIN work_units u ON u.id=a.work_unit_id LEFT JOIN codex_run_finishes f ON f.run_id=p.id
+                       WHERE u.goal_id=? AND a.status!='leased' AND f.run_id IS NULL""", (goal_id,)
+                ).fetchone()[0]
+                if budget["max_concurrency"] is None or budget["total_attempts"] is None:
+                    raise AutonomyError("execution budget requires max_concurrency and total_attempts")
+                if int(active) + int(detached) >= budget["max_concurrency"] or budget["consumed_attempts"] >= budget["total_attempts"]:
+                    raise AutonomyError("schedule invocation budget is exhausted")
+                if int(unit["attempt_count"]) >= budget["total_attempts"]:
+                    raise AutonomyError("schedule invocation work unit exhausted its attempt allowance")
+                if budget["total_tokens"] is not None and budget["consumed_tokens"] + budget["reserved_tokens"] + token_reservation > budget["total_tokens"]:
+                    raise AutonomyError("token budget would be exceeded")
+                remaining = None if budget["total_elapsed_ms"] is None else budget["total_elapsed_ms"] - budget["consumed_elapsed_ms"] - self._live_reservation_ms(connection, goal_id)
+                expiry, _ = self._lease_expiry(now, lease_seconds, remaining)
+                self._authorize(connection, goal_id=goal_id, work_unit_id=work_unit_id, action=WORK_CLAIM_ACTION, envelope_sha256=envelope_sha256, performer_id=performer_id, effect=LOCAL_REVERSIBLE_WRITE, timestamp=timestamp)
+                attempt_id = _identifier(f"attempt-{uuid4().hex}", label="attempt_id")
+                attempt_no = int(unit["attempt_count"]) + 1
+                connection.execute("INSERT INTO work_attempts(id,work_unit_id,attempt_no,owner_id,lease_generation,lease_token_hash,repository,revision,branch,workspace,acquired_at,heartbeat_at,expires_at,status,tokens_reserved,token_accounting_source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'leased',?,'pending')", (attempt_id, work_unit_id, attempt_no, performer_id, attempt_no, sha256(lease_token.encode("utf-8")).hexdigest(), repository, revision, branch, workspace, timestamp, timestamp, expiry, token_reservation))
+                if connection.execute("UPDATE work_units SET status='leased',lease_holder=?,lease_expires_at=?,current_attempt_id=?,attempt_count=?,retry_at=NULL,updated_at=? WHERE id=? AND current_attempt_id IS NULL", (performer_id, expiry, attempt_id, attempt_no, timestamp, work_unit_id)).rowcount != 1:
+                    raise AutonomyError("work unit was claimed concurrently")
+                connection.execute("UPDATE budgets SET consumed_attempts=consumed_attempts+1,reserved_tokens=reserved_tokens+?,updated_at=? WHERE goal_id=?", (token_reservation, timestamp, goal_id))
+                connection.execute("INSERT INTO schedule_resume_idempotency VALUES(?,?,?, ?,'consumed',?,?)", (key, digest, goal_id, work_unit_id, timestamp, attempt_id))
+                self._append(connection, "schedule.resume_consumed", goal_id=goal_id, work_unit_id=work_unit_id, payload={"idempotency_key": key, "attempt_id": attempt_id})
+        if recovery_only:
+            return self.claim_scheduled_work(invocation=invocation, lease_token=lease_token, at=at)
         return {"attempt_id": attempt_id, "work_unit_id": work_unit_id, "goal_id": goal_id,
                 "lease_expires_at": expiry, "attempt_no": attempt_no, "recovered_attempts": recovered,
                 "context": {"repository": repository, "revision": revision, "branch": branch, "workspace": workspace}}
@@ -737,7 +1134,7 @@ class AutonomyStore(StateStore):
                 raise AutonomyError("attempt owner or lease token does not match")
             if timestamp >= row["expires_at"]:
                 raise AutonomyError("lease is expired")
-            self._active_goal(connection, row["goal_id"])
+            self._active_goal(connection, row["goal_id"], allow_draining=True)
             if connection.execute("SELECT emergency_stopped FROM runtime_control WHERE id=1").fetchone()[0]:
                 raise AutonomyError("runtime is emergency-stopped")
             budget = connection.execute("SELECT * FROM budgets WHERE goal_id=?", (row["goal_id"],)).fetchone()
@@ -771,6 +1168,7 @@ class AutonomyStore(StateStore):
         timestamp, _ = _clock(at)
         supplied_hash = sha256(lease_token.encode("utf-8")).hexdigest() if isinstance(lease_token, str) else ""
         with self._connection(write=False) as connection:
+            self._prepare_readonly(connection)
             row = connection.execute(
                 """SELECT a.*,u.goal_id,u.current_attempt_id,u.status AS work_unit_status,u.scope,u.checkpoint_id,u.verification_policy
                    FROM work_attempts a JOIN work_units u ON u.id=a.work_unit_id WHERE a.id=?""",
@@ -782,7 +1180,7 @@ class AutonomyStore(StateStore):
                 raise AutonomyError("attempt owner or lease token does not match")
             if timestamp >= row["expires_at"]:
                 raise AutonomyError("lease is expired; recover it instead")
-            self._active_goal(connection, row["goal_id"])
+            self._active_goal(connection, row["goal_id"], allow_draining=True)
             if connection.execute("SELECT emergency_stopped FROM runtime_control WHERE id=1").fetchone()[0]:
                 raise AutonomyError("runtime is emergency-stopped")
             if envelope_sha256 is not None:
@@ -939,7 +1337,7 @@ class AutonomyStore(StateStore):
         return checkpoint_id
 
     def finish_attempt(self, *, attempt_id: str, performer_id: str, lease_token: str, outcome: str,
-                       tokens_consumed: int = 0, elapsed_ms: int | None = None,
+                       tokens_consumed: int | None = None, accounting_source: str | None = None, elapsed_ms: int | None = None,
                        outcome_evidence: Mapping[str, Any] | None = None,
                        observed_token_overrun: bool = False,
                        observed_usage_evidence: Mapping[str, Any] | None = None,
@@ -949,8 +1347,6 @@ class AutonomyStore(StateStore):
             raise AutonomyError(f"outcome must be one of {', '.join(sorted(OUTCOMES))}")
         attempt_id = _identifier(attempt_id, label="attempt_id")
         performer_id = _identifier(performer_id, label="performer_id")
-        if not isinstance(tokens_consumed, int) or isinstance(tokens_consumed, bool) or tokens_consumed < 0:
-            raise AutonomyError("tokens_consumed must be a non-negative integer")
         if not isinstance(observed_token_overrun, bool):
             raise AutonomyError("observed_token_overrun must be a boolean")
         timestamp, now = _clock(at)
@@ -965,7 +1361,7 @@ class AutonomyStore(StateStore):
                 raise AutonomyError("attempt owner or lease token does not match")
             if timestamp >= row["expires_at"]:
                 raise AutonomyError("lease is expired; recover it instead")
-            self._active_goal(connection, row["goal_id"])
+            self._active_goal(connection, row["goal_id"], allow_draining=True)
             if connection.execute("SELECT emergency_stopped FROM runtime_control WHERE id=1").fetchone()[0]:
                 raise AutonomyError("runtime is emergency-stopped")
             budget = connection.execute("SELECT * FROM budgets WHERE goal_id=?", (row["goal_id"],)).fetchone()
@@ -981,6 +1377,15 @@ class AutonomyStore(StateStore):
                 outcome_evidence = {}
             if not isinstance(outcome_evidence, Mapping):
                 raise AutonomyError("outcome_evidence must be an object")
+            outcome_json, _ = _json_hash(outcome_evidence)
+            tokens_consumed, resolved_accounting_source = self._codex_accounting_in_transaction(
+                connection, attempt_id=attempt_id, tokens_consumed=tokens_consumed, accounting_source=accounting_source
+            )
+            if outcome in {"success", "transient"} and connection.execute(
+                """SELECT 1 FROM codex_run_preparations p LEFT JOIN codex_run_finishes f ON f.run_id=p.id
+                   WHERE p.attempt_id=? AND f.run_id IS NULL LIMIT 1""", (attempt_id,)
+            ).fetchone() is not None:
+                raise AutonomyError("work completion or automatic retry requires all Codex runs to be resolved")
             if tokens_consumed > row["tokens_reserved"] and not observed_token_overrun:
                 raise AutonomyError("tokens_consumed exceeds the reservation")
             if observed_token_overrun:
@@ -1029,7 +1434,7 @@ class AutonomyStore(StateStore):
             if outcome == "transient" and terminal != "exhausted":
                 terminal = "exhausted" if budget["consumed_attempts"] >= budget["total_attempts"] else "retry"
             elif outcome == "permanent": terminal = "failed"
-            connection.execute("UPDATE work_attempts SET status='finished',outcome_class=?,outcome_json=?,ended_at=?,elapsed_ms=?,tokens_consumed=? WHERE id=?", (terminal, outcome_json, timestamp, measured_elapsed, tokens_consumed, attempt_id))
+            connection.execute("UPDATE work_attempts SET status='finished',outcome_class=?,outcome_json=?,ended_at=?,elapsed_ms=?,tokens_consumed=?,token_accounting_source=? WHERE id=?", (terminal, outcome_json, timestamp, measured_elapsed, tokens_consumed, resolved_accounting_source, attempt_id))
             connection.execute("""UPDATE budgets SET reserved_tokens=reserved_tokens-?,consumed_tokens=consumed_tokens+?,
                                 consumed_elapsed_ms=consumed_elapsed_ms+?,updated_at=? WHERE goal_id=?""",
                                (row["tokens_reserved"], tokens_consumed, measured_elapsed, timestamp, row["goal_id"]))
@@ -1049,12 +1454,262 @@ class AutonomyStore(StateStore):
                     outcome_json=outcome_json, timestamp=timestamp,
                 )
             self._append(connection, "work.finished", goal_id=row["goal_id"], work_unit_id=row["work_unit_id"], payload={"attempt_id": attempt_id, "outcome": terminal})
-        return {"attempt_id": attempt_id, "work_unit_id": row["work_unit_id"], "outcome": terminal}
+            StateStore._finalize_drain_if_empty_in_transaction(
+                connection, row["goal_id"], timestamp=timestamp, actor_id=performer_id,
+            )
+        return {"attempt_id": attempt_id, "work_unit_id": row["work_unit_id"], "outcome": terminal, "token_accounting_source": resolved_accounting_source, "tokens_consumed": tokens_consumed}
+
+    def yield_for_intervention(
+        self, *, attempt_id: str, performer_id: str, lease_token: str, request: Mapping[str, Any],
+        tokens_consumed: int | None = None, accounting_source: str | None = None, elapsed_ms: int | None = None, at: str | datetime | None = None,
+    ) -> dict[str, Any]:
+        """Atomically persist one bounded intervention and relinquish its lease."""
+        attempt_id = _identifier(attempt_id, label="attempt_id")
+        performer_id = _identifier(performer_id, label="performer_id")
+        if elapsed_ms is not None and (not isinstance(elapsed_ms, int) or isinstance(elapsed_ms, bool) or elapsed_ms < 0):
+            raise AutonomyError("elapsed_ms must be a non-negative integer")
+        try:
+            accepted = validate_intervention_request(request)
+            request_json = canonical_intervention_request(accepted)
+            request_sha256 = intervention_request_sha256(accepted)
+        except InterventionError as error:
+            raise AutonomyError(f"intervention request is invalid: {error}") from error
+        if accepted["source"]["attempt_id"] != attempt_id or accepted["producer"]["actor_id"] != performer_id:
+            raise AutonomyError("intervention request source or producer does not match yield")
+        if isinstance(lease_token, str) and _contains_supplied_lease_token(accepted, lease_token):
+            raise AutonomyError("intervention request must not contain the supplied lease token")
+        timestamp, now = _clock(at)
+        supplied_hash = sha256(lease_token.encode("utf-8")).hexdigest() if isinstance(lease_token, str) else ""
+        input_mode = "explicit" if elapsed_ms is not None else "measured"
+        with self._connection() as connection:
+            self._prepare_write(connection)
+            tokens_consumed, resolved_accounting_source = self._codex_accounting_in_transaction(
+                connection, attempt_id=attempt_id, tokens_consumed=tokens_consumed, accounting_source=accounting_source
+            )
+            prior = connection.execute(
+                """SELECT r.*,a.owner_id,a.lease_token_hash,a.token_accounting_source,u.current_attempt_id,u.current_intervention_id
+                   FROM intervention_requests r JOIN work_attempts a ON a.id=r.attempt_id
+                   JOIN work_units u ON u.id=r.work_unit_id WHERE r.attempt_id=?""", (attempt_id,)
+            ).fetchone()
+            if prior is not None:
+                exact = (
+                    prior["owner_id"] == performer_id and hmac.compare_digest(prior["lease_token_hash"], supplied_hash)
+                    and prior["request_sha256"] == request_sha256 and prior["request_json"] == request_json
+                    and prior["yield_tokens_consumed"] == tokens_consumed and prior["yield_elapsed_input_mode"] == input_mode
+                    and prior["yield_elapsed_input_ms"] == elapsed_ms and prior["token_accounting_source"] == resolved_accounting_source
+                )
+                if not exact:
+                    raise AutonomyError("idempotency_conflict")
+                return {
+                    "request_id": prior["id"], "request_sha256": prior["request_sha256"],
+                    "goal_id": prior["goal_id"], "work_unit_id": prior["work_unit_id"], "attempt_id": attempt_id,
+                    "status": prior["outcome_class"], "tokens_consumed": prior["yield_tokens_consumed"],
+                    "elapsed_input_mode": prior["yield_elapsed_input_mode"],
+                    "elapsed_input_ms": prior["yield_elapsed_input_ms"],
+                    "accounted_elapsed_ms": prior["yield_accounted_elapsed_ms"], "mutation": "none", "idempotent": True,
+                    "token_accounting_source": prior["token_accounting_source"],
+                    "current": prior["current_intervention_id"] == prior["id"], "current_attempt_id": prior["current_attempt_id"],
+                    "current_intervention_id": prior["current_intervention_id"],
+                    "stale_reason": None if prior["current_intervention_id"] == prior["id"] else "unit_advanced",
+                }
+            identity_conflict = connection.execute(
+                "SELECT id FROM intervention_requests WHERE id=? OR request_sha256=?", (accepted["request_id"], request_sha256)
+            ).fetchone()
+            if identity_conflict is not None:
+                raise AutonomyError("idempotency_conflict")
+            row = connection.execute(
+                """SELECT a.*,u.goal_id,u.current_attempt_id,u.current_intervention_id,u.attempt_count,u.checkpoint_id FROM work_attempts a
+                   JOIN work_units u ON u.id=a.work_unit_id WHERE a.id=?""", (attempt_id,)
+            ).fetchone()
+            if row is None or row["status"] != "leased" or row["current_attempt_id"] != attempt_id:
+                raise AutonomyError("attempt is stale or no longer current")
+            if row["owner_id"] != performer_id or not hmac.compare_digest(row["lease_token_hash"], supplied_hash):
+                raise AutonomyError("attempt owner or lease token does not match")
+            if timestamp >= row["expires_at"]:
+                raise AutonomyError("lease is expired; recover it instead")
+            if row["current_intervention_id"] is not None:
+                raise AutonomyError("work unit already has a current intervention")
+            if accepted["source"] != {"goal_id": row["goal_id"], "work_unit_id": row["work_unit_id"], "attempt_id": attempt_id}:
+                raise AutonomyError("intervention request source does not match the leased attempt")
+            self._active_goal(connection, row["goal_id"], allow_draining=True)
+            if connection.execute("SELECT emergency_stopped FROM runtime_control WHERE id=1").fetchone()[0]:
+                raise AutonomyError("runtime is emergency-stopped")
+            measured = self._attempt_elapsed(row, now)
+            accounted_elapsed = measured if elapsed_ms is None else elapsed_ms
+            if accounted_elapsed < measured:
+                raise AutonomyError("elapsed_ms cannot underreport elapsed execution time")
+            if accounted_elapsed > self._lease_reservation_ms(row):
+                raise AutonomyError("elapsed_ms exceeds this attempt's reserved lease budget")
+            if tokens_consumed > row["tokens_reserved"]:
+                raise AutonomyError("tokens_consumed exceeds the reservation")
+            budget = connection.execute("SELECT * FROM budgets WHERE goal_id=?", (row["goal_id"],)).fetchone()
+            other_reservation = self._live_reservation_ms(connection, row["goal_id"], excluding_attempt_id=attempt_id)
+            if budget["total_elapsed_ms"] is not None and budget["consumed_elapsed_ms"] + other_reservation + accounted_elapsed > budget["total_elapsed_ms"]:
+                raise AutonomyError("yield accounting would exhaust the work unit; finish it as exhausted")
+            outcome_json = _encode({
+                "intervention_request_id": accepted["request_id"], "request_sha256": request_sha256,
+                "tokens_consumed": tokens_consumed, "elapsed_input_mode": input_mode,
+                "elapsed_input_ms": elapsed_ms, "accounted_elapsed_ms": accounted_elapsed,
+            })
+            connection.execute(
+                """INSERT INTO intervention_requests(
+                    id,version,goal_id,work_unit_id,attempt_id,producer_id,outcome_class,request_json,request_sha256,
+                    yield_tokens_consumed,yield_elapsed_input_mode,yield_elapsed_input_ms,yield_accounted_elapsed_ms,created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (accepted["request_id"], accepted["version"], row["goal_id"], row["work_unit_id"], attempt_id,
+                 performer_id, accepted["outcome_class"], request_json, request_sha256, tokens_consumed,
+                 input_mode, elapsed_ms, accounted_elapsed, timestamp),
+            )
+            connection.execute(
+                "UPDATE work_attempts SET status='finished',outcome_class=?,outcome_json=?,ended_at=?,elapsed_ms=?,tokens_consumed=?,token_accounting_source=? WHERE id=?",
+                (accepted["outcome_class"], outcome_json, timestamp, accounted_elapsed, tokens_consumed, resolved_accounting_source, attempt_id),
+            )
+            connection.execute(
+                """UPDATE budgets SET reserved_tokens=reserved_tokens-?,consumed_tokens=consumed_tokens+?,
+                   consumed_elapsed_ms=consumed_elapsed_ms+?,updated_at=? WHERE goal_id=?""",
+                (row["tokens_reserved"], tokens_consumed, accounted_elapsed, timestamp, row["goal_id"]),
+            )
+            connection.execute(
+                """UPDATE work_units SET status=?,lease_holder=NULL,lease_expires_at=NULL,current_attempt_id=NULL,
+                   current_intervention_id=?,retry_at=NULL,last_outcome_class=?,updated_at=? WHERE id=?""",
+                (accepted["outcome_class"], accepted["request_id"], accepted["outcome_class"], timestamp, row["work_unit_id"]),
+            )
+            self._append(
+                connection, "intervention.requested", goal_id=row["goal_id"], work_unit_id=row["work_unit_id"],
+                payload={"request_id": accepted["request_id"], "request_sha256": request_sha256, "attempt_id": attempt_id,
+                         "producer_id": performer_id, "outcome_class": accepted["outcome_class"],
+                         "requires_human_approval": accepted["requires_human_approval"], "timestamp": timestamp},
+            )
+            self._append(
+                connection, "work.finished", goal_id=row["goal_id"], work_unit_id=row["work_unit_id"],
+                payload={"attempt_id": attempt_id, "outcome": accepted["outcome_class"], "request_id": accepted["request_id"], "request_sha256": request_sha256, "timestamp": timestamp},
+            )
+            drain_finalized = StateStore._finalize_drain_if_empty_in_transaction(
+                connection, row["goal_id"], timestamp=timestamp, actor_id=performer_id,
+            )
+        return {
+            "request_id": accepted["request_id"], "request_sha256": request_sha256, "goal_id": row["goal_id"],
+            "work_unit_id": row["work_unit_id"], "attempt_id": attempt_id, "status": accepted["outcome_class"],
+            "tokens_consumed": tokens_consumed, "elapsed_input_mode": input_mode, "elapsed_input_ms": elapsed_ms,
+            "accounted_elapsed_ms": accounted_elapsed, "token_accounting_source": resolved_accounting_source, "drain_finalized": drain_finalized,
+            "mutation": "applied", "idempotent": False, "current": True,
+        }
+
+    def record_intervention_response(
+        self, *, response: Mapping[str, Any], responder_id: str, responder_kind: str,
+        at: str | datetime | None = None,
+    ) -> dict[str, Any]:
+        responder_id = _identifier(responder_id, label="responder_id")
+        if responder_kind not in {"human", "steward"}:
+            raise AutonomyError("responder_kind must be human or steward")
+        try:
+            accepted = validate_intervention_response(response)
+            response_json = canonical_intervention_response(accepted)
+            response_sha256 = intervention_response_sha256(accepted)
+        except InterventionError as error:
+            raise AutonomyError(f"intervention response is invalid: {error}") from error
+        if accepted["responder"] != {"kind": responder_kind, "actor_id": responder_id}:
+            raise AutonomyError("intervention response responder does not match caller")
+        timestamp, _ = _clock(at)
+        with self._connection() as connection:
+            self._prepare_write(connection)
+            source_attempt = connection.execute(
+                """SELECT a.lease_token_hash FROM intervention_requests r
+                   JOIN work_attempts a ON a.id=r.attempt_id WHERE r.id=?""",
+                (accepted["request"]["request_id"],),
+            ).fetchone()
+            if source_attempt is not None and _contains_persisted_lease_token(accepted, source_attempt["lease_token_hash"]):
+                raise AutonomyError("intervention response must not contain a lease token")
+            existing = connection.execute("SELECT * FROM intervention_responses WHERE id=?", (accepted["response_id"],)).fetchone()
+            if existing is not None:
+                if existing["response_json"] != response_json or existing["response_sha256"] != response_sha256:
+                    raise AutonomyError("idempotency_conflict")
+                request = connection.execute(
+                    """SELECT r.*,u.current_intervention_id,u.current_attempt_id FROM intervention_requests r
+                       JOIN work_units u ON u.id=r.work_unit_id WHERE r.id=?""", (existing["request_id"],)
+                ).fetchone()
+                head = connection.execute("SELECT * FROM intervention_response_heads WHERE request_id=?", (existing["request_id"],)).fetchone()
+                return {
+                    "request_id": existing["request_id"], "request_sha256": existing["request_sha256"],
+                    "response_id": existing["id"], "response_sha256": existing["response_sha256"],
+                    "revision_no": existing["revision_no"], "mutation": "none", "idempotent": True,
+                    "current": (
+                        request is not None and request["current_intervention_id"] == existing["request_id"]
+                        and head is not None and head["current_response_id"] == existing["id"]
+                    ),
+                    "current_response_id": None if head is None else head["current_response_id"],
+                    "current_response_sha256": None if head is None else head["current_response_sha256"],
+                    "current_attempt_id": None if request is None else request["current_attempt_id"],
+                    "current_intervention_id": None if request is None else request["current_intervention_id"],
+                    "stale_reason": None if (
+                        request is not None and request["current_intervention_id"] == existing["request_id"]
+                        and head is not None and head["current_response_id"] == existing["id"]
+                    ) else "unit_advanced",
+                }
+            request = connection.execute(
+                """SELECT r.*,u.status,u.current_intervention_id FROM intervention_requests r
+                   JOIN work_units u ON u.id=r.work_unit_id WHERE r.id=?""", (accepted["request"]["request_id"],)
+            ).fetchone()
+            if request is None or request["request_sha256"] != accepted["request"]["request_sha256"]:
+                raise AutonomyError("intervention request is missing or digest-mismatched")
+            if request["current_intervention_id"] != request["id"] or request["status"] != request["outcome_class"]:
+                raise AutonomyError("intervention request is no longer current")
+            if connection.execute("SELECT 1 FROM intervention_closures WHERE request_id=?", (request["id"],)).fetchone() is not None:
+                raise AutonomyError("intervention request is closed")
+            if connection.execute("SELECT emergency_stopped FROM runtime_control WHERE id=1").fetchone()[0]:
+                raise AutonomyError("runtime is emergency-stopped")
+            if request["outcome_class"] == "approval-required" and responder_kind != "human":
+                raise AutonomyError("approval-required intervention responses require a human responder")
+            head = connection.execute("SELECT * FROM intervention_response_heads WHERE request_id=?", (request["id"],)).fetchone()
+            expected = accepted["expected_current_response"]
+            if head is None:
+                if expected is not None:
+                    raise _response_head_changed(None)
+                revision_no, previous_id, previous_sha256 = 1, None, None
+            else:
+                if expected is None or expected["response_id"] != head["current_response_id"] or expected["response_sha256"] != head["current_response_sha256"]:
+                    raise _response_head_changed(head)
+                revision_no = int(head["revision_no"]) + 1
+                previous_id, previous_sha256 = head["current_response_id"], head["current_response_sha256"]
+            connection.execute(
+                """INSERT INTO intervention_responses(
+                    id,version,request_id,request_sha256,revision_no,previous_response_id,expected_previous_sha256,
+                    responder_kind,responder_id,disposition,response_json,response_sha256,created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (accepted["response_id"], accepted["version"], request["id"], request["request_sha256"], revision_no,
+                 previous_id, previous_sha256, responder_kind, responder_id, accepted["disposition"], response_json,
+                 response_sha256, timestamp),
+            )
+            if head is None:
+                connection.execute(
+                    "INSERT INTO intervention_response_heads(request_id,current_response_id,current_response_sha256,revision_no,updated_at) VALUES(?,?,?,?,?)",
+                    (request["id"], accepted["response_id"], response_sha256, revision_no, timestamp),
+                )
+            elif connection.execute(
+                """UPDATE intervention_response_heads SET current_response_id=?,current_response_sha256=?,revision_no=?,updated_at=?
+                   WHERE request_id=? AND current_response_id=? AND current_response_sha256=?""",
+                (accepted["response_id"], response_sha256, revision_no, timestamp, request["id"], previous_id, previous_sha256),
+            ).rowcount != 1:
+                raise _response_head_changed(head)
+            self._append(
+                connection, "intervention.responded", goal_id=request["goal_id"], work_unit_id=request["work_unit_id"],
+                payload={"request_id": request["id"], "request_sha256": request["request_sha256"],
+                         "response_id": accepted["response_id"], "response_sha256": response_sha256, "revision_no": revision_no,
+                         "previous_response_id": previous_id, "previous_response_sha256": previous_sha256,
+                         "responder_id": responder_id, "responder_kind": responder_kind, "disposition": accepted["disposition"], "timestamp": timestamp},
+            )
+        return {
+            "request_id": request["id"], "request_sha256": request["request_sha256"], "response_id": accepted["response_id"],
+            "response_sha256": response_sha256, "revision_no": revision_no, "previous_response_id": previous_id,
+            "previous_response_sha256": previous_sha256, "current_response_id": accepted["response_id"],
+            "current_response_sha256": response_sha256, "mutation": "applied", "idempotent": False, "current": True,
+        }
 
     def recover_expired_leases(self, *, goal_id: str | None = None, at: str | datetime | None = None) -> list[str]:
         timestamp, now = _clock(at)
         if goal_id is not None: goal_id = _identifier(goal_id, label="goal_id")
         recovered: list[str] = []
+        affected_goals: set[str] = set()
         with self._connection() as connection:
             self._prepare_write(connection)
             query = """SELECT a.*,u.goal_id,u.attempt_count FROM work_attempts a JOIN work_units u ON u.id=a.work_unit_id
@@ -1066,23 +1721,42 @@ class AutonomyStore(StateStore):
                 budget = connection.execute("SELECT * FROM budgets WHERE goal_id=?", (row["goal_id"],)).fetchone()
                 elapsed = min(self._attempt_elapsed(row, now), self._lease_reservation_ms(row))
                 terminal = "exhausted" if budget["consumed_attempts"] >= budget["total_attempts"] or (budget["total_elapsed_ms"] is not None and budget["consumed_elapsed_ms"] + elapsed >= budget["total_elapsed_ms"]) else "retry"
-                recovery_evidence: dict[str, Any] = {"recovered": True}
+                has_codex_preparation = connection.execute(
+                    "SELECT 1 FROM codex_run_preparations WHERE attempt_id=? LIMIT 1", (row["id"],)
+                ).fetchone() is not None
+                if has_codex_preparation:
+                    terminal = "blocked"
+                recovery_outcome = {"recovered": True}
+                if has_codex_preparation:
+                    recovery_outcome["reason"] = "host-execution-requires-review"
+                recovery_evidence: dict[str, Any] = recovery_outcome
                 if int(row["tokens_reserved"]):
                     recovery_evidence["unmeasured_usage"] = unmeasured_usage_evidence(
                         charged_tokens=int(row["tokens_reserved"]), reason="lease-expired",
                     )
                 connection.execute("""UPDATE work_attempts SET status='expired',outcome_class=?,outcome_json=?,ended_at=?,elapsed_ms=?,
-                                   tokens_consumed=tokens_consumed+? WHERE id=?""", (terminal, _encode(recovery_evidence), timestamp, elapsed, row["tokens_reserved"], row["id"]))
+                                   tokens_consumed=tokens_consumed+?,token_accounting_source='unavailable' WHERE id=?""", (terminal, _encode(recovery_evidence), timestamp, elapsed, row["tokens_reserved"], row["id"]))
                 connection.execute("""UPDATE budgets SET reserved_tokens=reserved_tokens-?,consumed_tokens=consumed_tokens+?,
                                    consumed_elapsed_ms=consumed_elapsed_ms+?,updated_at=? WHERE goal_id=?""", (row["tokens_reserved"], row["tokens_reserved"], elapsed, timestamp, row["goal_id"]))
                 connection.execute("UPDATE work_units SET status=?,lease_holder=NULL,lease_expires_at=NULL,current_attempt_id=NULL,retry_at=?,last_outcome_class=?,updated_at=? WHERE id=? AND current_attempt_id=?", ("retry-wait" if terminal == "retry" else terminal, timestamp if terminal == "retry" else None, terminal, timestamp, row["work_unit_id"], row["id"]))
-                self._append(connection, "work.lease_recovered", goal_id=row["goal_id"], work_unit_id=row["work_unit_id"], payload={"attempt_id": row["id"], "outcome": terminal})
+                recovery_event = {"attempt_id": row["id"], "outcome": terminal}
+                if has_codex_preparation:
+                    recovery_event["reason"] = "host-execution-requires-review"
+                self._append(connection, "work.lease_recovered", goal_id=row["goal_id"], work_unit_id=row["work_unit_id"], payload=recovery_event)
                 recovered.append(row["id"])
+                affected_goals.add(str(row["goal_id"]))
+            for affected_goal in affected_goals:
+                StateStore._finalize_drain_if_empty_in_transaction(
+                    connection, affected_goal, timestamp=timestamp, actor_id="lease-recovery",
+                )
         return recovered
 
     def requeue_work(
         self, *, work_unit_id: str, performer_id: str, envelope_sha256: str,
-        evidence: Mapping[str, Any], at: str | datetime | None = None,
+        evidence: Mapping[str, Any], intervention_request_id: str | None = None,
+        expected_intervention_response_id: str | None = None,
+        expected_intervention_response_sha256: str | None = None,
+        at: str | datetime | None = None,
     ) -> dict[str, Any]:
         """Resume blocked work only through an explicit, evidenced approval."""
         work_unit_id = _identifier(work_unit_id, label="work_unit_id")
@@ -1090,12 +1764,105 @@ class AutonomyStore(StateStore):
         if not isinstance(evidence, Mapping) or not evidence:
             raise AutonomyError("requeue evidence must be a nonempty object")
         evidence_json, evidence_sha256 = _json_hash(evidence)
+        structured_values = (intervention_request_id, expected_intervention_response_id, expected_intervention_response_sha256)
+        if any(value is not None for value in structured_values) and any(value is None for value in structured_values):
+            raise AutonomyError("structured requeue requires request id and expected response id and digest")
+        structured = intervention_request_id is not None
+        if structured:
+            intervention_request_id = _identifier(intervention_request_id, label="intervention_request_id")
+            expected_intervention_response_id = _identifier(expected_intervention_response_id, label="expected_intervention_response_id")
+            if (not isinstance(expected_intervention_response_sha256, str) or len(expected_intervention_response_sha256) != 64
+                    or any(character not in "0123456789abcdef" for character in expected_intervention_response_sha256)):
+                raise AutonomyError("expected_intervention_response_sha256 must be a lowercase SHA-256")
         timestamp, _ = _clock(at)
         with self._connection() as connection:
             self._prepare_write(connection)
             unit = connection.execute("SELECT * FROM work_units WHERE id=?", (work_unit_id,)).fetchone()
             if unit is None:
                 raise AutonomyError("unknown work unit")
+            if connection.execute(
+                """SELECT 1 FROM codex_run_preparations p LEFT JOIN codex_run_finishes f ON f.run_id=p.id
+                   JOIN work_attempts a ON a.id=p.attempt_id WHERE a.work_unit_id=? AND f.run_id IS NULL LIMIT 1""",
+                (work_unit_id,),
+            ).fetchone() is not None:
+                raise AutonomyError("requeue requires all prior Codex runs to be resolved")
+            if structured:
+                historical = connection.execute(
+                    """SELECT c.*,r.work_unit_id FROM intervention_closures c
+                       JOIN intervention_requests r ON r.id=c.request_id WHERE c.request_id=?""",
+                    (intervention_request_id,),
+                ).fetchone()
+                if historical is not None and historical["work_unit_id"] == work_unit_id:
+                    if (
+                        historical["response_id"] != expected_intervention_response_id
+                        or historical["response_sha256"] != expected_intervention_response_sha256
+                        or historical["closed_by"] != performer_id
+                        or historical["envelope_sha256"] != envelope_sha256
+                        or historical["requeue_evidence_sha256"] != evidence_sha256
+                    ):
+                        raise AutonomyError("idempotency_conflict")
+                    return {
+                        "request_id": intervention_request_id, "response_id": historical["response_id"],
+                        "response_sha256": historical["response_sha256"], "closure_id": historical["id"],
+                        "status": unit["status"], "mutation": "none", "idempotent": True, "current": False,
+                        "current_attempt_id": unit["current_attempt_id"], "current_intervention_id": unit["current_intervention_id"],
+                        "stale_reason": "unit_advanced",
+                    }
+            if unit["current_intervention_id"] is not None:
+                if not structured:
+                    raise AutonomyError("structured intervention requeue requires request and response head identities")
+                if intervention_request_id != unit["current_intervention_id"]:
+                    raise AutonomyError("intervention request is stale or does not belong to this work unit")
+                request = connection.execute("SELECT * FROM intervention_requests WHERE id=?", (intervention_request_id,)).fetchone()
+                head = connection.execute("SELECT * FROM intervention_response_heads WHERE request_id=?", (intervention_request_id,)).fetchone()
+                if (
+                    request is None or request["work_unit_id"] != work_unit_id or request["goal_id"] != unit["goal_id"]
+                    or head is None or head["current_response_id"] != expected_intervention_response_id
+                    or head["current_response_sha256"] != expected_intervention_response_sha256
+                ):
+                    raise _response_head_changed(head)
+                response = connection.execute("SELECT * FROM intervention_responses WHERE id=?", (expected_intervention_response_id,)).fetchone()
+                if response is None or response["request_id"] != intervention_request_id or response["disposition"] != "answered":
+                    raise AutonomyError("intervention response is not answered")
+                if connection.execute("SELECT 1 FROM intervention_closures WHERE request_id=?", (intervention_request_id,)).fetchone() is not None:
+                    raise AutonomyError("intervention request is already closed")
+                if unit["status"] not in {"blocked", "approval-required"}:
+                    raise AutonomyError("only blocked or approval-required work may be requeued")
+                self._active_goal(connection, unit["goal_id"])
+                self._authorize(
+                    connection, goal_id=unit["goal_id"], work_unit_id=work_unit_id,
+                    action=WORK_REQUEUE_ACTION, envelope_sha256=envelope_sha256,
+                    performer_id=performer_id, effect=LOCAL_REVERSIBLE_WRITE, timestamp=timestamp,
+                )
+                closure_id = uuid4().hex
+                connection.execute(
+                    """INSERT INTO intervention_closures(
+                        id,request_id,response_id,response_sha256,closure_kind,requeue_evidence_sha256,
+                        envelope_sha256,closed_by,closed_at
+                    ) VALUES(?,?,?,?,'requeued',?,?,?,?)""",
+                    (closure_id, intervention_request_id, expected_intervention_response_id,
+                     expected_intervention_response_sha256, evidence_sha256, envelope_sha256, performer_id, timestamp),
+                )
+                connection.execute(
+                    "UPDATE work_units SET status='eligible',retry_at=NULL,current_intervention_id=NULL,updated_at=? WHERE id=?",
+                    (timestamp, work_unit_id),
+                )
+                self._append(
+                    connection, "work.requeued", goal_id=unit["goal_id"], work_unit_id=work_unit_id,
+                    payload={"performer_id": performer_id, "previous_status": unit["status"], "request_id": intervention_request_id,
+                             "request_sha256": request["request_sha256"], "response_id": expected_intervention_response_id,
+                             "response_sha256": expected_intervention_response_sha256, "response_revision_no": response["revision_no"],
+                             "closure_id": closure_id, "envelope_sha256": envelope_sha256, "evidence_sha256": evidence_sha256,
+                             "timestamp": timestamp},
+                )
+                return {
+                    "request_id": intervention_request_id, "response_id": expected_intervention_response_id,
+                    "response_sha256": expected_intervention_response_sha256, "closure_id": closure_id,
+                    "status": "eligible", "requeue_evidence_sha256": evidence_sha256,
+                    "mutation": "applied", "idempotent": False, "current": True,
+                }
+            if structured:
+                raise AutonomyError("intervention request is stale or closed")
             if unit["status"] not in {"blocked", "approval-required", "failed", "exhausted"}:
                 raise AutonomyError("only blocked, approval-required, failed, or exhausted work may be requeued")
             self._active_goal(connection, unit["goal_id"])
@@ -1127,6 +1894,220 @@ class AutonomyStore(StateStore):
         result = self.get_work_unit(work_unit_id) or {}
         result["requeue_evidence_sha256"] = evidence_sha256
         return result
+
+    @staticmethod
+    def _codex_projection(connection: Any, row: Any) -> dict[str, Any]:
+        start = connection.execute("SELECT * FROM codex_run_starts WHERE run_id=?", (row["id"],)).fetchone()
+        finish = connection.execute("SELECT * FROM codex_run_finishes WHERE run_id=?", (row["id"],)).fetchone()
+        attempt = connection.execute(
+            "SELECT a.*,u.current_attempt_id,u.status AS unit_status FROM work_attempts a JOIN work_units u ON u.id=a.work_unit_id WHERE a.id=?",
+            (row["attempt_id"],),
+        ).fetchone()
+        accounting = connection.execute(
+            """SELECT count(p.id) AS prepared,count(f.run_id) AS finished,
+                count(CASE WHEN f.usage_status='measured' THEN 1 END) AS measured
+               FROM codex_run_preparations p LEFT JOIN codex_run_finishes f ON f.run_id=p.id WHERE p.attempt_id=?""",
+            (row["attempt_id"],),
+        ).fetchone()
+        attempt_usage_complete = bool(accounting["prepared"]) and accounting["prepared"] == accounting["finished"] == accounting["measured"]
+        run_usage_complete = finish is not None and finish["usage_status"] == "measured"
+        state = "finished" if finish is not None else "started" if start is not None else "prepared"
+        return {
+            "run_id": row["id"], "attempt_id": row["attempt_id"], "run_no": row["run_no"], "state": state,
+            "idempotency_key": row["idempotency_key"], "requested_task_name": row["requested_task_name"],
+            "requested_profile": {"role": row["role"], "model": row["requested_model"],
+                                  "reasoning_effort": row["requested_reasoning_effort"], "sandbox_mode": row["sandbox_mode"]},
+            "request_sha256": row["request_sha256"], "handoff_sha256": row["handoff_sha256"],
+            "plan_sha256": row["plan_sha256"], "brief_sha256": row["brief_sha256"], "prepared_at": row["prepared_at"],
+            "actual": {"canonical_name": None if start is None else start["host_canonical_name"],
+                       "agent_id": None if start is None else start["host_agent_id"], "model": None, "reasoning_effort": None},
+            "result": {"status": None if finish is None else finish["result_status"],
+                       "sha256": None if finish is None else finish["result_sha256"], "outcome": None if finish is None else finish["outcome"],
+                       "observed_by": None if finish is None else finish["observed_by"], "recorded_at": None if finish is None else finish["recorded_at"]},
+            "usage": {"status": None if finish is None else finish["usage_status"],
+                      "input_tokens": None if finish is None else finish["input_tokens"],
+                      "output_tokens": None if finish is None else finish["output_tokens"],
+                      "complete": run_usage_complete},
+            "host_token_cap_enforced": False,
+            "attempt": {"is_current": attempt is not None and attempt["current_attempt_id"] == row["attempt_id"],
+                        "is_live": attempt is not None and attempt["status"] == "leased" and attempt["expires_at"] > _timestamp(None),
+                        "status": None if attempt is None else attempt["status"],
+                        "lease_generation": row["lease_generation"],
+                        "token_accounting_source": None if attempt is None else attempt["token_accounting_source"],
+                        "arithmetic_tokens_consumed": None if attempt is None else attempt["tokens_consumed"],
+                        "accounting_complete": attempt_usage_complete},
+        }
+
+    def prepare_codex_run(
+        self, *, attempt_id: str, performer_id: str, lease_token: str, catalog: Any, config: Any,
+        routing_request: Mapping[str, Any], idempotency_key: str, handoff: Mapping[str, Any] | None = None,
+        at: str | datetime | None = None,
+    ) -> dict[str, Any]:
+        attempt_id, performer_id, idempotency_key = (
+            _identifier(attempt_id, label="attempt_id"), _identifier(performer_id, label="performer_id"),
+            _identifier(idempotency_key, label="idempotency_key"),
+        )
+        if not isinstance(lease_token, str) or not lease_token:
+            raise AutonomyError("attempt owner or lease token does not match")
+        if not isinstance(routing_request, Mapping) or (handoff is not None and not isinstance(handoff, Mapping)):
+            raise AutonomyError("Codex run request and handoff must be objects")
+        if contains_secret(idempotency_key, lease_token) or contains_secret(routing_request, lease_token) or contains_secret(handoff or {}, lease_token):
+            raise AutonomyError("Codex run request must not contain the supplied lease token")
+        try:
+            plan = delegation_plan(catalog, config, routing_request, handoff=handoff)
+        except DelegationError as error:
+            raise AutonomyError(f"Codex run plan is invalid: {error}") from error
+        request_sha256, handoff_sha256 = sha256_json(routing_request), (None if handoff is None else sha256_json(handoff))
+        plan_sha256, brief_sha256 = sha256_json(plan), sha256_json(plan["brief"])
+        timestamp, _ = _clock(at)
+        token_hash = sha256(lease_token.encode("utf-8")).hexdigest()
+        with self._connection() as connection:
+            self._prepare_write(connection)
+            existing = connection.execute("SELECT * FROM codex_run_preparations WHERE idempotency_key=?", (idempotency_key,)).fetchone()
+            if existing is not None:
+                exact = (existing["attempt_id"] == attempt_id and existing["prepared_by"] == performer_id
+                         and existing["request_sha256"] == request_sha256 and existing["handoff_sha256"] == handoff_sha256
+                         and existing["plan_sha256"] == plan_sha256 and existing["brief_sha256"] == brief_sha256)
+                if not exact:
+                    raise AutonomyError("idempotency_conflict")
+                return {"run_id": existing["id"], "attempt_id": attempt_id,
+                        "requested_task_name": existing["requested_task_name"], "launch_directive": "reconcile-only",
+                        "idempotent": True, "agent": plan["agent"], "plan_sha256": existing["plan_sha256"],
+                        "brief_sha256": existing["brief_sha256"]}
+            attempt = connection.execute(
+                "SELECT a.*,u.goal_id,u.current_attempt_id FROM work_attempts a JOIN work_units u ON u.id=a.work_unit_id WHERE a.id=?",
+                (attempt_id,),
+            ).fetchone()
+            source = routing_request.get("source") if isinstance(routing_request, Mapping) else None
+            if not isinstance(source, Mapping) or source.get("goal_id") != (None if attempt is None else attempt["goal_id"]) or source.get("work_unit_id") != (None if attempt is None else attempt["work_unit_id"]):
+                raise AutonomyError("Codex routing request source does not match the leased attempt")
+            if (attempt is None or attempt["status"] != "leased" or attempt["current_attempt_id"] != attempt_id
+                    or attempt["owner_id"] != performer_id or not hmac.compare_digest(attempt["lease_token_hash"], token_hash)
+                    or timestamp >= attempt["expires_at"]):
+                raise AutonomyError("Codex run preparation requires the live bound work-attempt lease token")
+            self._active_goal(connection, attempt["goal_id"], allow_draining=True)
+            profile_values = (plan["agent"]["role"], plan["agent"]["model"], plan["agent"]["reasoning_effort"], plan["agent"]["sandbox_mode"])
+            if any(value is not None and (not isinstance(value, str) or not value or len(value) > 200 or _SECRET_VALUE.search(value)) for value in profile_values):
+                raise AutonomyError("Codex requested profile is invalid")
+            persisted_metadata = {"prepared_by": performer_id, "idempotency_key": idempotency_key, "profile": profile_values,
+                                  "repository": attempt["repository"], "revision": attempt["revision"], "branch": attempt["branch"], "workspace": attempt["workspace"]}
+            if contains_secret(persisted_metadata, lease_token) or _contains_persisted_lease_token(persisted_metadata, attempt["lease_token_hash"]):
+                raise AutonomyError("Codex attempt context must not contain the supplied lease token")
+            if connection.execute("SELECT emergency_stopped FROM runtime_control WHERE id=1").fetchone()[0]:
+                raise AutonomyError("runtime is emergency-stopped")
+            open_run = connection.execute(
+                "SELECT id FROM codex_run_preparations p LEFT JOIN codex_run_finishes f ON f.run_id=p.id WHERE p.attempt_id=? AND f.run_id IS NULL",
+                (attempt_id,),
+            ).fetchone()
+            if open_run is not None:
+                raise AutonomyError("attempt already has an unresolved Codex run")
+            unfinished_runs = connection.execute(
+                "SELECT count(*) FROM codex_run_preparations p LEFT JOIN codex_run_finishes f ON f.run_id=p.id WHERE f.run_id IS NULL"
+            ).fetchone()[0]
+            if unfinished_runs >= config.concurrency_limit:
+                raise AutonomyError("configured Codex host execution capacity is exhausted")
+            run_no = int(connection.execute("SELECT COALESCE(MAX(run_no),0)+1 FROM codex_run_preparations WHERE attempt_id=?", (attempt_id,)).fetchone()[0])
+            role = str(plan["agent"]["role"])
+            requested_name = task_name(attempt_id=attempt_id, run_no=run_no, requested_role=role)
+            run_id = _identifier(f"codex-run-{uuid4().hex}", label="run_id")
+            connection.execute(
+                """INSERT INTO codex_run_preparations(id,attempt_id,run_no,idempotency_key,prepared_by,goal_id,work_unit_id,lease_generation,envelope_sha256,repository,revision,branch,workspace,role,requested_model,requested_reasoning_effort,sandbox_mode,request_sha256,handoff_sha256,plan_sha256,brief_sha256,requested_task_name,prepared_at,lease_token_char_length)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (run_id, attempt_id, run_no, idempotency_key, performer_id, attempt["goal_id"], attempt["work_unit_id"], attempt["lease_generation"],
+                 connection.execute("SELECT envelope_sha256 FROM goal_contracts WHERE goal_id=?", (attempt["goal_id"],)).fetchone()[0],
+                 attempt["repository"], attempt["revision"], attempt["branch"], attempt["workspace"], role,
+                 plan["agent"]["model"], plan["agent"]["reasoning_effort"], plan["agent"]["sandbox_mode"], request_sha256,
+                 handoff_sha256, plan_sha256, brief_sha256, requested_name, timestamp, len(lease_token)),
+            )
+            self._append(connection, "codex_run.prepared", goal_id=attempt["goal_id"], work_unit_id=attempt["work_unit_id"], payload={
+                "run_id": run_id, "attempt_id": attempt_id, "run_no": run_no, "idempotency_key": idempotency_key,
+                "requested_task_name": requested_name, "request_sha256": request_sha256, "handoff_sha256": handoff_sha256,
+                "plan_sha256": plan_sha256, "brief_sha256": brief_sha256, "prepared_at": timestamp,
+                "preparation_row_sha256": _authority_row_hash("codex_run_preparations", connection.execute("SELECT * FROM codex_run_preparations WHERE id=?", (run_id,)).fetchone()),
+                "attempt_binding_sha256": _attempt_binding_sha256(attempt),
+            })
+        return {"run_id": run_id, "attempt_id": attempt_id, "requested_task_name": requested_name,
+                "launch_directive": "invoke-once-now", "idempotent": False, "agent": plan["agent"],
+                "plan_sha256": plan_sha256, "brief_sha256": brief_sha256}
+
+    def record_codex_start(self, *, run_id: str, observer_id: str, host_canonical_name: str,
+                           host_agent_id: str | None = None, at: str | datetime | None = None) -> dict[str, Any]:
+        run_id, observer_id = _identifier(run_id, label="run_id"), _identifier(observer_id, label="observer_id")
+        if (not isinstance(host_canonical_name, str) or not re.fullmatch(r"(?:/[a-z][a-z0-9_]*(?:/[a-z][a-z0-9_]*)*|[a-z][a-z0-9_]*)", host_canonical_name)
+                or len(host_canonical_name) > 256 or _SECRET_VALUE.search(host_canonical_name)):
+            raise AutonomyError("host canonical name is required")
+        if host_agent_id is not None: host_agent_id = _identifier(host_agent_id, label="host_agent_id")
+        timestamp, _ = _clock(at)
+        with self._connection() as connection:
+            self._prepare_write(connection)
+            run = connection.execute("SELECT * FROM codex_run_preparations WHERE id=?", (run_id,)).fetchone()
+            if run is None: raise AutonomyError("unknown Codex run")
+            attempt = connection.execute("SELECT lease_token_hash FROM work_attempts WHERE id=?", (run["attempt_id"],)).fetchone()
+            if attempt is not None and (_contains_persisted_lease_token(host_canonical_name, attempt["lease_token_hash"], run["lease_token_char_length"])
+                                        or (host_agent_id is not None and _contains_persisted_lease_token(host_agent_id, attempt["lease_token_hash"], run["lease_token_char_length"]))
+                                        or _contains_persisted_lease_token(observer_id, attempt["lease_token_hash"], run["lease_token_char_length"])):
+                raise AutonomyError("host identity must not contain a lease token")
+            if host_canonical_name.rsplit("/", 1)[-1] != run["requested_task_name"]:
+                raise AutonomyError("host canonical name does not match requested task name")
+            prior = connection.execute("SELECT * FROM codex_run_starts WHERE run_id=?", (run_id,)).fetchone()
+            if prior is not None:
+                if (prior["host_canonical_name"], prior["host_agent_id"], prior["observed_by"]) != (host_canonical_name, host_agent_id, observer_id):
+                    raise AutonomyError("idempotency_conflict")
+                return self._codex_projection(connection, run)
+            if connection.execute("SELECT 1 FROM codex_run_starts WHERE host_canonical_name=? OR (? IS NOT NULL AND host_agent_id=?) LIMIT 1", (host_canonical_name, host_agent_id, host_agent_id)).fetchone() is not None:
+                raise AutonomyError("host identity is already bound to another Codex run")
+            try:
+                connection.execute("INSERT INTO codex_run_starts(run_id,host_canonical_name,host_agent_id,observed_by,recorded_at) VALUES(?,?,?,?,?)", (run_id, host_canonical_name, host_agent_id, observer_id, timestamp))
+            except sqlite3.IntegrityError as error:
+                raise AutonomyError(f"cannot record Codex start receipt: {error}") from error
+            self._append(connection, "codex_run.started", goal_id=run["goal_id"], work_unit_id=run["work_unit_id"], payload={"run_id":run_id,"host_canonical_name":host_canonical_name,"host_agent_id":host_agent_id,"observed_by":observer_id,"recorded_at":timestamp})
+            return self._codex_projection(connection, run)
+
+    def record_codex_finish(self, *, run_id: str, observer_id: str, outcome: str, result_status: str,
+                            result_sha256: str | None, usage_status: str, input_tokens: int | None = None,
+                            output_tokens: int | None = None, at: str | datetime | None = None) -> dict[str, Any]:
+        run_id, observer_id = _identifier(run_id, label="run_id"), _identifier(observer_id, label="observer_id")
+        try:
+            validate_finish(outcome=outcome, result_status=result_status, result_sha256=result_sha256, usage_status=usage_status, input_tokens=input_tokens, output_tokens=output_tokens)
+        except CodexRunError as error: raise AutonomyError(str(error)) from error
+        timestamp, _ = _clock(at)
+        with self._connection() as connection:
+            self._prepare_write(connection)
+            run = connection.execute("SELECT * FROM codex_run_preparations WHERE id=?", (run_id,)).fetchone()
+            if run is None: raise AutonomyError("unknown Codex run")
+            attempt = connection.execute("SELECT lease_token_hash FROM work_attempts WHERE id=?", (run["attempt_id"],)).fetchone()
+            if attempt is not None and _contains_persisted_lease_token(observer_id, attempt["lease_token_hash"], run["lease_token_char_length"]):
+                raise AutonomyError("receipt observer must not contain a lease token")
+            if connection.execute("SELECT 1 FROM codex_run_starts WHERE run_id=?", (run_id,)).fetchone() is None:
+                raise AutonomyError("Codex run finish requires a recorded start")
+            prior = connection.execute("SELECT * FROM codex_run_finishes WHERE run_id=?", (run_id,)).fetchone()
+            supplied = (outcome,result_status,result_sha256,usage_status,input_tokens,output_tokens,observer_id)
+            if prior is not None:
+                if tuple(prior[key] for key in ("outcome","result_status","result_sha256","usage_status","input_tokens","output_tokens","observed_by")) != supplied: raise AutonomyError("idempotency_conflict")
+                return self._codex_projection(connection, run)
+            connection.execute("INSERT INTO codex_run_finishes(run_id,outcome,result_status,result_sha256,usage_status,input_tokens,output_tokens,observed_by,recorded_at) VALUES(?,?,?,?,?,?,?,?,?)", (run_id,*supplied,timestamp))
+            self._append(connection, "codex_run.finished", goal_id=run["goal_id"], work_unit_id=run["work_unit_id"], payload={"run_id":run_id,"outcome":outcome,"result_status":result_status,"result_sha256":result_sha256,"usage_status":usage_status,"input_tokens":input_tokens,"output_tokens":output_tokens,"observed_by":observer_id,"recorded_at":timestamp})
+            return self._codex_projection(connection, run)
+
+    def get_codex_run(self, run_id: str) -> dict[str, Any] | None:
+        run_id = _identifier(run_id, label="run_id")
+        with self._readonly_connection() as connection:
+            self._prepare_readonly(connection)
+            row = connection.execute("SELECT * FROM codex_run_preparations WHERE id=?", (run_id,)).fetchone()
+            return None if row is None else self._codex_projection(connection, row)
+
+    def list_codex_runs(self, *, attempt_id: str | None = None, limit: int = 50, after_run_id: str | None = None) -> dict[str, Any]:
+        if attempt_id is not None: attempt_id = _identifier(attempt_id, label="attempt_id")
+        if after_run_id is not None: after_run_id = _identifier(after_run_id, label="after_run_id")
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100: raise AutonomyError("limit must be between 1 and 100")
+        with self._readonly_connection() as connection:
+            self._prepare_readonly(connection)
+            query, params = "SELECT * FROM codex_run_preparations WHERE 1=1", []
+            if attempt_id is not None: query += " AND attempt_id=?"; params.append(attempt_id)
+            if after_run_id is not None: query += " AND id>?"; params.append(after_run_id)
+            rows = connection.execute(query + " ORDER BY id LIMIT ?", (*params, limit + 1)).fetchall()
+            page = rows[:limit]
+            return {"items":[self._codex_projection(connection, row) for row in page], "next_after_run_id": None if len(rows)<=limit else page[-1]["id"]}
 
     def prepare_effect(self, *, idempotency_key: str, goal_id: str, work_unit_id: str | None,
                        effect_class: str, operation: str, request: Mapping[str, Any], envelope_sha256: str,
@@ -1199,7 +2180,7 @@ class AutonomyStore(StateStore):
         if connection.execute("SELECT emergency_stopped FROM runtime_control WHERE id=1").fetchone()[0]:
             raise AutonomyError("runtime is emergency-stopped")
         goal = connection.execute("SELECT status FROM goals WHERE id=?", (goal_id,)).fetchone()
-        if goal is None or goal["status"] != "active":
+        if goal is None or goal["status"] not in {"active", "draining"}:
             raise AutonomyError("goal is not active")
         contract = connection.execute("SELECT version,envelope_sha256,contract FROM goal_contracts WHERE goal_id=?", (goal_id,)).fetchone()
         if contract is None or contract["version"] != "v2" or contract["envelope_sha256"] != envelope_sha256:
@@ -1530,7 +2511,7 @@ class AutonomyStore(StateStore):
                               at: str | datetime | None = None) -> dict[str, Any]:
         idempotency_key = _identifier(idempotency_key, label="idempotency_key")
         performer_id = _identifier(performer_id, label="performer_id")
-        if outcome not in LOCAL_EFFECT_RECEIPT_OUTCOMES:
+        if outcome not in LOCAL_EFFECT_RECEIPT_OUTCOMES and outcome != "failed":
             raise AutonomyError("receipt outcome must be one of applied, success, failed-before-effect, indeterminate, or recovery-required")
         for name, digest in (("before_sha256", before_sha256), ("after_sha256", after_sha256)):
             if digest is not None and (not isinstance(digest, str) or len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest)):
@@ -1539,12 +2520,14 @@ class AutonomyStore(StateStore):
         timestamp, _ = _clock(at)
         with self._connection() as connection:
             runtime_schema = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            compatibility_write = runtime_schema in {8, 9, 10, 11}
+            compatibility_write = runtime_schema in {8, 9, 10, 11, 12, 13, 14}
+            if outcome == "failed" and not compatibility_write:
+                raise AutonomyError("legacy failed receipt only permits a pre-migration exact local upgrade")
             if compatibility_write:
-                # An upgrade can fail before it reaches the schema migration.
-                # Preserve that outcome without opening the old ledger to normal
-                # receipts: only the already-bound, local reversible upgrade
-                # intent may receive a terminal failure record.
+                # A failed explicit upgrade must be receipted before its
+                # runtime can migrate.  This deliberately admits only the
+                # exact v1 local-effect bridge intent, never ordinary work or
+                # provider effects from an older schema.
                 self._assert_audit_chain_in_transaction(connection)
                 self._assert_current_state_integrity_in_transaction(
                     connection, existing_only=True,
@@ -1558,27 +2541,43 @@ class AutonomyStore(StateStore):
             existing = connection.execute("SELECT * FROM effect_receipts WHERE intent_key=?", (idempotency_key,)).fetchone()
             if compatibility_write:
                 try:
-                    request = _intent_request(intent)
-                except AutonomyError:
-                    raise
+                    request_payload = json.loads(intent["request_json"])
+                    request = request_payload["request"]
+                    plan_sha256 = request["plan_sha256"]
+                    exact_upgrade_intent = (
+                        int(intent["protocol_version"]) == 1
+                        and intent["effect_class"] == LOCAL_REVERSIBLE_WRITE
+                        and intent["operation"] == "local-effect"
+                        and set(request_payload) == {"authorized_performer_id", "request"}
+                        and request_payload["authorized_performer_id"] == performer_id
+                        and isinstance(request, dict)
+                        and set(request) == {"action", "plan_sha256"}
+                        and request["action"] == "upgrade-apply"
+                        and isinstance(plan_sha256, str)
+                        and len(plan_sha256) == 64
+                        and all(character in "0123456789abcdef" for character in plan_sha256)
+                        and intent["request_sha256"] == _json_hash(request)[1]
+                    )
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    exact_upgrade_intent = False
                 if (
-                    int(intent["protocol_version"] or 1) != 1
-                    or intent["effect_class"] != LOCAL_REVERSIBLE_WRITE
-                    or intent["operation"] != "local-effect"
-                    or (intent["status"] != "pending" and existing is None)
-                    or set(request) != {"action", "plan_sha256"}
-                    or request.get("action") != "upgrade-apply"
-                    or not isinstance(request.get("plan_sha256"), str)
-                    or len(request["plan_sha256"]) != 64
-                    or outcome not in {"failed-before-effect", "indeterminate", "recovery-required"}
-                    or evidence.get("action") != "upgrade-apply"
-                    or evidence.get("plan_sha256") != request["plan_sha256"]
+                    not exact_upgrade_intent
+                    or outcome not in {"failed", "failed-before-effect", "indeterminate", "recovery-required"}
+                    or before_sha256 is not None
+                    or after_sha256 is not None
+                    or (existing is None and intent["status"] != "pending")
+                    or (existing is not None and intent["status"] not in {"received", "recovery-required"})
+                ):
+                    raise AutonomyError(
+                        "pre-migration receipt bridge only permits a failed exact local upgrade effect"
+                    )
+                if outcome != "failed" and (
+                    evidence.get("action") != "upgrade-apply"
+                    or evidence.get("plan_sha256") != plan_sha256
                     or not isinstance(evidence.get("error"), str)
                     or not evidence["error"].strip()
                 ):
-                    raise AutonomyError(
-                        "pre-migration receipt bridge only permits a bound upgrade terminal failure"
-                    )
+                    raise AutonomyError("pre-migration receipt requires bound upgrade failure evidence")
             if existing is not None:
                 if (existing["outcome"], existing["before_sha256"], existing["after_sha256"], existing["evidence_json"], existing["performed_by"]) != (outcome, before_sha256, after_sha256, evidence_json, performer_id):
                     raise AutonomyError("effect receipt conflicts with the existing receipt")

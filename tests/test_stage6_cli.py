@@ -17,6 +17,7 @@ from tasktra.authority import authority_envelope_sha256
 from tasktra.autonomy import AutonomyStore, LOCAL_REVERSIBLE_WRITE
 from tasktra.config import initialize_project, load_project_config
 from tasktra.state import SCHEMA_VERSION, StateStore
+from tests.runtime_schema_helpers import peel_schema13_interventions
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -250,14 +251,13 @@ class Stage6CliTests(unittest.TestCase):
             store.activate_goal("upgrade-goal", actor_id="owner", envelope_sha256=digest)
             store.create_work_unit(goal_id="upgrade-goal", work_unit_id="upgrade-work", title="Upgrade", scope={"paths": ["."], "exclusions": []})
 
-            # Model the sealed public v11 runtime shape: it has verification
-            # policy but not the v12 acceptance/proof columns.
+            # Model the published local v11 runtime shape.  Use the fixture
+            # peeler so no later-lineage objects remain under an old version.
             connection = sqlite3.connect(database, isolation_level=None)
             connection.row_factory = sqlite3.Row
             try:
                 connection.execute("BEGIN IMMEDIATE")
-                connection.execute("ALTER TABLE work_units DROP COLUMN acceptance_checks")
-                connection.execute("ALTER TABLE workflow_evidence DROP COLUMN completion_evidence_json")
+                peel_schema13_interventions(connection, target_version=11)
                 StateStore._seal_current_state_in_transaction(connection, "2035-01-01T00:00:00Z", existing_only=True)
                 connection.execute("PRAGMA user_version = 11")
                 connection.commit()

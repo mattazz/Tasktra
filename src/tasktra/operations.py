@@ -73,6 +73,8 @@ def operational_status(
             if row["status"] in provider_effect_states:
                 provider_effect_states[row["status"]] = row["count"]
         summary["provider_effects"] = provider_effect_states
+        from .intervention_views import intervention_counts
+        summary["interventions"] = intervention_counts(connection, include_closed=False)
         exhausted = connection.execute(
             """SELECT count(*) FROM budgets WHERE
                (total_tokens IS NOT NULL AND consumed_tokens + reserved_tokens >= total_tokens)
@@ -208,6 +210,7 @@ def operational_status(
             "verification_policies": verification_policies,
         }
         result["goal"] = goal_view
+        goal_view["interventions"] = intervention_counts(connection, goal_id=goal_id, include_closed=False)
         if detail_limit:
             goal_view["units"] = [
                 _row(row)

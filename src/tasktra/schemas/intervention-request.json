@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tasktra intervention request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "version", "request_id", "source", "producer", "outcome_class", "prompt", "rationale", "impact", "requires_human_approval", "evidence_refs"],
+  "properties": {
+    "kind": {"const": "tasktra.intervention-request"},
+    "version": {"const": 1},
+    "request_id": {"$ref": "#/$defs/id"},
+    "source": {"$ref": "#/$defs/source"},
+    "producer": {"$ref": "#/$defs/producer"},
+    "outcome_class": {"enum": ["blocked", "approval-required"]},
+    "prompt": {"$ref": "#/$defs/requestText"},
+    "rationale": {"$ref": "#/$defs/requestText"},
+    "impact": {"$ref": "#/$defs/requestText"},
+    "requires_human_approval": {"type": "boolean"},
+    "evidence_refs": {"type": "array", "maxItems": 8, "items": {"$ref": "#/$defs/evidence"}}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"},
+    "source": {"type": "object", "additionalProperties": false, "required": ["goal_id", "work_unit_id", "attempt_id"], "properties": {"goal_id": {"$ref": "#/$defs/id"}, "work_unit_id": {"$ref": "#/$defs/id"}, "attempt_id": {"$ref": "#/$defs/id"}}},
+    "producer": {"type": "object", "additionalProperties": false, "required": ["actor_id"], "properties": {"actor_id": {"$ref": "#/$defs/id"}}},
+    "requestText": {"type": "string", "minLength": 1, "maxLength": 500},
+    "evidence": {"type": "object", "additionalProperties": false, "required": ["id", "kind", "locator", "summary"], "properties": {"id": {"$ref": "#/$defs/id"}, "kind": {"enum": ["file", "artifact", "command", "url"]}, "locator": {"type": "string", "minLength": 1, "maxLength": 1000}, "summary": {"type": "string", "minLength": 1, "maxLength": 500}}}
+  }
+}

@@ -53,7 +53,174 @@ python -m tasktra init --root C:\src\my-project --apply
 A built wheel can be installed instead of the editable source checkout when a
 versioned distribution is available.
 
-`init` is preview-only unless `--apply` is present and never overwrites an existing profile. `bootstrap` preserves an existing profile and creates or migrates only its local runtime. `compile` refuses to replace project-owned files, requires `--force` for locally edited managed files, and requires `--prune-stale` before deleting obsolete managed files whose hashes still match the prior manifest. Installing the package is what makes `python -m tasktra` available outside the Tasktra checkout; `--root` identifies the project it should operate on.
+### First project walkthrough
+
+After `tasktra init --apply`, run the built-in guide. It is written for people
+using the terminal and describes the next useful actions for the current
+project without changing anything:
+
+```powershell
+tasktra guide
+```
+
+For a new project, the usual path is:
+
+```powershell
+tasktra init --preview
+tasktra init --apply
+tasktra guide
+tasktra packs recommend
+tasktra packs add planning
+tasktra packs add planning --apply
+tasktra compile --trust-catalog
+```
+
+`packs add` and `packs remove` are preview-first. Their normal form explains
+the configuration change, dependencies, capability blockers, and migrations;
+only `--apply` updates `.tasktra/project.toml`. Compiling remains a separate
+step, so Tasktra never silently replaces generated agent instructions.
+
+```powershell
+tasktra packs list
+tasktra packs add jira-sync
+tasktra packs remove jira-sync --apply
+```
+
+Use `tasktra guide --json` when a Codex skill or another tool needs the same
+walkthrough as structured data.
+
+### Understand project progress
+
+Use the read-only overview to see goals, progress, remaining budgets, leases,
+and work needing attention, then drill into an individual goal:
+
+```powershell
+tasktra overview
+tasktra overview --goal-id <goal-id>
+tasktra overview --json --limit 20 --offset 0
+```
+
+The default is a terminal summary; `--json` supplies structured data for agents
+and other tools. Pagination applies to goals, or to work units when a goal is
+selected. Recommendations are diagnostic guidance; existing authority checks
+still govern every transition. See the [operations guide](docs/OPERATIONS.md)
+and [orchestration development plan](docs/plans/orchestrator-evolution.md).
+
+Export an offline dashboard to inspect the same project from portfolio attention
+through individual work units:
+
+```powershell
+tasktra cockpit export tasktra-dashboard.html
+```
+
+Open the new HTML file in a browser. It includes a dated snapshot, goal and work
+filters, dependency impact, and copyable read-only diagnostic commands. It works
+without a server or network connection. Existing output files are never replaced;
+use a new filename for each capture. See the
+[dashboard guide](docs/OPERATIONS.md#export-an-offline-operator-dashboard).
+
+Use `tasktra intervention list` to inspect requests left by workers that yielded
+for input, including their current response state and direct downstream impact.
+Responses preserve correction history; a separate authorized requeue binds to
+the exact answer the operator reviewed. See the
+[intervention guide](docs/OPERATIONS.md#operator-intervention-requests) for the
+schema upgrade and request, response, and requeue workflow.
+
+`tasktra doctor` also identifies the running Python interpreter, Tasktra package
+location, version, and supported database schema. In a Tasktra source checkout
+it flags a package loaded from another source checkout, which can happen when an
+editable install points to a different worktree.
+
+Inspect what can run next for a specific worker with:
+
+```powershell
+tasktra work explain <goal-id> --actor <worker-id> --envelope-sha256 <digest>
+```
+
+The JSON result names the next candidate and gives coded reasons for work that
+is waiting. Add `--work-unit-id <id>` to inspect one unit or `--limit 20
+--offset 0` to page through the queue. Selection still considers the whole goal.
+This reads the ledger without claiming work; a later claim rechecks its state
+and authority. See [work selection](docs/OPERATIONS.md#explain-work-selection)
+for the reason codes and budget options.
+
+Coordinate parallel work with prerequisites defined at creation:
+
+```powershell
+tasktra work create <goal-id> "Check integration" --id integration --scope scope.json --depends-on service
+tasktra work dependencies <goal-id>
+```
+
+Repeat `--depends-on` when a unit needs several prerequisites. Each must complete
+before the dependent unit can be claimed. The dependency view shows direct
+relationships and readiness; existing approval and budget checks still govern
+execution. See [work prerequisites](docs/OPERATIONS.md#coordinate-work-prerequisites).
+
+Load a whole work plan with a preview and one atomic application:
+
+```powershell
+tasktra work plan-preview plan.json
+tasktra work plan-apply plan.json --preview-sha256 <digest-from-preview>
+```
+
+The manifest may list prerequisites after their dependents. Preview validates
+the whole graph and reports which definitions are new or unchanged. Conflicts
+prevent all creation; execution still needs its existing approvals. See
+[work-plan loading](docs/OPERATIONS.md#load-a-work-plan-atomically) for the format
+and the fresh-preview retry workflow.
+
+Trace why a unit is waiting and what depends on it:
+
+```powershell
+tasktra work impact <goal-id> <work-unit-id>
+tasktra work impact <goal-id> <work-unit-id> --direction dependents --limit 20
+```
+
+The report traces prerequisite and dependent chains, counts incomplete blockers,
+and shows which direct prerequisite checks would clear if the selected unit
+completed. Counts describe dependencies; `work explain` checks whether work may
+be claimed. See [dependency impact](docs/OPERATIONS.md#trace-dependency-impact).
+
+Map a goal's remaining dependency shape and operator gates with:
+
+```powershell
+tasktra work --root . readiness <goal-id> --limit 20 --offset 0
+```
+
+Readiness is structural only: a ready unit has completed direct prerequisites,
+but still needs `work explain` to evaluate its actor, envelope, approval, scope,
+lease, retry, checkpoint, budget, and capacity gates. The response pages ready
+units, blockers, and graph waves independently with the same requested window.
+Its remaining depth describes incomplete dependency shape, never a schedule or
+ETA. See [goal readiness](docs/OPERATIONS.md#map-goal-readiness) for the
+operator journey and rooted drilldowns.
+
+For a selected, unchanged readiness row, inspect its `goal_id` and
+`work_unit_id` together in one verified, read-only case file:
+
+```powershell
+tasktra work --root . inspect <goal-id> <work-unit-id> --limit 20
+```
+
+The report joins the unit's current structural and operational context with
+bounded attempt and activity history. It is observational: its capture audit
+head identifies what was read, but is not a freshness guard or authority for a
+later command. See [inspect a work unit](docs/OPERATIONS.md#inspect-a-work-unit)
+for keyset history bounds, privacy limits, and the exact guarded follow-ups.
+
+Close intake while current workers finish:
+
+```powershell
+tasktra goal drain <goal-id> --preview
+tasktra goal drain <goal-id> --apply --actor <operator-id>
+```
+
+The goal becomes `draining` and pauses after its final lease finishes or is
+recovered. Existing workers retain their leases; immediate pause remains
+available. See [graceful draining](docs/OPERATIONS.md#drain-a-goal-gracefully)
+for recovery, resume, and runtime compatibility.
+
+`init` is preview-only unless `--apply` is present and never overwrites an existing profile. `bootstrap` preserves an existing profile and initializes a missing local runtime, updating only its schema entry in an existing lock. An existing older runtime requires an explicit upgrade. `compile` refuses to replace project-owned files, requires `--force` for locally edited managed files, and requires `--prune-stale` before deleting obsolete managed files whose hashes still match the prior manifest. Installing the package is what makes `python -m tasktra` available outside the Tasktra checkout; `--root` identifies the project it should operate on.
 
 The local workflow surface includes preview-first validation, Markdown work items, structured handoffs, durable goals, capability reporting, and read-only workspace guidance:
 
@@ -152,6 +319,10 @@ Codex should delegate when the task needs reading, semantic judgment, implementa
 Canonical roles declare a portable tier (`fast`, `balanced`, `deep`, or `exceptional`), a reasoning effort, and a sandbox mode. The built-in Codex mapping is `fast` → `gpt-5.6-luna`, `balanced` → `gpt-5.6-terra`, `deep` → `gpt-5.6-sol`, and `exceptional` → `gpt-6-astra`. Generated `.codex/agents/*.toml` files contain the resolved native settings; edit catalog sources or project configuration, then compile, rather than editing a generated agent.
 
 A consuming project can replace selected tier mappings and set a role-specific model or reasoning effort in `[agents.codex]`. Resolution is role override first, then the project's tier mapping, then the catalog default. A role cannot widen the sandbox declared by the canonical catalog. See the [operations guide](docs/OPERATIONS.md#model-routing-and-delegation-plans) for configuration and the distinction between a local routing plan and actual Codex-host dispatch.
+
+For an approved leased attempt, Tasktra can record a bounded Codex-host execution receipt. `tasktra delegation prepare` resolves the role and creates one launch directive, while the Codex host performs the single actual child dispatch. Record the returned canonical task name with `delegation start`, then send the final UTF-8 result to `delegation finish --result-stdin`; only its SHA-256 digest is retained. An unfinished receipt continues to hold capacity after its parent lease ends, so it cannot be bypassed by recovery or requeue; a live parent and child use one slot, while a detached child uses one until its terminal receipt. `delegation show` and `list` expose receipt projections, including unavailable host usage, without storing the brief, raw result, or lease token.
+
+If a receipt is unresolved, `tasktra delegation unresolved` reports the retained run and its observed state without changing it. Capture one current `collaboration.list_agents` tree, normalize only the exact running or completed shape into a closed version-1 `tasktra.codex-host-tree-observation` file, and use `tasktra delegation reconcile <run-id> --actor <actor> --observation <file>` once. A completed observation additionally receives the exact final-text bytes through `--result-stdin`; Tasktra retains only their digest. Reconciliation records historical observations only: it does not launch, interrupt, finish the parent attempt, requeue work, or authenticate host/model usage.
 
 Enabled pack roles and project-owned `.codex/agents/*.toml` specialists become default choices for matching substantive work. Enabling a pack or adding a valid project agent file is the opt-in; routine use needs no per-task route or explicit agent name. Projects can add [specialist and skill routes](docs/OPERATIONS.md#project-specialist-and-skill-routes) when they need more precise triggers or output boundaries. Compilation preserves custom agent files and their model settings. The host still decides whether it can dispatch the agent under the current runtime and user instructions.
 

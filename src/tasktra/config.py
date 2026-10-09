@@ -152,6 +152,41 @@ def initialize_project(root: Path, *, name: str | None = None) -> Path:
     return destination
 
 
+def update_enabled_packs(root: Path, enabled_packs: tuple[str, ...]) -> Path:
+    """Replace only ``[packs].enabled`` in a validated project profile.
+
+    Pack management must preserve all project-owned configuration outside the
+    one setting it owns.  The caller validates the requested catalog selection
+    before this function writes; this helper validates the existing profile
+    first and uses a same-directory replacement to avoid a partial write.
+    """
+    project = Path(root).resolve()
+    destination = config_path(project)
+    load_project_config(project)
+    if not enabled_packs or any(not isinstance(item, str) or not item for item in enabled_packs):
+        raise ConfigError("packs.enabled must contain at least one non-empty pack id")
+    if len(set(enabled_packs)) != len(enabled_packs):
+        raise ConfigError("packs.enabled cannot contain duplicates")
+    original = destination.read_text(encoding="utf-8")
+    section = re.search(r"(?ms)^\[packs\][ \t]*\r?\n(?P<body>.*?)(?=^\[|\Z)", original)
+    if section is None:
+        raise ConfigError("project profile is missing a [packs] section")
+    replacement = "enabled = " + repr(list(enabled_packs)).replace("'", '"')
+    body = section.group("body")
+    updated_body, changed = re.subn(r"(?m)^[ \t]*enabled[ \t]*=.*$", replacement, body, count=1)
+    if changed != 1:
+        raise ConfigError("[packs] must contain exactly one enabled setting")
+    updated = original[:section.start("body")] + updated_body + original[section.end("body"):]
+    temporary = destination.with_name(destination.name + ".tmp")
+    try:
+        temporary.write_text(updated, encoding="utf-8")
+        os.replace(temporary, destination)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return destination
+
+
 def _table(value: object, name: str) -> dict:
     if not isinstance(value, dict):
         raise ConfigError(f"[{name}] must be a table")

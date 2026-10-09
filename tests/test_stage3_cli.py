@@ -18,6 +18,7 @@ from tasktra.autonomy import AutonomyStore, LOCAL_REVERSIBLE_WRITE
 from tasktra.cli import main
 from tasktra.config import load_project_config
 from tasktra.state import SCHEMA_VERSION, StateError, StateStore, _now
+from tests.runtime_schema_helpers import peel_schema13_interventions
 
 
 def invoke(*arguments: str) -> tuple[int, str, str]:
@@ -150,6 +151,8 @@ class Stage3CliTests(unittest.TestCase):
         connection.row_factory = sqlite3.Row
         try:
             connection.execute("DROP TABLE schedule_resume_idempotency")
+            connection.execute("DROP TABLE IF EXISTS work_unit_dependencies")
+            peel_schema13_interventions(connection, target_version=9)
             connection.execute("PRAGMA user_version=9")
             StateStore._seal_current_state_in_transaction(connection, _now(), existing_only=True)
             connection.commit()
@@ -204,6 +207,8 @@ class Stage3CliTests(unittest.TestCase):
         connection.row_factory = sqlite3.Row
         try:
             connection.execute("DROP TABLE schedule_resume_idempotency")
+            connection.execute("DROP TABLE IF EXISTS work_unit_dependencies")
+            peel_schema13_interventions(connection, target_version=9)
             connection.execute("PRAGMA user_version=9")
             StateStore._seal_current_state_in_transaction(connection, _now(), existing_only=True)
             connection.commit()

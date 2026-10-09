@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tasktra intervention response",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "version", "response_id", "request", "expected_current_response", "responder", "disposition", "answer", "rationale", "evidence_refs"],
+  "properties": {
+    "kind": {"const": "tasktra.intervention-response"},
+    "version": {"const": 1},
+    "response_id": {"$ref": "#/$defs/id"},
+    "request": {"type": "object", "additionalProperties": false, "required": ["request_id", "request_sha256"], "properties": {"request_id": {"$ref": "#/$defs/id"}, "request_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}},
+    "expected_current_response": {"oneOf": [{"type": "null"}, {"type": "object", "additionalProperties": false, "required": ["response_id", "response_sha256"], "properties": {"response_id": {"$ref": "#/$defs/id"}, "response_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}}]},
+    "responder": {"type": "object", "additionalProperties": false, "required": ["kind", "actor_id"], "properties": {"kind": {"enum": ["human", "steward"]}, "actor_id": {"$ref": "#/$defs/id"}}},
+    "disposition": {"enum": ["answered", "declined", "cancelled"]},
+    "answer": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "rationale": {"type": "string", "minLength": 0, "maxLength": 500},
+    "evidence_refs": {"type": "array", "maxItems": 8, "items": {"$ref": "#/$defs/evidence"}}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"},
+    "evidence": {"type": "object", "additionalProperties": false, "required": ["id", "kind", "locator", "summary"], "properties": {"id": {"$ref": "#/$defs/id"}, "kind": {"enum": ["file", "artifact", "command", "url"]}, "locator": {"type": "string", "minLength": 1, "maxLength": 1000}, "summary": {"type": "string", "minLength": 1, "maxLength": 500}}}
+  }
+}

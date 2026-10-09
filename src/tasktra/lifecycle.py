@@ -27,10 +27,13 @@ _SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 _LOCK_PATH = PurePosixPath(".tasktra/tasktra.lock")
 _MANIFEST_PATH = PurePosixPath(".tasktra/generated/manifest.json")
 _DECLARED_MAJOR_COMPATIBILITY_EDGES = frozenset({("0.6.0", "1.0.0")})
-# Runtime 12 extends the sealed verification-policy vocabulary. Historical
-# ledgers have explicit audited steps through 10/11; retain those compound
-# paths as well as the immediate predecessor handled below.
-_DECLARED_RUNTIME_COMPATIBILITY_EDGES = frozenset({(8, 11), (9, 11), (8, 12), (9, 12), (10, 12)})
+# Schema 15 reconciles both published schema 11/12 lineages with local
+# dependency, draining, intervention and Codex receipt migrations. The state
+# migrator verifies the original schema shape and sealed records before writes.
+_DECLARED_RUNTIME_COMPATIBILITY_EDGES = frozenset({
+    (8, 10), (8, 11), (9, 11), (8, 12), (9, 12), (10, 12),
+    (8, 15), (9, 15), (10, 15), (11, 15), (12, 15), (13, 15),
+})
 
 
 class LifecycleError(ValueError):

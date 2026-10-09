@@ -18,6 +18,11 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
 ]
 
+[project.urls]
+Homepage = "https://github.com/mattazz/Tasktra"
+Documentation = "https://github.com/mattazz/Tasktra#first-project-walkthrough"
+Repository = "https://github.com/mattazz/Tasktra"
+
 [project.scripts]
 tasktra = "tasktra.cli:main"
 

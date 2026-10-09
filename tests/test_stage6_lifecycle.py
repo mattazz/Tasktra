@@ -9,7 +9,8 @@ from tasktra.adoption import inspect_existing_instructions
 from tasktra.compiler import compile_catalog, load_catalog
 from tasktra.lifecycle import preview_adoption, preview_upgrade
 from tasktra.manifest import TasktraLock, build_generated_manifest, write_manifest
-from tasktra.state import StateStore
+from tasktra.state import SCHEMA_VERSION, StateStore, _now
+from tests.runtime_schema_helpers import peel_schema13_interventions
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -68,8 +69,8 @@ class LifecyclePlanningTests(unittest.TestCase):
     def test_upgrade_composes_exact_pack_and_immediately_preceding_runtime_previews(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            self._runtime_schema(root, 10)
-            plan = preview_upgrade(root, self.catalog, current_lock=self._lock("0.6.0", runtime=10)).as_dict()
+            self._runtime_schema(root, SCHEMA_VERSION - 1)
+            plan = preview_upgrade(root, self.catalog, current_lock=self._lock("0.6.0", runtime=SCHEMA_VERSION - 1)).as_dict()
             self.assertTrue(plan["ok"])
             self.assertEqual([item["order"] for item in plan["migration_steps"]], [1, 2])
             self.assertEqual([item["kind"] for item in plan["migration_steps"]], ["runtime-schema", "pack"])
@@ -89,7 +90,7 @@ class LifecyclePlanningTests(unittest.TestCase):
             self.assertTrue(any(
                 item.get("component") == "runtime-state"
                 and item.get("lock_schema") == 10
-                and item.get("on_disk_schema") == 12
+                and item.get("on_disk_schema") == SCHEMA_VERSION
                 for item in plan["conflicts"]
             ))
 
@@ -116,12 +117,13 @@ class LifecyclePlanningTests(unittest.TestCase):
             self.assertEqual(StateStore(external).inspect_schema_version(), 7)
             self.assertEqual(list(parent.glob("external.sqlite.v7*.bak")), [])
 
-    def test_upgrade_supports_the_declared_compound_runtime_edge(self):
+    def test_upgrade_preserves_the_declared_historical_compound_runtime_edge(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             StateStore(root / ".tasktra/runtime/tasktra.sqlite").migrate()
             connection = sqlite3.connect(root / ".tasktra/runtime/tasktra.sqlite")
             try:
+                peel_schema13_interventions(connection, target_version=8)
                 connection.execute("PRAGMA user_version = 8")
                 connection.commit()
             finally:
@@ -134,12 +136,63 @@ class LifecyclePlanningTests(unittest.TestCase):
                 pack_contracts=lock.pack_contracts,
             )
 
-            plan = preview_upgrade(root, self.catalog, current_lock=lock).as_dict()
+            plan = preview_upgrade(
+                root, self.catalog, current_lock=lock, runtime_schema_version=10,
+            ).as_dict()
 
             self.assertTrue(plan["ok"], plan["conflicts"])
             edge = next(item for item in plan["compatibility"] if item["component"] == "runtime-schema")
-            self.assertEqual((edge["from"], edge["to"]), (8, 12))
+            self.assertEqual((edge["from"], edge["to"]), (8, 10))
             self.assertIn("compound", edge["reason"])
+
+    def test_upgrade_supports_reviewed_legacy_paths_to_schema_eleven(self):
+        for legacy_schema in (8, 9):
+            with self.subTest(legacy_schema=legacy_schema), TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._runtime_schema(root, legacy_schema)
+
+                plan = preview_upgrade(
+                    root, self.catalog,
+                    current_lock=self._lock("1.0.0", runtime=legacy_schema),
+                    runtime_schema_version=11,
+                ).as_dict()
+
+                self.assertTrue(plan["ok"], plan["conflicts"])
+                edge = next(item for item in plan["compatibility"] if item["component"] == "runtime-schema")
+                self.assertEqual((edge["from"], edge["to"]), (legacy_schema, 11))
+                self.assertIn("compound", edge["reason"])
+
+    def test_upgrade_supports_reviewed_legacy_paths_to_schema_twelve(self):
+        for legacy_schema in (8, 9, 10):
+            with self.subTest(legacy_schema=legacy_schema), TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._runtime_schema(root, legacy_schema)
+
+                plan = preview_upgrade(
+                    root, self.catalog,
+                    current_lock=self._lock("1.0.0", runtime=legacy_schema),
+                    runtime_schema_version=12,
+                ).as_dict()
+
+                self.assertTrue(plan["ok"], plan["conflicts"])
+                edge = next(item for item in plan["compatibility"] if item["component"] == "runtime-schema")
+                self.assertEqual((edge["from"], edge["to"]), (legacy_schema, 12))
+                self.assertIn("compound", edge["reason"])
+
+    def test_upgrade_supports_the_immediately_preceding_schema_twelve_path(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._runtime_schema(root, 11)
+
+            plan = preview_upgrade(
+                root, self.catalog, current_lock=self._lock("1.0.0", runtime=11),
+                runtime_schema_version=12,
+            ).as_dict()
+
+            self.assertTrue(plan["ok"], plan["conflicts"])
+            edge = next(item for item in plan["compatibility"] if item["component"] == "runtime-schema")
+            self.assertEqual((edge["from"], edge["to"]), (11, 12))
+            self.assertEqual(edge["reason"], "immediately preceding schema is supported")
 
     def test_upgrade_fails_visibly_for_unsupported_pack_runtime_and_major_edges(self):
         with TemporaryDirectory() as directory:
@@ -194,8 +247,13 @@ class LifecyclePlanningTests(unittest.TestCase):
         path = root / ".tasktra/runtime/tasktra.sqlite"
         StateStore(path).migrate()
         connection = sqlite3.connect(path)
+        connection.row_factory = sqlite3.Row
         try:
+            if version < 11:
+                connection.execute("DROP TABLE IF EXISTS work_unit_dependencies")
+            peel_schema13_interventions(connection, target_version=version)
             connection.execute(f"PRAGMA user_version = {version}")
+            StateStore._seal_current_state_in_transaction(connection, _now(), existing_only=True)
             connection.commit()
         finally:
             connection.close()
